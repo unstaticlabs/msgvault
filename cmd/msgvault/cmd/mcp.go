@@ -233,6 +233,8 @@ func (a daemonMCPInboxArchiver) ExecuteInboxArchive(
 		Remaining: result.Remaining,
 		FailedIDs: result.FailedIDs,
 		Yielded:   result.Yielded,
+
+		PartialFailure: result.PartialFailure,
 	}, nil
 }
 

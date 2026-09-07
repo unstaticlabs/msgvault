@@ -1456,13 +1456,14 @@ type InboxArchiveExecuteRequest struct {
 
 // InboxArchiveResult reports what the daemon archived.
 type InboxArchiveResult struct {
-	BatchID   string
-	Account   string
-	Archived  int
-	Failed    int
-	Remaining int
-	FailedIDs []string
-	Yielded   bool
+	BatchID        string
+	Account        string
+	Archived       int
+	Failed         int
+	Remaining      int
+	FailedIDs      []string
+	Yielded        bool
+	PartialFailure string
 }
 
 // AuthorizeInboxArchive mints a confirmation token for removing the named
@@ -1523,6 +1524,9 @@ func inboxArchiveResultFromGenerated(
 	out.FailedIDs = resp.FailedIds
 	if resp.Yielded != nil {
 		out.Yielded = *resp.Yielded
+	}
+	if resp.PartialFailure != nil {
+		out.PartialFailure = *resp.PartialFailure
 	}
 	return out
 }

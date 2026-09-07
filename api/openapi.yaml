@@ -5183,6 +5183,8 @@ components:
           items:
             type: string
           type: array
+        partial_failure:
+          type: string
         remaining:
           format: int64
           type: integer

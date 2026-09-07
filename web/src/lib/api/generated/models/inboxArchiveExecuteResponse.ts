@@ -8,6 +8,7 @@ export interface InboxArchiveExecuteResponse {
   batch_id: string;
   failed: number;
   failed_ids?: string[];
+  partial_failure?: string;
   remaining: number;
   yielded?: boolean;
   [key: string]: unknown;

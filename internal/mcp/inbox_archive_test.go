@@ -247,6 +247,33 @@ func TestArchiveFromInboxReportsRemainingWork(t *testing.T) {
 
 // TestArchiveFromInboxTranslatesDaemonRefusals: each of these is a condition
 // the model can act on, so none of them may surface as an internal error.
+// TestArchiveFromInboxReportsPartialFailure: a run that stopped part-way must
+// tell the user what was archived and why it stopped, not read as a clean
+// success or a total failure.
+func TestArchiveFromInboxReportsPartialFailure(t *testing.T) {
+	assert := assert.New(t)
+
+	h := &handlers{
+		engine: inboxArchiveEngine(),
+		inboxArchiver: &fakeInboxArchiver{
+			result: InboxArchiveResult{
+				BatchID: "b", Archived: 3, Failed: 1, Remaining: 6,
+				PartialFailure: "provider refused the batch",
+			},
+		},
+	}
+
+	resp := runTool[inboxArchiveExecuteResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": "from:news", "confirm": true, "confirmation_token": "t"},
+	)
+
+	assert.Equal(3, resp.Archived)
+	assert.Contains(resp.NextStep, "Stopped after archiving 3 messages")
+	assert.Contains(resp.NextStep, "provider refused the batch")
+	assert.Contains(resp.NextStep, "stay archived")
+}
+
 func TestArchiveFromInboxTranslatesDaemonRefusals(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -279,7 +279,9 @@ import (
 // POST /api/v1/inbox-archive/execute, which remove messages from the inbox at
 // the mail provider. Both refuse unless the daemon opts in with
 // [inbox_archive] remote_enabled, so a client that finds the routes present
-// still cannot assume the capability is available.
+// still cannot assume the capability is available. A run that stopped part-way
+// answers 200 with its counts and partial_failure rather than an error, because
+// the messages it archived stay archived.
 const APISchemaVersion = "2.20.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration

@@ -89,14 +89,20 @@ type InboxArchiveExecuteRequest struct {
 }
 
 // InboxArchiveExecuteResponse reports the outcome.
+//
+// PartialFailure carries the reason a run stopped early when some messages had
+// already been archived. Those messages stay archived and their local state is
+// already correct, so reporting only an error would tell the caller less than
+// the truth and invite it to treat the whole batch as untouched.
 type InboxArchiveExecuteResponse struct {
-	BatchID   string   `json:"batch_id"`
-	Account   string   `json:"account"`
-	Archived  int      `json:"archived"`
-	Failed    int      `json:"failed"`
-	Remaining int      `json:"remaining"`
-	FailedIDs []string `json:"failed_ids,omitempty"`
-	Yielded   bool     `json:"yielded,omitempty"`
+	BatchID        string   `json:"batch_id"`
+	Account        string   `json:"account"`
+	Archived       int      `json:"archived"`
+	Failed         int      `json:"failed"`
+	Remaining      int      `json:"remaining"`
+	FailedIDs      []string `json:"failed_ids,omitempty"`
+	Yielded        bool     `json:"yielded,omitempty"`
+	PartialFailure string   `json:"partial_failure,omitempty"`
 }
 
 // inboxArchiveGrant records what one confirmation token permits.
@@ -282,12 +288,12 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 			"this account was added read-only; re-authorize it with "+
 				"'msgvault add-account <email>' to permit mailbox changes")
 		return
-	case err != nil:
+	case err != nil && result.Archived == 0:
 		writeError(w, http.StatusInternalServerError, "archive_failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, InboxArchiveExecuteResponse{
+	response := InboxArchiveExecuteResponse{
 		BatchID:   inboxArchiveBatchID(grant),
 		Account:   grant.Account,
 		Archived:  result.Archived,
@@ -295,7 +301,14 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 		Remaining: result.Remaining,
 		FailedIDs: result.FailedIDs,
 		Yielded:   result.Yielded,
-	})
+	}
+	if err != nil {
+		// Some messages were archived before this went wrong. They stay
+		// archived, so the run is reported with its counts and the reason it
+		// stopped rather than as a failure that touched nothing.
+		response.PartialFailure = err.Error()
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // inboxArchiveBatchID names the run in a way the caller can quote back to the

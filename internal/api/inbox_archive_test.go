@@ -307,7 +307,33 @@ func TestInboxArchivePartialFailureIsReported(t *testing.T) {
 	w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
 		InboxArchiveExecuteRequest{ConfirmationToken: token, SourceMessageIDs: ids})
 
-	require.Equal(http.StatusInternalServerError, w.Code)
+	// A run that archived something before failing is reported with its counts,
+	// not as a failure that touched nothing: those messages stay archived, and
+	// telling the caller otherwise would invite it to treat the batch as
+	// untouched.
+	require.Equalf(http.StatusOK, w.Code, "body: %s", w.Body.String())
+	var resp InboxArchiveExecuteResponse
+	require.NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(1, resp.Archived)
+	assert.Equal(3, resp.Remaining)
+	assert.Equal([]string{"m-2"}, resp.FailedIDs)
+	assert.Contains(resp.PartialFailure, "provider refused the rest")
+}
+
+// TestInboxArchiveTotalFailureIsAnError: when nothing was archived there is no
+// partial result to report, so the caller gets a plain failure.
+func TestInboxArchiveTotalFailureIsAnError(t *testing.T) {
+	assert := assert.New(t)
+
+	runner := &stubInboxArchiveRunner{err: errors.New("provider unreachable")}
+	srv := newInboxArchiveServer(t, true, runner)
+	ids := []string{"m-1"}
+	token := authorizeInboxArchive(t, srv, ids)
+
+	w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
+		InboxArchiveExecuteRequest{ConfirmationToken: token, SourceMessageIDs: ids})
+
+	assert.Equal(http.StatusInternalServerError, w.Code)
 	assert.Equal("archive_failed", decodeErrorEnvelope(t, w).Error)
 }
 

@@ -64,6 +64,9 @@ type InboxArchiveResult struct {
 	Remaining int      `json:"remaining"`
 	FailedIDs []string `json:"failed_ids,omitempty"`
 	Yielded   bool     `json:"yielded,omitempty"`
+	// PartialFailure explains why a run stopped after archiving some of its
+	// messages. Those stay archived; the rest were not attempted.
+	PartialFailure string `json:"partial_failure,omitempty"`
 }
 
 // InboxArchiver removes messages from a mail account's inbox through the
@@ -323,6 +326,11 @@ func (h *handlers) inboxArchiveSample(
 // left inside that list, not beyond it.
 func inboxArchiveNextStep(result InboxArchiveResult, truncated bool) string {
 	switch {
+	case result.PartialFailure != "":
+		return fmt.Sprintf(
+			"Stopped after archiving %d messages: %s. Those stay archived; the rest "+
+				"were not attempted. Report this to the user before trying again.",
+			result.Archived, result.PartialFailure)
 	case result.Remaining > 0 && result.Yielded:
 		return fmt.Sprintf(
 			"Paused after %d messages to let another request through; %d remain. "+

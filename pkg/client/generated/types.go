@@ -4691,13 +4691,14 @@ func (i InboxArchiveExecuteRequest) Validate() error {
 }
 
 type InboxArchiveExecuteResponse struct {
-	Account   string   `json:"account" validate:"required"`
-	Archived  int64    `json:"archived"`
-	BatchID   string   `json:"batch_id" validate:"required"`
-	Failed    int64    `json:"failed"`
-	FailedIds []string `json:"failed_ids,omitempty"`
-	Remaining int64    `json:"remaining"`
-	Yielded   *bool    `json:"yielded,omitempty"`
+	Account        string   `json:"account" validate:"required"`
+	Archived       int64    `json:"archived"`
+	BatchID        string   `json:"batch_id" validate:"required"`
+	Failed         int64    `json:"failed"`
+	FailedIds      []string `json:"failed_ids,omitempty"`
+	PartialFailure *string  `json:"partial_failure,omitempty"`
+	Remaining      int64    `json:"remaining"`
+	Yielded        *bool    `json:"yielded,omitempty"`
 }
 
 func (i InboxArchiveExecuteResponse) Validate() error {
