@@ -3219,11 +3219,14 @@ func (s *Store) GetRandomMessageIDs(sourceID int64, limit int) ([]int64, error) 
 }
 
 // UpsertFTS inserts or updates the FTS index for a message.
-// No-op if FTS is not available.
+// Indexing is a no-op if FTS is not available.
+//
+// A sync-scoped view takes its generation fence before consulting
+// availability, as UpsertMessageBody does: an archive with no FTS index must
+// not be the one configuration where a superseded importer is told its write
+// landed. Skipping the index write is a decision about what to index, not
+// about whether this generation may still write at all.
 func (s *Store) UpsertFTS(messageID int64, subject, bodyText, fromAddr, toAddrs, ccAddrs string) error {
-	if !s.fts5Available {
-		return nil
-	}
 	doc := FTSDoc{
 		MessageID: messageID,
 		Subject:   subject,
@@ -3237,8 +3240,14 @@ func (s *Store) UpsertFTS(messageID int64, subject, bodyText, fromAddr, toAddrs,
 			if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
 				return err
 			}
+			if !s.fts5Available {
+				return nil
+			}
 			return s.dialect.FTSUpsert(tx, doc)
 		})
+	}
+	if !s.fts5Available {
+		return nil
 	}
 	return s.dialect.FTSUpsert(s.db, doc)
 }
