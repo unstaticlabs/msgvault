@@ -80,7 +80,7 @@
   <Login {session} />
 {:else if shellMounted}
   <AppShell client={session.client} {appearanceDefaults} {searchModeDefault}>
-    {#snippet settings(cardDAVRequest, onCardDAVRequestConsumed)}
+    {#snippet settings(cardDAVRequest, onCardDAVRequestConsumed, navigationTarget)}
       <SettingsWorkspace
         client={session.client}
         plainHTTPWarning={session.status?.plain_http_warning ?? false}
@@ -89,6 +89,7 @@
         onSignOut={() => void session.logout()}
         {cardDAVRequest}
         {onCardDAVRequestConsumed}
+        {navigationTarget}
       />
     {/snippet}
   </AppShell>
