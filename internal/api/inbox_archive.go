@@ -99,40 +99,62 @@ type InboxArchiveExecuteResponse struct {
 	Yielded   bool     `json:"yielded,omitempty"`
 }
 
-// inboxArchiveGrant is the sealed token payload.
+// inboxArchiveGrant records what one confirmation token permits.
 type inboxArchiveGrant struct {
-	SourceID      int64  `json:"source_id"`
-	Account       string `json:"account"`
-	SelectionHash string `json:"selection_hash"`
-	MessageCount  int    `json:"message_count"`
-	IssuedAt      int64  `json:"issued_at"`
-	ExpiresAt     int64  `json:"expires_at"`
-	Nonce         string `json:"nonce"`
+	SourceID      int64
+	Account       string
+	SelectionHash string
+	MessageCount  int
+	IssuedAt      time.Time
+	ExpiresAt     time.Time
 }
 
-// spentInboxArchiveTokens remembers redeemed tokens for as long as an unspent
-// one could still be valid, so a plan cannot be confirmed twice.
-type spentInboxArchiveTokens struct {
-	mu    sync.Mutex
-	spent map[string]time.Time
+// inboxArchiveGrants holds outstanding confirmation tokens.
+//
+// A token only has to survive the gap between showing a user a plan and their
+// answer, so it lives in memory alongside the explore preflight snapshots
+// rather than in the archive. A daemon restart invalidates outstanding plans,
+// which is the safe direction: the user is asked to look at a fresh plan rather
+// than having an old approval honoured against a selection that may have moved.
+type inboxArchiveGrants struct {
+	mu     sync.Mutex
+	grants map[string]inboxArchiveGrant
 }
 
-func (s *spentInboxArchiveTokens) claim(token string, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.spent == nil {
-		s.spent = make(map[string]time.Time)
+// issue mints a token for a grant, pruning anything already expired.
+func (g *inboxArchiveGrants) issue(grant inboxArchiveGrant) (string, error) {
+	token, err := newInboxArchiveToken()
+	if err != nil {
+		return "", err
 	}
-	for candidate, expiry := range s.spent {
-		if now.After(expiry) {
-			delete(s.spent, candidate)
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.grants == nil {
+		g.grants = make(map[string]inboxArchiveGrant)
+	}
+	for candidate, existing := range g.grants {
+		if grant.IssuedAt.After(existing.ExpiresAt) {
+			delete(g.grants, candidate)
 		}
 	}
-	if _, used := s.spent[token]; used {
-		return false
+	g.grants[token] = grant
+	return token, nil
+}
+
+// claim spends a token, so a plan cannot be confirmed twice.
+func (g *inboxArchiveGrants) claim(token string, now time.Time) (inboxArchiveGrant, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	grant, ok := g.grants[token]
+	if !ok {
+		return inboxArchiveGrant{}, false
 	}
-	s.spent[token] = now.Add(inboxArchiveTokenTTL)
-	return true
+	delete(g.grants, token)
+	if now.After(grant.ExpiresAt) {
+		return inboxArchiveGrant{}, false
+	}
+	return grant, true
 }
 
 // inboxArchiveSelectionHash binds a token to one exact set of messages. The
@@ -152,19 +174,19 @@ func inboxArchiveSelectionHash(sourceID int64, sourceMessageIDs []string) string
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
-// newInboxArchiveNonce makes each token distinct even when two plans cover the
-// same messages, so spending one does not invalidate the other.
-func newInboxArchiveNonce() (string, error) {
-	raw := make([]byte, 12)
+// newInboxArchiveToken mints an unguessable token, distinct even when two plans
+// cover the same messages so that spending one does not invalidate the other.
+func newInboxArchiveToken() (string, error) {
+	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("generate nonce: %w", err)
+		return "", fmt.Errorf("generate confirmation token: %w", err)
 	}
 	return hex.EncodeToString(raw), nil
 }
 
 func (s *Server) handleInboxArchiveAuthorize(w http.ResponseWriter, r *http.Request) {
-	_, codec, archiveUID, ok := s.inboxArchiveContext(w, r)
-	if !ok {
+	if _, ok := s.inboxArchiveRunner(); !ok {
+		writeInboxArchiveUnavailable(w)
 		return
 	}
 
@@ -182,20 +204,13 @@ func (s *Server) handleInboxArchiveAuthorize(w http.ResponseWriter, r *http.Requ
 
 	now := time.Now().UTC()
 	expiry := now.Add(inboxArchiveTokenTTL)
-	nonce, err := newInboxArchiveNonce()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "token_error", "could not mint a confirmation token")
-		return
-	}
-
-	token, err := codec.seal(r.Context(), archiveUID, inboxArchiveGrant{
+	token, err := s.inboxArchiveGrants.issue(inboxArchiveGrant{
 		SourceID:      req.SourceID,
 		Account:       req.Account,
 		SelectionHash: inboxArchiveSelectionHash(req.SourceID, req.SourceMessageIDs),
 		MessageCount:  len(req.SourceMessageIDs),
-		IssuedAt:      now.Unix(),
-		ExpiresAt:     expiry.Unix(),
-		Nonce:         nonce,
+		IssuedAt:      now,
+		ExpiresAt:     expiry,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "token_error", "could not mint a confirmation token")
@@ -210,8 +225,9 @@ func (s *Server) handleInboxArchiveAuthorize(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Request) {
-	runner, codec, archiveUID, ok := s.inboxArchiveContext(w, r)
+	runner, ok := s.inboxArchiveRunner()
 	if !ok {
+		writeInboxArchiveUnavailable(w)
 		return
 	}
 
@@ -229,20 +245,12 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	sealed, err := codec.open(r.Context(), archiveUID, req.ConfirmationToken)
-	if err != nil {
-		writeInboxArchiveTokenInvalid(w, "the confirmation token could not be verified")
-		return
-	}
-	var grant inboxArchiveGrant
-	if err := json.Unmarshal(sealed, &grant); err != nil {
-		writeInboxArchiveTokenInvalid(w, "the confirmation token could not be read")
-		return
-	}
-
-	now := time.Now().UTC()
-	if now.Unix() > grant.ExpiresAt {
-		writeInboxArchiveTokenInvalid(w, "the confirmation token has expired")
+	// Claiming spends the token whatever happens next, so a plan cannot be
+	// confirmed twice even if the selection turns out not to match.
+	grant, ok := s.inboxArchiveGrants.claim(req.ConfirmationToken, time.Now().UTC())
+	if !ok {
+		writeInboxArchiveTokenInvalid(w,
+			"the confirmation token is unknown, expired, or already used")
 		return
 	}
 	if !validateInboxArchiveSelection(w, grant.SourceID, req.SourceMessageIDs) {
@@ -251,10 +259,6 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 	if inboxArchiveSelectionHash(grant.SourceID, req.SourceMessageIDs) != grant.SelectionHash {
 		writeInboxArchiveTokenInvalid(w,
 			"the confirmation token was issued for a different set of messages")
-		return
-	}
-	if !s.spentInboxArchiveTokens.claim(req.ConfirmationToken, now) {
-		writeInboxArchiveTokenInvalid(w, "the confirmation token has already been used")
 		return
 	}
 
@@ -298,29 +302,7 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 // user without exposing the sealed token.
 func inboxArchiveBatchID(grant inboxArchiveGrant) string {
 	return fmt.Sprintf("inbox-archive-%d-%s",
-		grant.IssuedAt, grant.SelectionHash[:12])
-}
-
-func (s *Server) inboxArchiveContext(
-	w http.ResponseWriter, r *http.Request,
-) (InboxArchiveRunner, operationTokenCodec, string, bool) {
-	runner, ok := s.inboxArchiveRunner()
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "mailbox_writes_unavailable",
-			"this daemon cannot archive messages at the mail provider")
-		return nil, operationTokenCodec{}, "", false
-	}
-	keyring, ok := s.store.(operationTokenKeyring)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "token_unavailable",
-			"confirmation tokens are unavailable on this archive")
-		return nil, operationTokenCodec{}, "", false
-	}
-	archiveUID, ok := s.operationHistoryArchiveUID(w, r)
-	if !ok {
-		return nil, operationTokenCodec{}, "", false
-	}
-	return runner, newOperationTokenCodec(keyring), archiveUID, true
+		grant.IssuedAt.Unix(), grant.SelectionHash[:12])
 }
 
 // inboxArchiveEnabled reports the daemon's own opt-in. It is deliberately
@@ -378,6 +360,11 @@ func validateInboxArchiveSelection(w http.ResponseWriter, sourceID int64, ids []
 		}
 	}
 	return true
+}
+
+func writeInboxArchiveUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, "mailbox_writes_unavailable",
+		"this daemon cannot archive messages at the mail provider")
 }
 
 func writeInboxArchiveDisabled(w http.ResponseWriter) {

@@ -271,7 +271,16 @@ import (
 // 2.17.0 adds the calling principal to the session bootstrap, the
 // login_methods list, GET /api/v1/me, and 403 forbidden for callers whose
 // role does not cover an operation.
-const APISchemaVersion = "2.17.0"
+// 2.18.0 and 2.19.0 are deliberately skipped here: upstream already published
+// them for the deletion-subset counts and the operations workspace. Reusing
+// either number would make the version mean two different things depending on
+// which daemon a client reached.
+// 2.20.0 adds POST /api/v1/inbox-archive/authorize and
+// POST /api/v1/inbox-archive/execute, which remove messages from the inbox at
+// the mail provider. Both refuse unless the daemon opts in with
+// [inbox_archive] remote_enabled, so a client that finds the routes present
+// still cannot assume the capability is available.
+const APISchemaVersion = "2.20.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

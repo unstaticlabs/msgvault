@@ -274,7 +274,7 @@ type Server struct {
 	idleTracker               *IdleTracker
 	operationGate             OperationGate
 	inboxArchive              InboxArchiveRunner
-	spentInboxArchiveTokens   spentInboxArchiveTokens
+	inboxArchiveGrants        inboxArchiveGrants
 	operationHistoryReader    operations.HistoryReader
 	importContext             context.Context
 	cancelImports             context.CancelFunc
