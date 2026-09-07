@@ -280,7 +280,6 @@ import (
 // status identifiers. It adds GET /api/v1/documents/status/current to resolve
 // status for the selected durable document profile. These Operations response
 // changes remain within the unreleased 2.x contract.
-// 2.20.0 is reserved for the inbox-archive routes.
 // 2.21.0 adds the calling principal to the session bootstrap, the
 // login_methods list, GET /api/v1/me, and 403 forbidden for callers whose
 // role does not cover an operation. This shipped in this repository as 2.17.0
@@ -288,7 +287,18 @@ import (
 // number for source scoping; a daemon reporting 2.17.0 may therefore be either.
 // Clients that need to distinguish them should treat >= 2.21.0 as the reliable
 // signal for the principal fields.
-const APISchemaVersion = "2.21.0"
+// 2.22.0 adds POST /api/v1/inbox-archive/authorize and
+// POST /api/v1/inbox-archive/execute, which remove messages from the inbox at
+// the mail provider. Both refuse unless the daemon opts in with
+// [inbox_archive] remote_enabled or MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED, so a
+// client that finds the routes present still cannot assume the capability is
+// available. A run that stopped part-way answers 200 with its counts and
+// partial_failure rather than an error, because the messages it archived stay
+// archived. The routes were briefly reserved at 2.20.0 while the fork was
+// catching up with upstream; they take a number above the auth work instead,
+// because 2.21.0 shipped without them and >= 2.20.0 would otherwise claim them
+// on a daemon that has none.
+const APISchemaVersion = "2.22.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

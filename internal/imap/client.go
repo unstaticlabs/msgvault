@@ -76,6 +76,17 @@ const (
 // that do not advertise \Trash via special-use attributes.
 const Trash = "Trash"
 
+// Archive is the canonical fallback name for the archive mailbox on servers
+// that do not advertise \Archive via special-use attributes.
+const Archive = "Archive"
+
+// ErrNoArchiveMailbox reports that this account has nowhere to archive to:
+// either the server advertises no \Archive and has no conventionally named
+// archive folder, the only candidate is excluded by the folder filter, or the
+// account uses Gmail's IMAP layout, where the inbox copy is not addressable and
+// the native Gmail API must be used instead.
+var ErrNoArchiveMailbox = errors.New("account has no usable archive mailbox")
+
 // Client implements gmail.API for IMAP servers.
 type Client struct {
 	config      *Config
@@ -92,6 +103,7 @@ type Client struct {
 	messageListCache      []gmailapi.MessageID // full message ID list, built once per session
 	trashMailbox          string               // cached trash mailbox name
 	junkMailbox           string               // cached junk/spam mailbox name
+	archiveMailbox        string               // mailbox with \\Archive attribute (empty if not detected)
 	allMailFolder         string               // mailbox with \All attribute (empty if not detected)
 	msgIDToLabels         map[string][]string  // RFC822 Message-ID → mailbox memberships
 	seenRFC822IDs         map[string]bool      // dedup overlapping mailbox copies
@@ -581,6 +593,9 @@ func (c *Client) listMailboxesLocked() ([]string, error) {
 		if c.junkMailbox == "" && hasAttr(item.Attrs, imap.MailboxAttrJunk) {
 			c.junkMailbox = item.Mailbox
 		}
+		if c.archiveMailbox == "" && hasAttr(item.Attrs, imap.MailboxAttrArchive) {
+			c.archiveMailbox = item.Mailbox
+		}
 	}
 
 	// Fallback: look for common junk/spam folder names
@@ -616,8 +631,86 @@ func (c *Client) listMailboxesLocked() ([]string, error) {
 		}
 	}
 
+	// Fallback: look for common archive folder names. Gmail is deliberately
+	// excluded here -- it advertises no \\Archive, and its archive idiom is a
+	// label removal that IMAP cannot address (see IsGmailAllMailLayout).
+	if c.archiveMailbox == "" {
+		for _, candidate := range []string{Archive, "Archived", "Archives"} {
+			for _, mb := range names {
+				if strings.EqualFold(mb, candidate) {
+					c.archiveMailbox = mb
+					break
+				}
+			}
+			if c.archiveMailbox != "" {
+				break
+			}
+		}
+	}
+
 	c.mailboxCache = names
 	return names, nil
+}
+
+// InboxArchiveTarget reports the mailbox that inbox archiving should move
+// messages into, running mailbox discovery first if it has not happened yet.
+//
+// It returns a nil mailbox name and a false ok when this account cannot be
+// archived over IMAP:
+//
+//   - Gmail's IMAP layout advertises no \Archive, and its archive idiom is
+//     removing the \Inbox label. Enumeration for such accounts covers All Mail,
+//     Trash and Junk but never INBOX (see buildMessageListCache), so no stored
+//     source_message_id addresses the inbox copy and there is nothing to MOVE.
+//     Those accounts must be archived through the native Gmail API instead.
+//   - A server that advertises no \Archive and has no conventionally named
+//     archive folder has nowhere to put the message.
+func (c *Client) InboxArchiveTarget(ctx context.Context) (mailbox string, ok bool, err error) {
+	convErr := c.withConn(ctx, func(*imapclient.Client) error {
+		if c.archiveMailbox == "" || c.allMailFolder == "" {
+			if _, listErr := c.listMailboxesLocked(); listErr != nil {
+				return fmt.Errorf("discover archive mailbox: %w", listErr)
+			}
+		}
+		if c.isGmailAllMailLayoutLocked() {
+			return nil
+		}
+		if c.archiveMailbox == "" {
+			return nil
+		}
+		// A destination outside the effective folder filter would take the
+		// message out of every future sync's view, which reads as the message
+		// having disappeared. Refuse rather than lose sight of it.
+		if len(filterMailboxes(
+			[]string{c.archiveMailbox},
+			c.effectiveFolderIncludeLocked(),
+			c.folderFilterExclude,
+		)) == 0 {
+			return nil
+		}
+		mailbox = c.archiveMailbox
+		ok = true
+		return nil
+	})
+	if convErr != nil {
+		return "", false, convErr
+	}
+	return mailbox, ok, nil
+}
+
+// IsGmailAllMailLayout reports whether this account is served by Gmail's IMAP
+// layout. Discovery must already have run; callers that need it performed
+// on demand should use InboxArchiveTarget.
+func (c *Client) IsGmailAllMailLayout() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.isGmailAllMailLayoutLocked()
+}
+
+// isGmailAllMailLayoutLocked mirrors the branch buildMessageListCache uses to
+// decide that All Mail is a superset of every other mailbox. Caller must hold mu.
+func (c *Client) isGmailAllMailLayoutLocked() bool {
+	return strings.HasPrefix(c.allMailFolder, "[Gmail]/")
 }
 
 // clearMailboxDiscoveryLocked discards connection-derived mailbox and
@@ -629,6 +722,7 @@ func (c *Client) clearMailboxDiscoveryLocked() {
 	c.trashMailbox = ""
 	c.junkMailbox = ""
 	c.allMailFolder = ""
+	c.archiveMailbox = ""
 }
 
 // enumerateMailboxSearchCriteria always constrains the search with an
@@ -1833,6 +1927,65 @@ func (c *Client) DeleteMessage(ctx context.Context, messageID string) error {
 		}
 		return nil
 	})
+}
+
+// ArchiveFromInbox moves messages out of the inbox into the account's archive
+// mailbox, one UID MOVE at a time -- IMAP has no batch form, and MOVE is
+// per-mailbox anyway.
+//
+// It deliberately does not record the destination UID, even though MOVE returns
+// COPYUID on a UIDPLUS server. A message's source_message_id is "mailbox|uid",
+// so the move changes its key, and re-keying is owned by sync: ingestMessage
+// matches the message by RFC822 Message-ID and re-keys it under a
+// compare-and-swap. Writing an inferred key here would race that swap and could
+// point the row at the wrong message. Callers must therefore ensure the
+// messages they archive have an RFC822 Message-ID, or sync cannot rejoin them
+// and the next full sync inserts a duplicate row.
+func (c *Client) ArchiveFromInbox(
+	ctx context.Context, messageIDs []string,
+) (map[string]error, error) {
+	failures := make(map[string]error)
+	if len(messageIDs) == 0 {
+		return failures, nil
+	}
+
+	destination, ok, err := c.InboxArchiveTarget(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrNoArchiveMailbox
+	}
+
+	convErr := c.withConn(ctx, func(conn *imapclient.Client) error {
+		for _, messageID := range messageIDs {
+			mailbox, uid, parseErr := parseCompositeID(messageID)
+			if parseErr != nil {
+				failures[messageID] = parseErr
+				continue
+			}
+			// Already where we would put it: the end state is what matters, so
+			// this counts as archived rather than as a failure.
+			if mailbox == destination {
+				continue
+			}
+			if selectErr := c.selectMailbox(mailbox); selectErr != nil {
+				failures[messageID] = selectErr
+				continue
+			}
+			var uidSet imap.UIDSet
+			uidSet.AddNum(uid)
+			if _, moveErr := conn.Move(uidSet, destination).Wait(); moveErr != nil {
+				failures[messageID] = fmt.Errorf("MOVE to %q: %w", destination, moveErr)
+				continue
+			}
+		}
+		return nil
+	})
+	if convErr != nil {
+		return nil, convErr
+	}
+	return failures, nil
 }
 
 // BatchDeleteMessages always returns an error to signal that IMAP

@@ -26,6 +26,8 @@ import (
 	"go.kenn.io/msgvault/internal/discord"
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/granola"
+	imaplib "go.kenn.io/msgvault/internal/imap"
+	"go.kenn.io/msgvault/internal/inboxarchive"
 	"go.kenn.io/msgvault/internal/meetingimport"
 	"go.kenn.io/msgvault/internal/microsoft"
 	"go.kenn.io/msgvault/internal/notionmeetings"
@@ -601,6 +603,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		analyticsDir:           cfg.AnalyticsDir(),
 		personEnrichmentConfig: cfg.People.Enrichment,
 		lookupEnv:              personEnrichmentEnvironmentLookup(cfg),
+		operationGate:          operationGate,
 	}
 	schedAdapter := &schedulerAdapter{scheduler: sched}
 
@@ -1230,6 +1233,9 @@ type storeAPIAdapter struct {
 	analyticsDir           string
 	personEnrichmentConfig personenrichment.Config
 	lookupEnv              personenrichment.CredentialLookup
+	// operationGate is consulted between inbox-archive chunks so a long run
+	// steps aside for a waiting API request instead of holding the gate.
+	operationGate api.OperationGate
 }
 
 var _ api.MessageStore = (*storeAPIAdapter)(nil)
@@ -3575,4 +3581,190 @@ func scheduledTeamsImportOptions(email string) teams.ImportOptions {
 		MediaPolicy:     cfg.Teams.MediaPolicy(email),
 		IncludeChannels: true,
 	}
+}
+
+// inboxArchiveChunkSize is how many messages one provider call carries. Gmail's
+// batchModify takes a thousand at a time; a provider that has to act on each
+// message separately gets a smaller chunk so a run reaches its yield check
+// often enough to let a waiting request through.
+func inboxArchiveChunkSize(sourceType string) int {
+	if sourceType == sourceTypeIMAP {
+		return 50
+	}
+	return inboxarchive.DefaultChunkSize
+}
+
+// RunInboxArchive removes messages from one source's inbox at the provider.
+//
+// It lives here rather than in internal/api because building an authenticated
+// provider client needs the OAuth managers and config that package deliberately
+// does not import; the API layer reaches it through the InboxArchiveRunner seam,
+// the same way it reaches CLI sync and deletion staging.
+func (a *storeAPIAdapter) RunInboxArchive(
+	ctx context.Context, req api.InboxArchiveRunRequest,
+) (api.InboxArchiveRunResult, error) {
+	var empty api.InboxArchiveRunResult
+
+	src, err := a.store.GetSourceByIDContext(ctx, req.SourceID)
+	if err != nil {
+		return empty, fmt.Errorf("resolve source %d: %w", req.SourceID, err)
+	}
+	if src == nil {
+		return empty, fmt.Errorf("source %d not found", req.SourceID)
+	}
+
+	var imapOpts []imaplib.Option
+	if src.SourceType == sourceTypeIMAP {
+		imapOpts = imapFolderStateOptions(a.store, src, false)
+	}
+	client, err := buildAPIClient(ctx, src, oauthManagerCache(), nil, imapOpts...)
+	if err != nil {
+		return empty, fmt.Errorf("build %s client: %w", src.SourceType, err)
+	}
+	defer func() { _ = client.Close() }()
+
+	archiver, err := inboxarchive.For(client, a.store)
+	if errors.Is(err, inboxarchive.ErrNotSupported) {
+		return empty, api.ErrInboxArchiveUnsupportedSource
+	}
+	if err != nil {
+		return empty, err
+	}
+
+	if err := checkInboxArchiveScope(src); err != nil {
+		return empty, err
+	}
+
+	archivable, excluded, err := a.archivableSourceMessageIDs(src, req.SourceMessageIDs)
+	if err != nil {
+		return empty, err
+	}
+	if len(archivable) == 0 {
+		return api.InboxArchiveRunResult{
+			Failed:    len(excluded),
+			FailedIDs: excluded,
+		}, nil
+	}
+
+	result, err := archiver.
+		WithLogger(logger).
+		WithChunkSize(inboxArchiveChunkSize(src.SourceType)).
+		WithYieldCheck(a.inboxArchiveYieldCheck()).
+		Archive(ctx, src, archivable)
+
+	out := api.InboxArchiveRunResult{
+		Archived:  result.Archived,
+		Failed:    result.Failed + len(excluded),
+		Remaining: result.Remaining,
+		FailedIDs: append(append([]string(nil), result.FailedIDs...), excluded...),
+		Yielded:   result.Yielded,
+	}
+	if err != nil {
+		// The messages already archived stay archived, so the partial counts
+		// are reported rather than discarded with the error.
+		return out, err
+	}
+	return out, nil
+}
+
+// checkInboxArchiveScope refuses an account whose OAuth grant was narrowed to
+// read-only, before any message is touched.
+//
+// Gmail's standard grant already includes gmail.modify, so this passes for
+// ordinary accounts and needs no re-consent. Only `add-account --readonly`
+// produces a grant that cannot archive, and finding that out from a 403
+// half-way through a batch would leave the user with a partial result and an
+// opaque provider error.
+func checkInboxArchiveScope(src *store.Source) error {
+	scopes, known := recordedGmailGrantScopes(src)
+	if !known || grantCoversInboxArchive(scopes) {
+		return nil
+	}
+	return api.ErrInboxArchiveScopeRequired
+}
+
+// recordedGmailGrantScopes returns the scopes msgvault recorded for a Gmail
+// account, and whether they are known at all.
+//
+// Not knowing is the normal answer for several cases -- a non-Gmail source, a
+// service account whose scopes are requested per token source rather than
+// stored, or a token issued before scope metadata was recorded -- and in every
+// one of them the provider is the right authority. Only a recorded grant that
+// demonstrably lacks the modify scope is worth refusing up front.
+func recordedGmailGrantScopes(src *store.Source) ([]string, bool) {
+	if src.SourceType != sourceTypeGmail && src.SourceType != "" {
+		return nil, false
+	}
+	appName := sourceOAuthApp(src)
+	if cfg.OAuth.ServiceAccountKeyFor(appName) != "" {
+		return nil, false
+	}
+	clientSecrets, secretsErr := cfg.OAuth.ClientSecretsFor(appName)
+	if secretsErr != nil {
+		logger.Debug("inbox archive scope check skipped: no client secrets",
+			"source", src.Identifier, "error", secretsErr)
+		return nil, false
+	}
+	oauthMgr, mgrErr := oauth.NewManagerWithScopes(
+		clientSecrets, cfg.TokensDir(), logger, oauth.Scopes)
+	if mgrErr != nil {
+		logger.Debug("inbox archive scope check skipped: oauth manager unavailable",
+			"source", src.Identifier, "error", mgrErr)
+		return nil, false
+	}
+	if !oauthMgr.HasScopeMetadata(src.Identifier) {
+		return nil, false
+	}
+	return oauthMgr.GrantedScopes(src.Identifier), true
+}
+
+// archivableSourceMessageIDs splits a selection into the messages that can be
+// archived and those that must be left alone.
+//
+// Only IMAP has an exclusion. There, a message's source_message_id encodes its
+// mailbox, so moving it changes its key and sync rejoins it to its existing row
+// by RFC822 Message-ID. A message with no Message-ID header has nothing to
+// rejoin on, and the next full sync would file it as a second copy -- so it is
+// reported as failed rather than duplicated. Gmail message IDs are stable
+// across a label change, so nothing is excluded there.
+func (a *storeAPIAdapter) archivableSourceMessageIDs(
+	src *store.Source, sourceMessageIDs []string,
+) (archivable, excluded []string, err error) {
+	if src.SourceType != sourceTypeIMAP {
+		return sourceMessageIDs, nil, nil
+	}
+
+	excluded, err = a.store.SourceMessageIDsMissingRFC822ID(src.ID, sourceMessageIDs)
+	if err != nil {
+		return nil, nil, fmt.Errorf("check archivable messages: %w", err)
+	}
+	if len(excluded) == 0 {
+		return sourceMessageIDs, nil, nil
+	}
+
+	skip := make(map[string]bool, len(excluded))
+	for _, id := range excluded {
+		skip[id] = true
+	}
+	archivable = make([]string, 0, len(sourceMessageIDs)-len(excluded))
+	for _, id := range sourceMessageIDs {
+		if !skip[id] {
+			archivable = append(archivable, id)
+		}
+	}
+	logger.Warn("skipping IMAP messages without an RFC822 Message-ID",
+		"source", src.Identifier, "skipped", len(excluded))
+	return archivable, excluded, nil
+}
+
+// inboxArchiveYieldCheck lets a long run step aside for a waiting API request
+// instead of holding the serial operation gate to the end. Stopping early is
+// safe: an archived message leaves the caller's inbox-scoped selection, so the
+// next call continues rather than repeating work.
+func (a *storeAPIAdapter) inboxArchiveYieldCheck() func() bool {
+	gate, ok := a.operationGate.(api.LabeledOperationGate)
+	if !ok {
+		return nil
+	}
+	return gate.HasRequestWaiters
 }

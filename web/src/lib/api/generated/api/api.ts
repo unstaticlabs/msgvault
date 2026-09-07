@@ -170,6 +170,10 @@ import type {
   IdentityMatchRejectResponse,
   ImportJobRequest,
   ImportJobResponse,
+  InboxArchiveAuthorizeRequest,
+  InboxArchiveAuthorizeResponse,
+  InboxArchiveExecuteRequest,
+  InboxArchiveExecuteResponse,
   ListAttributeDefinitionsParams,
   ListCardDAVRunsParams,
   ListChangedMessagesParams,
@@ -1602,6 +1606,40 @@ export const getImportJob = (
     {
       url: `/api/v1/imports/${encodeURIComponent(String(jobId))}`,
       method: "GET",
+    },
+    options,
+  );
+};
+/**
+ * @summary Mint a confirmation token for removing messages from the inbox
+ */
+export const authorizeInboxArchive = (
+  inboxArchiveAuthorizeRequest: InboxArchiveAuthorizeRequest,
+  options?: SecondParameter<typeof orvalFetch<InboxArchiveAuthorizeResponse>>,
+) => {
+  return orvalFetch<InboxArchiveAuthorizeResponse>(
+    {
+      url: `/api/v1/inbox-archive/authorize`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: inboxArchiveAuthorizeRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Remove confirmed messages from the inbox at the mail provider
+ */
+export const executeInboxArchive = (
+  inboxArchiveExecuteRequest: InboxArchiveExecuteRequest,
+  options?: SecondParameter<typeof orvalFetch<InboxArchiveExecuteResponse>>,
+) => {
+  return orvalFetch<InboxArchiveExecuteResponse>(
+    {
+      url: `/api/v1/inbox-archive/execute`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: inboxArchiveExecuteRequest,
     },
     options,
   );
