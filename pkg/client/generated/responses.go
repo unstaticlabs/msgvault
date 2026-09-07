@@ -1367,6 +1367,14 @@ type GetImportJobErrorResponse = ErrorResponse
 
 type GetImportJobErrorResponseJSON = ErrorResponse
 
+type AuthorizeInboxArchiveResponse = InboxArchiveAuthorizeResponse
+
+type AuthorizeInboxArchiveErrorResponse = ErrorResponse
+
+type ExecuteInboxArchiveResponse = InboxArchiveExecuteResponse
+
+type ExecuteInboxArchiveErrorResponse = ErrorResponse
+
 type SearchIntegrationTasksResponse = TaskSearchResponse
 
 type SearchIntegrationTasksErrorResponse = ErrorResponse
@@ -3885,6 +3893,20 @@ type GetImportJobResp struct {
 	JSON200      *GetImportJobResponse
 	JSON401      *GetImportJobErrorResponse
 	JSON404      *GetImportJobErrorResponseJSON
+}
+
+type AuthorizeInboxArchiveResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *AuthorizeInboxArchiveResponse
+}
+
+type ExecuteInboxArchiveResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ExecuteInboxArchiveResponse
 }
 
 type SearchIntegrationTasksResp struct {
