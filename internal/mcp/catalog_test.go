@@ -180,10 +180,7 @@ func TestMCPModernDiscovery(t *testing.T) {
 	checks.Contains(instructions, "Only Notes with user provenance are user-authored")
 	meta, ok := response.Result["_meta"].(map[string]any)
 	must.True(ok)
-	checks.Equal(map[string]any{
-		"name":    "msgvault",
-		"version": "1.0.0",
-	}, meta["io.modelcontextprotocol/serverInfo"])
+	checks.Equal(expectedServerInfo(t), meta["io.modelcontextprotocol/serverInfo"])
 }
 
 func TestCatalogSchemaPointersStableAcrossServerConstruction(t *testing.T) {
@@ -898,7 +895,7 @@ func TestStructuredToolResult(t *testing.T) {
 	checks.Equal(structured, textJSON)
 	meta, ok := response["_meta"].(map[string]any)
 	must.True(ok)
-	checks.Equal(map[string]any{"name": "msgvault", "version": "1.0.0"}, meta["io.modelcontextprotocol/serverInfo"])
+	checks.Equal(expectedServerInfo(t), meta["io.modelcontextprotocol/serverInfo"])
 	statsResult, ok := structured["stats"].(map[string]any)
 	must.True(ok)
 	checks.InDelta(12, statsResult["MessageCount"], 0)
