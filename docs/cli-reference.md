@@ -1238,6 +1238,7 @@ msgvault export-messages \
   --end <RFC3339> \
   [--message-type <type>] \
   [--source <type:identifier>] \
+  [--person-id <id>] \
   [--format jsonl]
 ```
 
@@ -1247,7 +1248,13 @@ msgvault export-messages \
 | `--end` | required | Exclusive RFC3339 upper bound |
 | `--message-type` | all | Exact message type to include; repeatable |
 | `--source` | all | Exact typed source selector; repeatable |
+| `--person-id` | all | Durable person whose bound participants scope the export |
 | `--format` | `jsonl` | Output format; v1 accepts only `jsonl` |
+
+Use `--person-id N` to export messages involving a durable person's bound
+participants. Linked participants outside those bindings contribute no
+messages. Exported authors use the sender's curated person name when present,
+keeping the address unchanged.
 
 The stream schema is `msgvault-message-export/1`. Records appear as one
 manifest, all sources, all conversations, all messages, and one completion
@@ -1707,7 +1714,7 @@ msgvault embeddings <subcommand> [flags]
 | Subcommand | Description |
 |---|---|
 | `build` | Build or update the index. Incremental by default; `--full-rebuild` starts a new generation. |
-| `resume` | Continue scan-and-fill embedding for the building or active generation. Always incremental. |
+| `resume` | Continue scan-and-fill embedding for the building or active generation. Incremental by default; `--backstop` also scans below the watermark. |
 | `list` | List index generations with their state, model, dimension, and pending count. |
 | `activate <generation-id>` | Activate a completed building generation, retiring the current active one. |
 | `retire <generation-id>` | Retire a generation. |
@@ -1722,6 +1729,7 @@ msgvault embeddings build [flags]
 |---|---|
 | `--full-rebuild` | Create a new index generation and rebuild from scratch. The new generation is activated atomically once coverage reaches zero. Same-model rebuilds keep serving the previous active generation in the meantime, but active-generation top-ups are frozen until activation; model or dimension changes return `index_stale` for vector/hybrid search until the new generation activates. |
 | `--yes` | Skip the confirmation prompt that `--full-rebuild` otherwise requires. |
+| `--backstop` | Run a full-scan pass that ignores the per-generation watermark to recover missing coverage skipped by incremental scans. Already-covered messages are skipped. |
 | `--account <identifier>` | Limit embedding to this account, by identifier or display name — numeric source IDs are rejected (repeatable). Overrides `[vector.embed.scope] accounts` for this run; configured `message_types` still apply. After activating this one-off scope, add the equivalent accounts to config and restart the daemon before searching. |
 | `--collection <name>` | Limit embedding to this collection's accounts (repeatable). Can be combined with `--account`; the scope is the union. This is a one-run override; persist the resolved accounts in config before restarting the daemon. |
 
@@ -1735,10 +1743,18 @@ different `--account`/`--collection` set than the active generation requires
 ### embeddings resume
 
 ```bash
-msgvault embeddings resume
+msgvault embeddings resume [flags]
 ```
 
 Continue embedding work and finish the current generation. If a generation matching the configured embedding settings is building, this embeds its remaining rows and activates it once coverage reaches zero; otherwise it tops up the active generation. Equivalent to `msgvault embeddings build` with no flags, but never starts a full rebuild. Accepts the same `--account`/`--collection` scope flags as `embeddings build`.
+
+Pass `--backstop` to scan for missing coverage below the per-generation watermark
+as well. This fills gaps in the selected generation without starting a full
+rebuild; it only activates a generation if that generation is building.
+
+```bash
+msgvault embeddings resume --backstop
+```
 
 ### embeddings list
 
@@ -1927,6 +1943,65 @@ If configured for a remote server, this command generates `<MSGVAULT_HOME>/nas-b
 
 The wizard also stores remote URL/API key in `remote` config block so `export-token` can use it without extra flags.
 
+### setup providers
+
+Turn on the retrieval and people lanes the available API keys support, with
+recommended defaults. Reads `VOYAGE_API_KEY`, `MISTRAL_API_KEY`, and
+`OPENAI_API_KEY` (and probes a local Ollama server at `[chat].server` when no
+hosted key is present), prints a plan, asks once per hosted provider, writes
+the recommended sections to `config.toml`, onboards the people-sweep
+provider through the same check and consent gates as `person provider`, and
+prints the lane report with the next commands. Lanes that are already
+configured are left alone. See
+[Recommended Configuration](/docs/usage/recommended-configuration/).
+
+The people sweep stays pending unless `--allow-sensitive` is supplied.
+This permits sending sensitive archive excerpts to its inference provider
+and inferring sensitive personal attributes. `--yes` alone does not grant
+this permission. Vector lanes also stay pending when the binary lacks the
+backend required by the configured database; setup prints rebuild guidance.
+
+Saved retention and training postures on disabled lanes are preserved unless
+their corresponding posture flags are explicitly supplied. Custom hosted
+text endpoints require explicit configuration of dependent lanes. Document
+semantic search requires both `documents vectors consent --yes` and
+`documents vectors consent --purpose queries --yes`; the latter authorizes
+query-text uploads. The status report tracks the two purposes separately.
+
+```bash
+msgvault setup providers --dry-run
+msgvault setup providers
+msgvault setup providers --yes --document-retention zdr --document-training opted-out
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--yes` | `false` | Accept every provider disclosure without prompting (required when stdin is not a terminal) |
+| `--allow-sensitive` | `false` | Allow the people sweep to send sensitive archive excerpts and infer sensitive personal attributes |
+| `--dry-run` | `false` | Print the plan, the disclosures, and the current lane report without writing |
+| `--document-retention` | `standard` | Mistral retention posture to record: `standard` or `zdr` |
+| `--document-training` | `default-opt-out` | Mistral training posture to record: `default-opt-out` or `opted-out` |
+| `--retention-posture` | `provider-declared` | Retention assertion recorded for embedding and inference providers |
+| `--training-posture` | `provider-declared` | Training assertion recorded for embedding and inference providers |
+| `--json` | `false` | Output the plan, applied flag, follow-ups, and report as JSON |
+
+The command edits the config file on this machine and refuses to run against
+a configured remote daemon; run it on the daemon host or pass `--local`.
+
+### setup status
+
+Report every lane (text search, semantic people search, visual attachments,
+documents, document vectors, people sweep, activity projection, media
+policy): state, provider, model, recorded consent, schedule, the reason a
+lane is off, and the command that turns it on. Reads `config.toml`, the
+environment, and the local archive's consent records; never contacts a
+provider.
+
+```bash
+msgvault setup status
+msgvault setup status --json
+```
+
 ---
 
 ## show-message
@@ -2049,16 +2124,25 @@ exclusive, and `--ids` is also mutually exclusive with `--source-id`.
 
 | Flag | Description |
 |---|---|
-| `--dry-run` | Show the match count without creating a deletion batch |
+| `--dry-run` | Show the staged subset and skipped counts without creating a deletion batch |
 | `--source-id ID` | Restrict staging to one exact source ID |
 | `--ids IDS` | Stage positive, unique, comma-separated internal message IDs instead of a query |
 
-Deletion staging covers Gmail-source email only. The daemon rejects a selection
-that includes anything else — chats, meetings, calendar entries, or mail from
-non-Gmail sources such as Apple Mail imports — rather than staging a subset of
-what matched. Narrow the search until it matches only deletable mail, for
-example with `message_type:email` in the query and `--source-id` for the Gmail
-source. This query narrowing guidance applies to query mode. In ID mode, the
+Query staging requires daemon API schema 2.18.0 or newer so the preflight
+reports the exact deletable subset. Upgrade the daemon if the CLI rejects its
+schema version.
+
+The query resolves with the same search semantics as `msgvault search`, and
+`--dry-run` prints the set that staging would create.
+
+Deletion staging covers Gmail-source email only. A search that also matches
+chats, meetings, calendar entries, or mail from non-Gmail sources such as Apple
+Mail imports stages the Gmail subset and reports how many items it skipped. Only
+a search with nothing deletable in it is refused. Legacy Gmail messages imported
+before message types existed carry a blank type and count as email, so
+`message_type:email` stages them too.
+
+In ID mode, the
 daemon resolves live Gmail targets and source boundaries for the requested IDs;
 IDs that do not resolve to live deletable Gmail messages with provider message
 IDs are omitted, so the

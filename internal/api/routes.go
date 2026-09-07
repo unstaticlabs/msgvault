@@ -478,16 +478,17 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 		http.StatusInternalServerError,
 		http.StatusServiceUnavailable,
 	)
-	registerAPIV1RawHumaJSONRouteWithErrors[OperationRunsResponse](
+	registerAPIV1RawHumaOperationJSONRoute[OperationRunsResponse](
 		apiV1, "listOperationRuns", http.MethodGet, "/operations/runs",
 		"List normalized operation history", s.handleOperationRuns,
-		http.StatusBadRequest, http.StatusInternalServerError, http.StatusServiceUnavailable,
+		http.StatusBadRequest, http.StatusConflict, http.StatusInternalServerError,
+		http.StatusServiceUnavailable,
 	)
-	registerAPIV1RawHumaJSONRoute[OperationStatusResponse](
+	registerAPIV1RawHumaOperationJSONRoute[OperationStatusResponse](
 		apiV1, "getOperationStatus", http.MethodGet, "/operations/status",
 		"Get normalized operation lane status", s.handleOperationStatus,
 	)
-	registerAPIV1RawHumaJSONRouteWithErrors[OperationRunDetail](
+	registerAPIV1RawHumaOperationJSONRoute[OperationRunDetail](
 		apiV1, "getOperationRun", http.MethodGet, "/operations/runs/{id}",
 		"Get one normalized operation run", s.handleOperationRunDetail,
 		http.StatusBadRequest, http.StatusNotFound, http.StatusInternalServerError,
@@ -573,6 +574,26 @@ func registerAPIV1RawHumaJSONRouteWithErrors[T any](
 	op.Responses = jsonResponsesFor[T](api)
 	for _, status := range errorStatuses {
 		op.Responses[httpStatusKey(status)] = errorResponseFor(api)
+	}
+	registerRawHumaRoute(api, op, handler)
+}
+
+// registerAPIV1RawHumaOperationJSONRoute keeps the Operations error contract
+// closed without changing the legacy error schema used by unrelated routes.
+func registerAPIV1RawHumaOperationJSONRoute[T any](
+	api huma.API,
+	operationID string,
+	method string,
+	path string,
+	summary string,
+	handler http.HandlerFunc,
+	errorStatuses ...int,
+) {
+	op := rawAPIV1Operation(operationID, method, path, summary)
+	op.Responses = jsonResponsesFor[T](api)
+	op.Responses["default"] = operationErrorResponseFor(api)
+	for _, status := range errorStatuses {
+		op.Responses[httpStatusKey(status)] = operationErrorResponseFor(api)
 	}
 	registerRawHumaRoute(api, op, handler)
 }
@@ -691,6 +712,10 @@ func rawRouteParameters(operationID string) []*huma.Param {
 		lane.Schema.Enum = stringsToAny(operationLaneValues())
 		state := queryStringParam("state", "Exact operation state", false)
 		state.Schema.Enum = stringsToAny(operationStateValues())
+		startedFrom := queryStringParam("started_from", "Inclusive canonical UTC RFC3339 lower bound", false)
+		startedFrom.Schema.Format = "date-time"
+		startedBefore := queryStringParam("started_before", "Exclusive canonical UTC RFC3339 upper bound", false)
+		startedBefore.Schema.Format = "date-time"
 		limit := queryIntegerParam("limit", "Maximum runs to return (default 25, max 100)")
 		minimum, maximum := float64(1), float64(100)
 		limit.Schema.Minimum, limit.Schema.Maximum = &minimum, &maximum
@@ -698,8 +723,10 @@ func rawRouteParameters(operationID string) []*huma.Param {
 			kind,
 			lane,
 			state,
+			startedFrom,
+			startedBefore,
 			limit,
-			queryStringParam("cursor", "Opaque cursor bound to this archive and the exact kind, lane, and state filters", false),
+			queryStringParam("cursor", "Opaque cursor bound to this archive and the complete normalized filter set", false),
 		}
 	case "patchUser", "setUserSources":
 		return []*huma.Param{pathIntegerParam("id")}
@@ -910,13 +937,13 @@ func rawRouteParameters(operationID string) []*huma.Param {
 			queryStringParam("q", "Search query", true),
 			queryStringParam("view_type", "Stats grouping view type", false),
 		}, messageFilterParams()...)
-		return append(params,
-			queryIntegerArrayParam("source_ids", "Source IDs; repeat the parameter for multiple sources"),
-		)
+		return params
 	case "deepSearch":
 		filterParams := messageFilterParams()
 		for _, parameter := range filterParams {
 			switch parameter.Name {
+			case "source_ids":
+				parameter.Description += "; not supported by deep search"
 			case "sender", "sender_name", recipientParam, "recipient_name", "domain", "label",
 				"time_period", "conversation_id",
 				"empty_targets", "message_type", "list_id":
@@ -948,6 +975,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 		}, textFilterParams()...)
 	case "searchTextMessages":
 		return []*huma.Param{
+			queryIntegerParam("source_id", "Source ID"),
 			queryStringParam("q", "Search query", true),
 			queryIntegerParam("offset", "Zero-based row offset"),
 			queryIntegerParam(limitParam, "Maximum number of rows to return"),
@@ -1002,6 +1030,7 @@ func aggregateOptionParams() []*huma.Param {
 		queryIntegerParam(limitParam, "Maximum number of rows to return (default 100; values below 1 fall back to the default)"),
 		queryStringParam("time_granularity", "Time bucket granularity", false),
 		queryIntegerParam("source_id", "Source ID"),
+		queryIntegerArrayParam("source_ids", "Source IDs; repeat or comma-separate values"),
 		queryBooleanParam("attachments_only", "Only include messages with attachments"),
 		queryBooleanParam("hide_deleted", "Exclude deleted messages"),
 		queryStringParam("search_query", "Search query", false),
@@ -1033,6 +1062,7 @@ func messageFilterScopeParams() []*huma.Param {
 		queryStringParam("time_granularity", "Time bucket granularity", false),
 		queryIntegerParam("conversation_id", "Conversation ID"),
 		queryIntegerParam("source_id", "Source ID"),
+		queryIntegerArrayParam("source_ids", "Source IDs; repeat or comma-separate values"),
 		queryBooleanParam("attachments_only", "Only include messages with attachments"),
 		queryBooleanParam("hide_deleted", "Exclude deleted messages"),
 		queryStringParam("after", "Lower date/time bound (RFC3339 or YYYY-MM-DD)", false),
@@ -1253,6 +1283,15 @@ func errorResponseFor(api huma.API) *huma.Response {
 		Description: "Error",
 		Content: map[string]*huma.MediaType{
 			applicationJSONMediaType: {Schema: schemaFor[ErrorResponse](api)},
+		},
+	}
+}
+
+func operationErrorResponseFor(api huma.API) *huma.Response {
+	return &huma.Response{
+		Description: "Error",
+		Content: map[string]*huma.MediaType{
+			applicationJSONMediaType: {Schema: schemaFor[OperationErrorResponse](api)},
 		},
 	}
 }

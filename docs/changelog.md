@@ -8,11 +8,13 @@ All notable changes to msgvault, grouped by release.
 
 ## Unreleased
 
+- Apply curated person display names to people analytics, search, and exported authors. Add `export-messages --person-id` to select messages through bound participants.
+
 **Breaking changes**
 
 - The HTTP API separates observed participant analytics from durable curated
   people, crossing the API schema 2.0 compatibility boundary at 2.1.0. The
-  current unreleased API schema is 2.17.0. Version 2.14.0 also replaces the CardDAV
+  current unreleased API schema is 2.21.0. Version 2.14.0 also replaces the CardDAV
   publication and conflict response shapes with bounded projections that
   omit raw vCards and resource hrefs. The
   analytical routes formerly under `/api/v1/people/*` (search, detail,
@@ -32,6 +34,22 @@ All notable changes to msgvault, grouped by release.
   In the TUI, press `a` to filter by account before staging again; MCP callers
   should pass `account` or stage each source separately.
 
+**Upgrade notes**
+
+- Archives with existing embeddings are migrated to generation-based coverage
+  tracking on the first writable open. Active vectors are preserved, and coverage
+  is backfilled from the active generation except for messages awaiting a
+  re-embed; the legacy `pending_embeddings` table is then dropped. An in-flight
+  rebuild is not backfilled and re-embeds its existing messages when resumed.
+  For a matching generation, scheduled embedding in `msgvault serve` handles
+  stragglers automatically with its default periodic backstop, or run
+  `msgvault embeddings resume --backstop` manually. If the fingerprint no longer
+  matches the current embedding policy or configuration, vector and hybrid search
+  report `index_stale` until a full rebuild completes:
+  `msgvault embeddings build --full-rebuild --yes`. This includes older
+  fingerprints such as v0.14's, even with unchanged configuration. See
+  [Vector Search: Upgrading an existing archive](usage/vector-search.md#upgrading-an-existing-archive).
+
 **Features**
 
 - Roles and named API keys. `[[auth.api_keys]]` entries carry a `viewer`,
@@ -41,7 +59,8 @@ All notable changes to msgvault, grouped by release.
   Web UI shows who is signed in with a sign-out control. `msgvault mcp --http`
   accepts named keys and exposes each caller only the tools its role permits.
   `[auth] api_key_login = false` hides the API-key login form. API schema
-  2.17.0.
+  2.21.0 (published in this repository as 2.17.0 before the fork caught up with
+  upstream, which had used that number for source scoping).
 
 - Single sign-on. `[auth.oidc]` signs people in through an OpenID Connect
   provider (authorization code with PKCE) and maps the provider's groups to
@@ -79,6 +98,16 @@ All notable changes to msgvault, grouped by release.
   answer an `acting_user_refused` error that asks for one web sign-in instead
   of a generic internal error. A disabled user acting through the sidecar is
   now refused whatever their role.
+- The Email TUI scope selector now exposes named collections. Collection
+  member source IDs flow through aggregate, message, fast-search, statistics,
+  and deletion-target reads, with API schema 2.17.0 gating and fail-closed
+  response echoes. Empty collections match nothing. Email, Texts, and Meetings
+  have independent selectors. Changing the Email scope returns to the top-level
+  view. Multi-source collections offer Fast search only, and deletion staging
+  requires the selected messages to belong to one source.
+
+- Preserve bounded provider transcript details in Beeper attachment metadata and
+  repair stale attachment classifications from archived payloads.
 
 - Web Directory workspace: browse and search promoted durable people, filter
   by contact state, category, organization, and last contact, and maintain a
@@ -121,6 +150,23 @@ All notable changes to msgvault, grouped by release.
   message-ID resolver directly, without search or waiting for analytical-cache
   readiness. A newly started local daemon may initialize its cache in the
   background for later query consumers.
+
+- `msgvault setup providers` turns on the retrieval and people lanes the
+  available API keys support, with recommended defaults: a Voyage key
+  configures contextual text search (`voyage-context-4`), semantic people
+  search, and the visual lane once its probe manifest exists; a Mistral key
+  configures document extraction and, with a text lane, document vectors; an
+  OpenAI key configures fallback text search when no Voyage key is present
+  and, with `--allow-sensitive`, the people sweep on `gpt-5.6-luna`; with no hosted
+  key a reachable local Ollama server is used. The sweep requires a separate
+  `--allow-sensitive` opt-in for sensitive archive excerpts and personal
+  inferences. Setup asks once per hosted
+  provider, never turns a hosted lane on from a key alone, leaves configured
+  lanes untouched, and prints the next commands. `msgvault setup status`
+  reports every lane with provider, model, consent state, schedule, and the
+  reason it is off. The `api_format`, `[vector.people]`,
+  `[vector.multimodal]`, and `[activity]` sections are now documented, and a
+  Recommended Configuration page lists the file setup writes.
 
 - Starting in v0.20.0, remote deletion remains permanently opt-in. The
   invoking CLI can grant durable consent with
@@ -187,6 +233,10 @@ All notable changes to msgvault, grouped by release.
 
 **Bug fixes**
 
+- Incremental Gmail sync retries raw-message fetch failures from the previous
+  completed incremental run, carries repeated fetch failures forward, and treats
+  messages gone before replay as handled skips. Replay requires a recorded
+  incremental run type; older untyped runs and full-sync failures are excluded.
 - Deduplication now derives missing RFC822 Message-ID metadata only after the
   user confirms the reviewed plan, applies the exact derivation plan atomically,
   rescans, and refuses duplicate hiding when the actionable plan changes. Its
@@ -206,6 +256,12 @@ All notable changes to msgvault, grouped by release.
   archives from exhausting the interactive DuckDB memory budget.
 - WhatsApp vCard imports skip phone values without explicit international `+`
   or `00` provenance.
+- Deletion staging over a search that also matches chats, meetings, or
+  non-Gmail mail now stages the deletable subset and reports the skipped count
+  instead of rejecting the whole selection, dry run included. `message_type:email`
+  matches legacy Gmail rows whose stored type is blank, as the search
+  documentation already described, and an empty `from` / `to` / `cc` / `bcc`
+  value in a search is rejected instead of matching everything.
 
 ---
 

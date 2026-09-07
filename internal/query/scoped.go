@@ -319,8 +319,10 @@ func (s *scopedTextEngine) ListConversationMessages(ctx context.Context, convID 
 	return s.visibleSummaries(rows), nil
 }
 
-func (s *scopedTextEngine) TextSearch(ctx context.Context, query string, limit, offset int) ([]MessageSummary, error) {
-	rows, err := s.text().TextSearch(ctx, query, limit, offset)
+func (s *scopedTextEngine) TextSearch(
+	ctx context.Context, query string, sourceID *int64, limit, offset int,
+) ([]MessageSummary, error) {
+	rows, err := s.text().TextSearch(ctx, query, sourceID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

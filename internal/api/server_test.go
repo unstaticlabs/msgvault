@@ -64,7 +64,7 @@ func (e *participantFilterTextEngine) ListConversationMessages(_ context.Context
 	return nil, nil
 }
 
-func (*participantFilterTextEngine) TextSearch(context.Context, string, int, int) ([]query.MessageSummary, error) {
+func (*participantFilterTextEngine) TextSearch(context.Context, string, *int64, int, int) ([]query.MessageSummary, error) {
 	return nil, nil
 }
 
@@ -343,24 +343,25 @@ type mockStore struct {
 	needsFTSBackfillQuick bool
 	// needsFTSBackfillFunc overrides the needsFTSBackfill field when set, so
 	// tests can block inside the probe or vary its answer per call.
-	needsFTSBackfillFunc  func() bool
-	backfillFTSFunc       func(func(done, total int64)) (int64, error)
-	rebuildFTSFunc        func(func(done, total int64)) (int64, error)
-	buildCacheFunc        func(context.Context, bool, func(CLICacheBuildEvent) error) error
-	syncFunc              func(context.Context, CLISyncRequest, func(CLISyncEvent) error) error
-	verifyFunc            func(context.Context, CLIVerifyRequest, func(CLIVerifyEvent) error) error
-	repairFunc            func(context.Context, func(CLIRepairEncodingEvent) error) error
-	runFunc               func(context.Context, CLIRunRequest, func(CLIRunEvent) error) error
-	repairMessageFunc     func(context.Context, CLIRepairMessageRequest, func(CLIRepairMessageEvent) error) error
-	planCalendarFunc      func(context.Context, CLIAddCalendarPlanRequest) (CLIAddCalendarPlanResponse, error)
-	planEmbedsFunc        func(context.Context, CLIEmbeddingsPlanRequest) (CLIEmbeddingsPlanResponse, error)
-	planDeleteFunc        func(context.Context, CLIDeleteStagedPlanRequest) (CLIDeleteStagedPlanResponse, error)
-	planDedupFunc         func(context.Context, CLIDeduplicatePlanRequest) (CLIDeduplicatePlanResponse, error)
-	saveManifestFunc      func(context.Context, *deletion.Manifest) error
-	documentSearchFunc    func(context.Context, store.DocumentSearchRequest) (store.DocumentSearchResponse, error)
-	documentStatusFunc    func(context.Context, string, string, []string, []string) (store.DocumentIndexStatus, error)
-	documentRebuildFunc   func(context.Context, string, string) (store.DocumentExtractionRebuild, error)
-	documentRemainingFunc func(
+	needsFTSBackfillFunc     func() bool
+	backfillFTSFunc          func(func(done, total int64)) (int64, error)
+	rebuildFTSFunc           func(func(done, total int64)) (int64, error)
+	buildCacheFunc           func(context.Context, bool, func(CLICacheBuildEvent) error) error
+	syncFunc                 func(context.Context, CLISyncRequest, func(CLISyncEvent) error) error
+	verifyFunc               func(context.Context, CLIVerifyRequest, func(CLIVerifyEvent) error) error
+	repairFunc               func(context.Context, func(CLIRepairEncodingEvent) error) error
+	runFunc                  func(context.Context, CLIRunRequest, func(CLIRunEvent) error) error
+	repairMessageFunc        func(context.Context, CLIRepairMessageRequest, func(CLIRepairMessageEvent) error) error
+	planCalendarFunc         func(context.Context, CLIAddCalendarPlanRequest) (CLIAddCalendarPlanResponse, error)
+	planEmbedsFunc           func(context.Context, CLIEmbeddingsPlanRequest) (CLIEmbeddingsPlanResponse, error)
+	planDeleteFunc           func(context.Context, CLIDeleteStagedPlanRequest) (CLIDeleteStagedPlanResponse, error)
+	planDedupFunc            func(context.Context, CLIDeduplicatePlanRequest) (CLIDeduplicatePlanResponse, error)
+	saveManifestFunc         func(context.Context, *deletion.Manifest) error
+	documentSearchFunc       func(context.Context, store.DocumentSearchRequest) (store.DocumentSearchResponse, error)
+	documentCurrentScopeFunc func(context.Context) (string, []string, error)
+	documentStatusFunc       func(context.Context, string, string, []string, []string) (store.DocumentIndexStatus, error)
+	documentRebuildFunc      func(context.Context, string, string) (store.DocumentExtractionRebuild, error)
+	documentRemainingFunc    func(
 		context.Context, store.DocumentExtractionRebuild, []string, []string,
 	) (int64, error)
 	documentReconcileFunc func(context.Context) error
@@ -431,6 +432,15 @@ func (m *mockStore) GetDocumentIndexStatusForScope(
 	return m.documentStatusFunc(
 		ctx, profileID, extractionInputKey, allowedMediaTypes, allowedMessageTypes,
 	)
+}
+
+func (m *mockStore) GetCurrentDocumentIndexStatusScope(
+	ctx context.Context,
+) (string, []string, error) {
+	if m.documentCurrentScopeFunc == nil {
+		return "", nil, store.ErrDocumentIndexStatusScopeUnavailable
+	}
+	return m.documentCurrentScopeFunc(ctx)
 }
 
 func (m *mockStore) GetActiveDocumentExtractionRebuild(

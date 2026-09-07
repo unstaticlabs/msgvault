@@ -19,7 +19,7 @@
     Toggle,
     type SettingsCategory,
   } from '@kenn-io/kit-ui';
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { APIClient } from '../../api/client';
   import type {
     PersonEnrichmentProviderSetting as GeneratedPersonEnrichmentProviderSetting,
@@ -28,7 +28,7 @@
     SettingUpdate as GeneratedSettingUpdate,
     SettingsResponse as GeneratedSettingsResponse,
   } from '../../api/generated/models';
-  import type { CardDAVSettingsRequest } from '../../carddav/navigation';
+  import type { CardDAVSettingsRequest, SettingsNavigationTarget } from '../../carddav/navigation';
   import CardDAVSettingsWorkspace from './CardDAVSettingsWorkspace.svelte';
   import UsersWorkspace from './UsersWorkspace.svelte';
   import PersonEnrichmentProviderCard from './PersonEnrichmentProviderCard.svelte';
@@ -60,6 +60,7 @@
     canSignOut = false,
     onSignOut = () => undefined,
     cardDAVRequest = undefined,
+    navigationTarget = undefined,
     onCardDAVRequestConsumed = () => undefined,
   }: {
     client: APIClient;
@@ -68,6 +69,7 @@
     canSignOut?: boolean;
     onSignOut?: () => void;
     cardDAVRequest?: CardDAVSettingsRequest;
+    navigationTarget?: SettingsNavigationTarget;
     onCardDAVRequestConsumed?: (key: number) => void;
   } = $props();
   let settings = $state<SettingState[]>([]);
@@ -83,7 +85,9 @@
   let saving = $state(false);
   let error = $state('');
   let activeCategory = $state('browser');
+  let root = $state<HTMLElement>();
   let consumedCategoryRequestKey: number | undefined;
+  let focusedNavigationSettingKey: string | undefined;
   const settingsGroups = $derived(groupSettings(settings, groups));
   const categories: SettingsCategory[] = $derived([
     ...settingsGroups.map((group) => ({
@@ -103,6 +107,25 @@
   onMount(() => {
     void loadSettings(false);
   });
+  $effect(() => {
+    const target = navigationTarget;
+    if (target) {
+      activeCategory = target.categoryID;
+      if (loading) return;
+      if (target.settingKey === focusedNavigationSettingKey) return;
+      const settingKey = target.settingKey;
+      void tick().then(() => root?.querySelector<HTMLElement>(
+        `[data-setting-key="${settingKey}"]`
+      )?.focus());
+      focusedNavigationSettingKey = settingKey;
+      return;
+    }
+    if (focusedNavigationSettingKey !== undefined) {
+      focusedNavigationSettingKey = undefined;
+      activeCategory = 'browser';
+    }
+  });
+
   $effect(() => {
     const request = cardDAVRequest;
     if (!request || request.key === consumedCategoryRequestKey) return;
@@ -324,7 +347,7 @@
   />
 {/snippet}
 
-<main class="settings" aria-label="Settings">
+<main class="settings" bind:this={root} aria-label="Settings">
   <h1 class="kit-sr-only">Settings</h1>
   {#if loading}
     <p class="state" role="status">Loading settings…</p>
@@ -374,7 +397,7 @@
               <SettingsSection title={group.label} description={group.description}>
                 {#each group.settings as setting (setting.key)}
                   {@const label = settingLabel(setting)}
-                  <div class="field">
+                  <div class="field" data-setting-key={setting.key} tabindex="-1">
                     <div class="field-copy">
                       <strong>{label}</strong>
                       <span>{settingDescription(setting)}</span>
@@ -533,6 +556,10 @@
   }
   .field + .field {
     border-top: 1px solid var(--border-muted);
+  }
+  .field:focus-visible {
+    outline: var(--focus-ring);
+    outline-offset: var(--focus-ring-offset, 2px);
   }
   .field-copy {
     display: grid;
