@@ -192,6 +192,42 @@ func TestAuthEnvOverrides(t *testing.T) {
 	require.Error(err, "overrides go through the same validation as the file")
 }
 
+// TestInboxArchiveEnvOverride: the archive's config.toml is data on a container
+// deployment -- it travels with the archive, not with the deploy repository --
+// so a gate that permits mailbox changes has to be settable from the stack that
+// turns it on, where it can be reviewed and rolled back.
+func TestInboxArchiveEnvOverride(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	for _, name := range AuthEnvOverrideNames() {
+		t.Setenv(name, "")
+	}
+
+	base := "[server]\napi_key = \"admin-secret-value\"\n"
+
+	unset, err := loadAuthConfig(t, base)
+	require.NoError(err)
+	assert.False(unset.InboxArchive.RemoteEnabled, "mailbox changes stay off by default")
+
+	t.Setenv("MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED", "true")
+	enabled, err := loadAuthConfig(t, base)
+	require.NoError(err)
+	assert.True(enabled.InboxArchive.RemoteEnabled)
+
+	// An explicit false must win over a file that enables it, so a stack can
+	// turn the gate off without editing the archive's own config.
+	t.Setenv("MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED", "false")
+	disabled, err := loadAuthConfig(t, base+"[inbox_archive]\nremote_enabled = true\n")
+	require.NoError(err)
+	assert.False(disabled.InboxArchive.RemoteEnabled)
+
+	// And the file still decides when the environment says nothing.
+	t.Setenv("MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED", "")
+	fromFile, err := loadAuthConfig(t, base+"[inbox_archive]\nremote_enabled = true\n")
+	require.NoError(err)
+	assert.True(fromFile.InboxArchive.RemoteEnabled)
+}
+
 func TestAuthEnvOverridesDeclareKeysAndRemote(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

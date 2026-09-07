@@ -214,9 +214,14 @@ Removing messages from your inbox at the mail provider is reversible and deletes
 nothing, but it is still a change to a mailbox msgvault otherwise only reads, so
 it stays opt-in. Two independent switches are required, and both default to off:
 
-- `[inbox_archive] remote_enabled = true` in the **daemon's** config. This is
-  what permits the daemon to act, and it applies to every client that reaches it
-  — the web UI, the CLI, and the MCP server alike.
+- `[inbox_archive] remote_enabled = true` in the **daemon's** config, or
+  `MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED=true` in its environment. This is what
+  permits the daemon to act, and it applies to every client that reaches it —
+  the web UI, the CLI, and the MCP server alike. The environment form exists for
+  container deployments, where the archive's `config.toml` travels with the data
+  rather than with the deployment repository: a gate that permits mailbox
+  changes should be reviewable and reversible alongside the stack that turns it
+  on. An explicit `false` overrides the file.
 - `msgvault mcp --allow-mailbox-writes` on the **MCP server**. This is what
   offers the `archive_from_inbox` tool to a model at all.
 

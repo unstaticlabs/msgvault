@@ -84,6 +84,7 @@ func AuthEnvOverrideNames() []string {
 	names := []string{
 		"MSGVAULT_AUTH_API_KEY_LOGIN", "MSGVAULT_AUTH_API_KEYS", "MSGVAULT_SERVER_TRUSTED_PROXIES",
 		"MSGVAULT_REMOTE_URL", "MSGVAULT_REMOTE_API_KEY", "MSGVAULT_REMOTE_ALLOW_INSECURE",
+		"MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED",
 	}
 	for _, override := range oidcEnvOverrides {
 		names = append(names, override.name)
@@ -132,6 +133,14 @@ func (c *Config) applyAuthEnvOverrides(lookupEnv func(string) string) error {
 	}
 	if value := strings.TrimSpace(lookupEnv("MSGVAULT_REMOTE_ALLOW_INSECURE")); value != "" {
 		c.Remote.AllowInsecure = !strings.EqualFold(value, "false") && value != "0"
+	}
+	// The inbox-archive gate belongs with these rather than only in the
+	// archive's config.toml: on a container deployment that file is data,
+	// carried with the archive and outside the deploy repository, so a gate set
+	// only there cannot be reviewed, versioned, or rolled back alongside the
+	// stack that turns it on.
+	if value := strings.TrimSpace(lookupEnv("MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED")); value != "" {
+		c.InboxArchive.RemoteEnabled = !strings.EqualFold(value, "false") && value != "0"
 	}
 	return nil
 }
