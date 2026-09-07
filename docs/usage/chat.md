@@ -5,7 +5,7 @@ description: Expose your email, chat, calendar, and meeting archive to AI assist
 
 The MCP server operates on your msgvault archive through the selected daemon, not your live Gmail account. Without `[remote].url`, `msgvault mcp` starts or reuses the local background daemon; with `[remote].url`, it uses that remote server. The AI never sees your Google credentials, and by default it cannot change anything at your mail provider: every tool reads the local archive. Standard read and search operations go through the daemon. If [vector search](/docs/usage/vector-search/) is enabled, semantic and hybrid searches also call the embedding endpoint configured in `[vector.embeddings]`; use a local or self-hosted endpoint if message text must stay on your machine or network. The `stage_deletion` tool asks the selected daemon to save a deletion manifest, and `export_attachment` saves an attachment to a requested path on the MCP server's filesystem. Neither modifies the database, and actual deletion still requires you to run `msgvault delete-staged` from the CLI. Saved View management tools change only persistent reusable view definitions; deleting a Saved View never deletes archive messages. You control when data enters the archive (via sync and import commands) and when anything is deleted (via the explicit [deletion workflow](/docs/usage/deletion/)).
 
-There is exactly one exception, and it is off unless you turn it on twice: [`archive_from_inbox`](#archiving-your-inbox-via-mcp) removes messages from your inbox at the provider. It deletes nothing and is reversible, but it does change your live mailbox, so it requires both `msgvault mcp --allow-mailbox-writes` and `[inbox_archive] remote_enabled = true` in the daemon's config. With either unset, the tool is not offered and the daemon refuses the request. Compared to giving an AI assistant direct OAuth access to your mailbox, this is a fundamentally smaller attack surface.
+There is exactly one exception, and it is off unless you turn it on twice: [`archive_from_inbox`](#archiving-your-inbox-via-mcp) removes messages from your inbox at the provider. It deletes nothing and is reversible, but it does change your live mailbox, so it requires both `msgvault mcp --allow-mailbox-writes` and `[inbox_archive] remote_enabled = true` (or `MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED=true`) on the daemon. With either unset, the tool is not offered and the daemon refuses the request. Compared to giving an AI assistant direct OAuth access to your mailbox, this is a fundamentally smaller attack surface.
 
 ## Setup
 
@@ -330,6 +330,11 @@ msgvault mcp --allow-mailbox-writes
 [inbox_archive]
 remote_enabled = true
 ```
+
+On a container deployment, set `MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED=true` in
+the daemon's environment instead: the archive's `config.toml` travels with your
+data rather than with the deployment, and a gate that permits mailbox changes
+belongs where it can be reviewed and rolled back with the stack.
 
 The two are separate on purpose. The flag decides whether the tool is offered to
 a model at all; the config decides whether the daemon will carry it out. The
