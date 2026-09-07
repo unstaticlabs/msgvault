@@ -145,8 +145,9 @@ func (a Address) Validate() error {
 }
 
 type AggregateResponse struct {
-	Rows     []AggregateRowJSON `json:"rows" validate:"required"`
-	ViewType string             `json:"view_type" validate:"required"`
+	AppliedSourceIds []int64            `json:"applied_source_ids,omitempty"`
+	Rows             []AggregateRowJSON `json:"rows" validate:"required"`
+	ViewType         string             `json:"view_type" validate:"required"`
 }
 
 func (a AggregateResponse) Validate() error {
@@ -3644,6 +3645,7 @@ type ExplorePreflightResponse struct {
 	ActionTargets       []ExploreActionTarget      `json:"action_targets" validate:"required"`
 	CacheRevision       string                     `json:"cache_revision" validate:"required"`
 	Count               int64                      `json:"count"`
+	DeletableCount      int64                      `json:"deletable_count"`
 	EstimatedBytes      int64                      `json:"estimated_bytes"`
 	ExpiresAt           time.Time                  `json:"expires_at" validate:"required"`
 	OperationToken      string                     `json:"operation_token" validate:"required"`
@@ -4041,11 +4043,12 @@ func (f FileSearchSort) Validate() error {
 }
 
 type FilteredMessagesResponse struct {
-	Count    int64            `json:"count"`
-	HasMore  bool             `json:"has_more"`
-	Limit    int64            `json:"limit"`
-	Messages []MessageSummary `json:"messages" validate:"required"`
-	Offset   int64            `json:"offset"`
+	AppliedSourceIds []int64          `json:"applied_source_ids,omitempty"`
+	Count            int64            `json:"count"`
+	HasMore          bool             `json:"has_more"`
+	Limit            int64            `json:"limit"`
+	Messages         []MessageSummary `json:"messages" validate:"required"`
+	Offset           int64            `json:"offset"`
 }
 
 func (f FilteredMessagesResponse) Validate() error {
@@ -4103,10 +4106,11 @@ func (g GenerationSummary) Validate() error {
 }
 
 type GmailIDsResponse struct {
-	GmailIds    []string         `json:"gmail_ids" validate:"required"`
-	SearchMode  *string          `json:"search_mode,omitempty"`
-	SearchQuery *string          `json:"search_query,omitempty"`
-	Targets     []DeletionTarget `json:"targets,omitempty"`
+	AppliedSourceIds []int64          `json:"applied_source_ids,omitempty"`
+	GmailIds         []string         `json:"gmail_ids" validate:"required"`
+	SearchMode       *string          `json:"search_mode,omitempty"`
+	SearchQuery      *string          `json:"search_query,omitempty"`
+	Targets          []DeletionTarget `json:"targets,omitempty"`
 }
 
 func (g GmailIDsResponse) Validate() error {
@@ -5069,6 +5073,19 @@ func (o OIDCLoginInfo) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(o))
 }
 
+type OperationErrorResponse struct {
+	ErrorData string  `json:"error" validate:"required"`
+	Message   *string `json:"message,omitempty"`
+}
+
+func (o OperationErrorResponse) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(o))
+}
+
+func (s OperationErrorResponse) Error() string {
+	return "unmapped client error"
+}
+
 type OperationHealth struct {
 	Busy      bool       `json:"busy"`
 	Label     *string    `json:"label,omitempty"`
@@ -5192,15 +5209,17 @@ func (o OperationPublicError) Validate() error {
 }
 
 type OperationRunDetail struct {
-	Counters   []OperationPublicCounter   `json:"counters" validate:"required"`
-	ErrorData  *OperationPublicError      `json:"error,omitempty"`
-	FinishedAt *time.Time                 `json:"finished_at,omitempty"`
-	ID         string                     `json:"id" validate:"required"`
-	Kind       OperationRunDetailKind     `json:"kind" validate:"required"`
-	Lane       OperationRunDetailLane     `json:"lane" validate:"required"`
-	StartedAt  time.Time                  `json:"started_at" validate:"required"`
-	State      OperationRunDetailState    `json:"state" validate:"required"`
-	Trigger    *OperationRunDetailTrigger `json:"trigger,omitempty"`
+	Counters         []OperationPublicCounter             `json:"counters" validate:"required"`
+	ErrorData        *OperationPublicError                `json:"error,omitempty"`
+	FinishedAt       *time.Time                           `json:"finished_at,omitempty"`
+	ID               string                               `json:"id" validate:"required"`
+	Kind             OperationRunDetailKind               `json:"kind" validate:"required"`
+	Lane             OperationRunDetailLane               `json:"lane" validate:"required"`
+	RelatedStatus    *OperationRunDetailRelatedStatus     `json:"related_status,omitempty"`
+	StartedAt        time.Time                            `json:"started_at" validate:"required"`
+	State            OperationRunDetailState              `json:"state" validate:"required"`
+	SupportedActions []OperationRunDetailSupportedActions `json:"supported_actions" validate:"required"`
+	Trigger          *OperationRunDetailTrigger           `json:"trigger,omitempty"`
 }
 
 func (o OperationRunDetail) Validate() error {
@@ -5232,12 +5251,26 @@ func (o OperationRunDetail) Validate() error {
 			errors = errors.Append("Lane", err)
 		}
 	}
+	if o.RelatedStatus != nil {
+		if v, ok := any(o.RelatedStatus).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("RelatedStatus", err)
+			}
+		}
+	}
 	if err := typesValidator.Var(o.StartedAt, "required"); err != nil {
 		errors = errors.Append("StartedAt", err)
 	}
 	if v, ok := any(o.State).(runtime.Validator); ok {
 		if err := v.Validate(); err != nil {
 			errors = errors.Append("State", err)
+		}
+	}
+	for i, item := range o.SupportedActions {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("SupportedActions[%d]", i), err)
+			}
 		}
 	}
 	if o.Trigger != nil {
@@ -5316,13 +5349,17 @@ func (o OperationRunSummary) Validate() error {
 }
 
 type OperationRunsResponse struct {
-	NextCursor       *string                    `json:"next_cursor,omitempty"`
-	Runs             []OperationRunSummary      `json:"runs" validate:"required"`
-	UnavailableKinds []OperationUnavailableKind `json:"unavailable_kinds" validate:"required"`
+	MembershipRevision int64                      `json:"membership_revision" validate:"gte=0"`
+	NextCursor         *string                    `json:"next_cursor,omitempty"`
+	Runs               []OperationRunSummary      `json:"runs" validate:"required"`
+	UnavailableKinds   []OperationUnavailableKind `json:"unavailable_kinds" validate:"required"`
 }
 
 func (o OperationRunsResponse) Validate() error {
 	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(o.MembershipRevision, "gte=0"); err != nil {
+		errors = errors.Append("MembershipRevision", err)
+	}
 	for i, item := range o.Runs {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -10227,8 +10264,10 @@ type StageDeletionResponse struct {
 	Account        *string          `json:"account,omitempty"`
 	DryRun         bool             `json:"dry_run"`
 	ID             *string          `json:"id,omitempty"`
+	MatchedCount   *int64           `json:"matched_count,omitempty"`
 	MessageCount   int64            `json:"message_count"`
 	SampleGmailIds []string         `json:"sample_gmail_ids,omitempty"`
+	SkippedCount   *int64           `json:"skipped_count,omitempty"`
 	Source         *SourceReference `json:"source,omitempty"`
 	Status         *string          `json:"status,omitempty"`
 }
@@ -10864,11 +10903,12 @@ func (t TextMessagesResponse) Validate() error {
 }
 
 type TextSearchResponse struct {
-	Count    int64                    `json:"count"`
-	HasMore  bool                     `json:"has_more"`
-	Limit    int64                    `json:"limit"`
-	Messages []CLIQueryMessageSummary `json:"messages" validate:"required"`
-	Offset   int64                    `json:"offset"`
+	AppliedSourceID *int64                   `json:"applied_source_id,omitempty"`
+	Count           int64                    `json:"count"`
+	HasMore         bool                     `json:"has_more"`
+	Limit           int64                    `json:"limit"`
+	Messages        []CLIQueryMessageSummary `json:"messages" validate:"required"`
+	Offset          int64                    `json:"offset"`
 }
 
 func (t TextSearchResponse) Validate() error {

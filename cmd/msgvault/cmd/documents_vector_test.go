@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 	"go.kenn.io/msgvault/internal/vector"
@@ -117,6 +118,49 @@ func TestDocumentVectorLedgerCommandsNeverOpenRuntime(t *testing.T) {
 	retire.SetArgs([]string{documentVectorsSubcommand, cliEmbeddingsOperationRetire, "--generation-id", fmtInt64(generation.ID), "--yes"})
 	require.NoError(retire.ExecuteContext(t.Context()))
 	assert.Zero(runtimeCalls)
+}
+
+func TestSetupStatusTracksBothDocumentVectorConsentPurposes(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	fixture, _ := documentVectorCommandFixture(t)
+	cfg.Attachments.Documents.Enabled = true
+	deps := documentsCommandDeps{
+		openStore: func() (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+	}
+	env := setupEnvironment{
+		lookupEnv: func(string) (string, bool) { return "synthetic-key", true },
+		consent:   setupConsentFromStore(t.Context(), cfg, fixture.Store),
+	}
+	lane := documentVectorsLane(cfg, env)
+	assert.Equal(laneStatePending, lane.State)
+	assert.Equal(map[string]string{"document_embedding": consentMissing, "query_embedding": consentMissing}, lane.ConsentPurposes)
+	assert.ElementsMatch([]string{"msgvault documents vectors consent --yes", "msgvault documents vectors consent --purpose queries --yes"}, lane.Next)
+	for _, purpose := range []string{"documents", "queries"} {
+		command := newDocumentsCmd(deps)
+		var output bytes.Buffer
+		command.SetOut(&output)
+		command.SetArgs([]string{"vectors", "consent", "--purpose", purpose, "--yes"})
+		require.NoError(command.ExecuteContext(t.Context()), output.String())
+		env.consent = setupConsentFromStore(t.Context(), cfg, fixture.Store)
+		lane = documentVectorsLane(cfg, env)
+		assert.Equal(consentActive, lane.ConsentPurposes["document_embedding"])
+		if purpose == "documents" {
+			assert.Equal(laneStatePending, lane.State)
+			assert.Equal(consentMissing, lane.ConsentPurposes["query_embedding"])
+			assert.Equal([]string{"msgvault documents vectors consent --purpose queries --yes"}, lane.Next)
+		} else {
+			assert.Equal(laneStateOn, lane.State)
+			assert.Equal(consentActive, lane.ConsentPurposes["query_embedding"])
+			assert.Equal(consentActive, lane.Consent)
+			assert.Empty(lane.Next)
+		}
+	}
+	cfg.Vector.Embeddings.Endpoint = "https://changed.example.test/v1"
+	env.consent = setupConsentFromStore(t.Context(), cfg, fixture.Store)
+	lane = documentVectorsLane(cfg, env)
+	assert.Equal(laneStatePending, lane.State)
+	assert.Equal(map[string]string{"document_embedding": consentMissing, "query_embedding": consentMissing}, lane.ConsentPurposes)
 }
 
 func TestDocumentVectorStatusWorksWhenEmbeddingsAreDisabled(t *testing.T) {
@@ -276,7 +320,7 @@ func TestDocumentVectorResumeRunsBoundedCleanupForRetiredGeneration(t *testing.T
 			return runDocumentVectorWithFeatures(ctx, st, &vectorFeatures{
 				DocumentBackend: backend,
 				Cfg:             cfg.Vector,
-			}, generationID, limit)
+			}, generationID, limit, testOperationPassScope("document-vector:retired-cleanup"))
 		},
 	}
 	command := newDocumentsCmd(deps)
@@ -301,13 +345,17 @@ func TestDocumentVectorWorkerCheckpointsPartialErrorResult(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 	wantErr := errors.New("provider partial failure")
+	fixture := storetest.New(t)
 	runResult := vectordocument.RunResult{
+		Attempted: 3, Succeeded: 2, Failed: 1,
 		ProviderCalls: 1, ProviderDocuments: 2, ProviderChunks: 3, ProviderInputChars: 44,
 		AfterGenerationID: 7, AfterChunkID: 81,
 	}
 	worker := checkpointingDocumentVectorWorker{
 		worker:       fakeDocumentVectorWorkerRunner{result: runResult, err: wantErr},
 		checkpointer: &fakeDocumentVectorCheckpointer{},
+		recorder:     fixture.Store,
+		scope:        testOperationPassScope("document-vector:resume"),
 		fingerprint:  strings.Repeat("a", 64),
 		now:          func() time.Time { return time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC) },
 	}
@@ -323,6 +371,36 @@ func TestDocumentVectorWorkerCheckpointsPartialErrorResult(t *testing.T) {
 	assert.Equal(store.DocumentVectorUsageDelta{
 		ProviderCalls: 1, ProviderDocuments: 2, ProviderChunks: 3, ProviderInputChars: 44,
 	}, checkpoint.calls[0].delta)
+	runs := operationRunsForKind(t, fixture.Store, operations.KindDocumentEmbedding)
+	require.Len(runs, 1)
+	assert.Equal(operations.StatePartial, runs[0].State)
+	assert.Equal([]operations.PublicCounter{
+		{Name: operations.CounterAttempted, Unit: operations.CounterUnitChunks, Value: 3},
+		{Name: operations.CounterSucceeded, Unit: operations.CounterUnitChunks, Value: 2},
+		{Name: operations.CounterFailed, Unit: operations.CounterUnitChunks, Value: 1},
+	}, runs[0].Counters)
+}
+
+func TestDocumentVectorTerminalReplayReturnsFixedFailure(t *testing.T) {
+	started := time.Date(2026, 8, 30, 15, 45, 0, 0, time.UTC)
+	finished := started.Add(time.Second)
+	trigger := operations.TriggerManual
+	id, err := operations.NewInt64ID(operations.KindDocumentEmbedding, 11)
+	require.NoError(t, err)
+	run := &operations.Run{
+		ID: id, Lane: operations.LaneDocuments, State: operations.StateFailed, Trigger: &trigger,
+		StartedAt: started, FinishedAt: &finished,
+		Counters: operations.InvocationCounters{Attempted: 1, Failed: 1}.
+			PublicCounters(operations.KindDocumentEmbedding),
+		Error: operations.FixedPublicError(operations.PublicErrorInvocationTimeout),
+	}
+
+	result, replayErr := documentVectorRunResultFromOperationRun(run)
+
+	assert.Equal(t, 1, result.Attempted)
+	assert.Equal(t, 1, result.Failed)
+	require.ErrorIs(t, replayErr, context.DeadlineExceeded)
+	assert.Equal(t, "Operation timed out.", replayErr.Error())
 }
 
 func TestDocumentVectorWorkerOwnersAreUniqueWithinOneProcess(t *testing.T) {

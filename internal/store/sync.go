@@ -20,6 +20,7 @@ const (
 
 	manualTransactionCleanupTimeout = 5 * time.Second
 	syncWorkerExitedMessage         = "sync worker exited before recording completion"
+	syncRunRestartedError           = "daemon_restarted"
 )
 
 // ErrSyncRunNotFound is returned by the sync-run getters (GetActiveSync,
@@ -314,6 +315,26 @@ type SyncRun struct {
 	CursorBefore       sql.NullString // Page token for resumption
 	CursorAfter        sql.NullString // Final history ID
 	RequestFingerprint sql.NullString // Full-sync request identity for safe resumption
+}
+
+// RecoverSyncRunsContext terminalizes source runs whose owning daemon ended.
+// Native checkpoints and counters remain untouched so a later invocation can
+// resume through the source-specific recovery path.
+func (s *Store) RecoverSyncRunsContext(ctx context.Context, recoveredAt time.Time) (int64, error) {
+	if recoveredAt.IsZero() {
+		return 0, errors.New("sync run recovery time is required")
+	}
+	result, err := s.db.ExecContext(ctx, s.Rebind(`UPDATE sync_runs
+		SET status = 'failed', completed_at = ?, error_message = ?
+		WHERE status = 'running'`), s.dialect.TimestampParam(recoveredAt.UTC()), syncRunRestartedError)
+	if err != nil {
+		return 0, fmt.Errorf("recover source sync runs: %w", err)
+	}
+	recovered, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count recovered source sync runs: %w", err)
+	}
+	return recovered, nil
 }
 
 // Checkpoint represents sync progress for resumption.
@@ -1437,18 +1458,38 @@ func (s *Store) HasAnyActiveSync() (bool, error) {
 
 // GetLastSuccessfulSync returns the most recent successful sync for a source.
 func (s *Store) GetLastSuccessfulSync(sourceID int64) (*SyncRun, error) {
+	return s.getLastSuccessfulSync(sourceID, "", false)
+}
+
+// GetLastSuccessfulSyncByType returns the most recent successful sync whose
+// sync_type exactly equals syncType, the legacy empty value included; only
+// GetLastSuccessfulSync queries without a type filter.
+func (s *Store) GetLastSuccessfulSyncByType(sourceID int64, syncType string) (*SyncRun, error) {
+	return s.getLastSuccessfulSync(sourceID, syncType, true)
+}
+
+func (s *Store) getLastSuccessfulSync(sourceID int64, syncType string, filterByType bool) (*SyncRun, error) {
+	whereType := ""
+	args := []any{sourceID}
+	if filterByType {
+		whereType = " AND sync_type = ?"
+		args = append(args, syncType)
+	}
 	row := s.db.QueryRow(`
 		SELECT id, source_id, started_at, completed_at, status,
 		       messages_processed, messages_added, messages_updated, errors_count,
 		       error_message, cursor_before, cursor_after, request_fingerprint
 		FROM sync_runs
-		WHERE source_id = ? AND status = 'completed'
+		WHERE source_id = ? AND status = 'completed'`+whereType+`
 		ORDER BY completed_at DESC, id DESC
 		LIMIT 1
-	`, sourceID)
+	`, args...)
 
 	run, err := scanSyncRun(row)
 	if errors.Is(err, sql.ErrNoRows) {
+		if filterByType {
+			return nil, fmt.Errorf("last successful %s sync for source %d: %w", syncType, sourceID, ErrSyncRunNotFound)
+		}
 		return nil, fmt.Errorf("last successful sync for source %d: %w", sourceID, ErrSyncRunNotFound)
 	}
 	return run, err

@@ -10,7 +10,6 @@ import (
 	"go.kenn.io/docbank/document/voyage"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -276,11 +275,13 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 			BatchSize:     vectorCfg.Embeddings.BatchSize, BuildScope: vectorCfg.Embed.Scope.BuildScope(),
 			Rebind: deps.Rebind, LastModifiedExpr: deps.LastModifiedExpr,
 			TotalPending: deps.TotalPending, Progress: deps.Progress, Log: deps.Log,
+			Recorder: deps.Store,
 		})
 		personWorker := embed.NewPersonWorker(embed.PersonWorkerDeps{
 			Store: deps.Store, Backend: personBackend, Client: personClient,
 			Gate:      personGate,
 			BatchSize: vectorCfg.Embeddings.BatchSize, MaxInputChars: vectorCfg.Embeddings.MaxInputChars,
+			Recorder: deps.Store, Log: deps.Log,
 		})
 		worker := embed.NewGenerationWorker(messageWorker, personWorker)
 		return &embeddingRuntime{
@@ -331,11 +332,13 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 			ChangeBatchSize:         vectorCfg.Embeddings.BatchSize,
 			ReconcileBatchSize:      vectorCfg.Embeddings.BatchSize,
 			DocumentPrefixUTF8Bytes: len(vectorCfg.Embeddings.DocumentPrefix),
+			Recorder:                deps.Store, Log: deps.Log,
 		})
 		personWorker := embed.NewPersonWorker(embed.PersonWorkerDeps{
 			Store: deps.Store, Backend: personBackend, Client: personClient,
 			Gate:      personGate,
 			BatchSize: vectorCfg.Embeddings.BatchSize, MaxInputChars: vectorCfg.Embeddings.MaxInputChars,
+			Recorder: deps.Store, Log: deps.Log,
 		})
 		worker := embed.NewGenerationWorker(messageWorker, personWorker)
 		return &embeddingRuntime{
@@ -454,7 +457,7 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 	// config is a local copy: this runs on the daemon's background init
 	// goroutine while HTTP handlers may already be reading the global cfg,
 	// so the global must stay unmutated.
-	vecCfg, err := resolvedVectorConfig(mainStore)
+	vecCfg, err := resolvedVectorConfig(mainStore, cfg.Vector)
 	if err != nil {
 		return nil, fmt.Errorf("vector embed scope: %w", err)
 	}
@@ -806,7 +809,7 @@ func newVisualRuntime(
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := loadVisualCapabilityManifest(vecCfg.Multimodal.CapabilitiesFile)
+	providerConfig, err := visualVoyageConfig(vecCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -819,15 +822,9 @@ func newVisualRuntime(
 	// input the search layer permits. Document eligibility (the reconciler's
 	// mediaPolicy) stays unchanged. Configs with images already enabled are
 	// identical, so no existing consent fingerprint moves.
-	providerMedia := mediaPolicy
-	if vecCfg.Multimodal.ImageQueriesEnabled() {
-		providerMedia.IncludeImages = true
-	}
-	provider, err := visual.NewVoyageProvider(visual.VoyageConfig{
-		APIKey: apiKey, Model: vecCfg.Multimodal.Model,
-		Dimension: vecCfg.Multimodal.Dimension, Manifest: manifest, Media: providerMedia,
-		HTTPClient: providerHTTPClientWithoutRedirects(httpClient),
-	})
+	providerConfig.APIKey = apiKey
+	providerConfig.HTTPClient = providerHTTPClientWithoutRedirects(httpClient)
+	provider, err := visual.NewVoyageProvider(providerConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -835,12 +832,6 @@ func newVisualRuntime(
 	// shapes this archive sends: the document capability always, and its
 	// interleaved twin because owning-message context accompanies media
 	// whenever the message has any.
-	// Every visual search embeds its text query through the same client;
-	// without probed text-query authority the lane would index (and bill)
-	// while rejecting every search. Fail initialization with the remedy.
-	if !slices.Contains(provider.AuthorizedCapabilities(), voyage.CapabilityQueryText) {
-		return nil, errors.New("the capability manifest does not authorize text queries; re-run `msgvault multimodal probe` and configure the new manifest")
-	}
 	mediaPolicy.AuthorizedCapabilities = eligibleVisualCapabilities(
 		provider.AuthorizedCapabilities(), vecCfg.Multimodal.MaxContextChars > 0)
 	consumerKey := "visual/" + fingerprint
@@ -908,26 +899,6 @@ func visualScopeCheck(s *store.Store, accounts []string, expected []int64) func(
 		}
 		return nil
 	}
-}
-
-// loadVisualCapabilityManifest reads and strictly validates the operator's
-// probed Voyage capability manifest. The multimodal lane cannot run without
-// one: nothing has upload authority until a probe recorded it.
-func loadVisualCapabilityManifest(path string) (voyage.CapabilityManifest, error) {
-	if strings.TrimSpace(path) == "" {
-		return voyage.CapabilityManifest{}, errors.New(
-			"vector.multimodal.capabilities_file is not set; run `msgvault multimodal probe` and configure the manifest path")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return voyage.CapabilityManifest{}, fmt.Errorf("open Voyage capability manifest: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	manifest, err := voyage.DecodeCapabilityManifest(file)
-	if err != nil {
-		return voyage.CapabilityManifest{}, fmt.Errorf("decode Voyage capability manifest %s: %w", path, err)
-	}
-	return manifest, nil
 }
 
 // eligibleVisualCapabilities filters probed document capabilities to those

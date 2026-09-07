@@ -266,12 +266,29 @@ import (
 // parameters introduced with these TUI contracts are also covered by 2.16.0.
 // It also adds authenticated asynchronous historical import jobs at
 // POST /api/v1/imports and GET /api/v1/imports/{job_id}. Existing synchronous
-// CLI sync routes, source-status responses, unfiltered statistics, search, and
-// deletion requests are unchanged.
-// 2.17.0 adds the calling principal to the session bootstrap, the
+// CLI sync routes and source-status responses are unchanged.
+// 2.17.0 adds repeated/comma-separated source_ids to aggregate and message
+// filter routes, plus applied_source_ids echoes. Clients can therefore fail
+// closed when an older daemon ignores an additive source scope instead of
+// widening the result to all sources. Text search also accepts source_id
+// and confirms it with applied_source_id.
+// 2.18.0 adds deletable_count to selection preflight and matched/skipped
+// counts to deletion staging. Query staging accepts the deletable subset of
+// mixed selections; clients can disclose that subset before confirmation.
+// 2.19.0 extends operation history with durable invocation lanes, date bounds,
+// filter-bound pagination, fixed error codes, supported actions, and related
+// status identifiers. It adds GET /api/v1/documents/status/current to resolve
+// status for the selected durable document profile. These Operations response
+// changes remain within the unreleased 2.x contract.
+// 2.20.0 is reserved for the inbox-archive routes.
+// 2.21.0 adds the calling principal to the session bootstrap, the
 // login_methods list, GET /api/v1/me, and 403 forbidden for callers whose
-// role does not cover an operation.
-const APISchemaVersion = "2.17.0"
+// role does not cover an operation. This shipped in this repository as 2.17.0
+// before the fork caught up with upstream, which had independently used that
+// number for source scoping; a daemon reporting 2.17.0 may therefore be either.
+// Clients that need to distinguish them should treat >= 2.21.0 as the reliable
+// signal for the principal fields.
+const APISchemaVersion = "2.21.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
@@ -279,6 +296,7 @@ func OpenAPIDocument() *huma.OpenAPI {
 	doc := baseOpenAPIDocument()
 	hardenSourceStatusPublicSchemas(doc)
 	relaxResponseAdditionalProperties(doc)
+	hardenOperationSchemas(doc)
 	return doc
 }
 
@@ -286,8 +304,30 @@ func openAPIClientDocument() *huma.OpenAPI {
 	doc := baseOpenAPIDocument()
 	hardenSourceStatusClientSchemas(doc)
 	clearResponseAdditionalProperties(doc)
+	hardenOperationSchemas(doc)
 	applyClientCodegenExtensions(doc)
 	return doc
+}
+
+func hardenOperationSchemas(doc *huma.OpenAPI) {
+	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
+		return
+	}
+	for _, name := range []string{
+		"OperationErrorResponse",
+		"OperationPublicCounter",
+		"OperationPublicError",
+		"OperationRunSummary",
+		"OperationRunDetail",
+		"OperationUnavailableKind",
+		"OperationRunsResponse",
+		"OperationLaneStatus",
+		"OperationStatusResponse",
+	} {
+		if schema := doc.Components.Schemas.Map()[name]; schema != nil {
+			schema.AdditionalProperties = false
+		}
+	}
 }
 
 func baseOpenAPIDocument() *huma.OpenAPI {
@@ -743,6 +783,18 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		"ExploreGroupDimensionSource", "ExploreGroupDimensionParticipant", "ExploreGroupDimensionDomain",
 		"ExploreGroupDimensionMessageType", "ExploreGroupDimensionMailingList", "ExploreGroupDimensionKind", "ExploreGroupDimensionYear", "ExploreGroupDimensionMonth",
 	})
+	if counter := schemas["OperationPublicCounter"]; counter != nil {
+		setEnumNames(counter.Properties["unit"], []any{
+			"OperationPublicCounterUnitAttachments",
+			"OperationPublicCounterUnitBooks",
+			"OperationPublicCounterUnitChunks",
+			"OperationPublicCounterUnitContacts",
+			"OperationPublicCounterUnitDocuments",
+			"OperationPublicCounterUnitMessages",
+			"OperationPublicCounterUnitPeople",
+			"OperationPublicCounterUnitWrites",
+		})
+	}
 	if response := schemas["MeetingImportResponse"]; response != nil {
 		setEnumNames(response.Properties["status"], []any{
 			"MeetingImportResponseStatusCreated",

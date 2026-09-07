@@ -27,6 +27,9 @@ type GetAggregatesQuery struct {
 	// SourceID Source ID
 	SourceID *int64 `json:"source_id,omitempty"`
 
+	// SourceIds Source IDs; repeat or comma-separate values
+	SourceIds []int64 `json:"source_ids,omitempty"`
+
 	// AttachmentsOnly Only include messages with attachments
 	AttachmentsOnly *bool `json:"attachments_only,omitempty"`
 
@@ -61,6 +64,9 @@ type GetSubAggregatesQuery struct {
 
 	// SourceID Source ID
 	SourceID *int64 `json:"source_id,omitempty"`
+
+	// SourceIds Source IDs; repeat or comma-separate values
+	SourceIds []int64 `json:"source_ids,omitempty"`
 
 	// AttachmentsOnly Only include messages with attachments
 	AttachmentsOnly *bool `json:"attachments_only,omitempty"`
@@ -499,6 +505,9 @@ type FilterMessagesQuery struct {
 	// SourceID Source ID
 	SourceID *int64 `json:"source_id,omitempty"`
 
+	// SourceIds Source IDs; repeat or comma-separate values
+	SourceIds []int64 `json:"source_ids,omitempty"`
+
 	// AttachmentsOnly Only include messages with attachments
 	AttachmentsOnly *bool `json:"attachments_only,omitempty"`
 
@@ -564,6 +573,9 @@ type GetGmailIDsByFilterQuery struct {
 	// SourceID Source ID
 	SourceID *int64 `json:"source_id,omitempty"`
 
+	// SourceIds Source IDs; repeat or comma-separate values
+	SourceIds []int64 `json:"source_ids,omitempty"`
+
 	// AttachmentsOnly Only include messages with attachments
 	AttachmentsOnly *bool `json:"attachments_only,omitempty"`
 
@@ -623,10 +635,16 @@ type ListOperationRunsQuery struct {
 	// State Exact operation state
 	State *ListOperationRunsQueryState `json:"state,omitempty"`
 
+	// StartedFrom Inclusive canonical UTC RFC3339 lower bound
+	StartedFrom *time.Time `json:"started_from,omitempty"`
+
+	// StartedBefore Exclusive canonical UTC RFC3339 upper bound
+	StartedBefore *time.Time `json:"started_before,omitempty"`
+
 	// Limit Maximum runs to return (default 25, max 100)
 	Limit *int64 `json:"limit,omitempty" validate:"omitempty,gte=1,lte=100"`
 
-	// Cursor Opaque cursor bound to this archive and the exact kind, lane, and state filters
+	// Cursor Opaque cursor bound to this archive and the complete normalized filter set
 	Cursor *string `json:"cursor,omitempty"`
 }
 
@@ -1048,6 +1066,9 @@ type DeepSearchQuery struct {
 	// SourceID Source ID
 	SourceID *int64 `json:"source_id,omitempty"`
 
+	// SourceIds Source IDs; repeat or comma-separate values; not supported by deep search
+	SourceIds []int64 `json:"source_ids,omitempty"`
+
 	// AttachmentsOnly Only include messages with attachments
 	AttachmentsOnly *bool `json:"attachments_only,omitempty"`
 
@@ -1144,6 +1165,9 @@ type FastSearchQuery struct {
 	// SourceID Source ID
 	SourceID *int64 `json:"source_id,omitempty"`
 
+	// SourceIds Source IDs; repeat or comma-separate values
+	SourceIds []int64 `json:"source_ids,omitempty"`
+
 	// AttachmentsOnly Only include messages with attachments
 	AttachmentsOnly *bool `json:"attachments_only,omitempty"`
 
@@ -1170,9 +1194,6 @@ type FastSearchQuery struct {
 
 	// Direction Sort direction: asc or desc
 	Direction *string `json:"direction,omitempty"`
-
-	// SourceIds Source IDs; repeat the parameter for multiple sources
-	SourceIds []int64 `json:"source_ids,omitempty"`
 }
 
 func (f FastSearchQuery) Validate() error {
@@ -1398,6 +1419,9 @@ type ListTextConversationMessagesQuery struct {
 }
 
 type SearchTextMessagesQuery struct {
+	// SourceID Source ID
+	SourceID *int64 `json:"source_id,omitempty"`
+
 	// Q Search query
 	Q string `json:"q" validate:"required"`
 
