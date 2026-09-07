@@ -193,10 +193,15 @@ var operationMinimumRole = map[string]authz.Role{
 	"createCommunicationService": authz.RoleAdmin,
 
 	// Deletions, imports, backups, indexes, settings, integrations.
-	"listDeletions":                       authz.RoleViewer,
-	"getDeletion":                         authz.RoleViewer,
-	"stageDeletion":                       authz.RoleAdmin,
-	"cancelDeletion":                      authz.RoleAdmin,
+	"listDeletions":  authz.RoleViewer,
+	"getDeletion":    authz.RoleViewer,
+	"stageDeletion":  authz.RoleAdmin,
+	"cancelDeletion": authz.RoleAdmin,
+	// Archiving changes the mailbox at the provider. Minting the confirmation
+	// token is as privileged as spending it: a viewer who could obtain one
+	// would only need an administrator to redeem it.
+	"authorizeInboxArchive":               authz.RoleAdmin,
+	"executeInboxArchive":                 authz.RoleAdmin,
 	"createImportJob":                     authz.RoleAdmin,
 	"getImportJob":                        authz.RoleViewer,
 	"importMeeting":                       authz.RoleAdmin,
