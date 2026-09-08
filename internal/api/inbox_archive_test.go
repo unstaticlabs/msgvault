@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -388,4 +390,138 @@ func TestInboxArchiveAuthorizeIsNotGatedButExecuteIs(t *testing.T) {
 
 	assert.Equal(http.StatusServiceUnavailable, executed.Code)
 	assert.Equal("operation_in_progress", decodeErrorEnvelope(t, executed).Error)
+}
+
+// capturingLogger records log records so a test can assert what an operator
+// would actually be able to read afterwards.
+type capturingLogger struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (c *capturingLogger) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *capturingLogger) Handle(_ context.Context, record slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, record.Clone())
+	return nil
+}
+
+func (c *capturingLogger) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *capturingLogger) WithGroup(string) slog.Handler      { return c }
+
+// find returns the first record with the given message, and its attributes.
+func (c *capturingLogger) find(message string) (slog.Record, map[string]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, record := range c.records {
+		if record.Message != message {
+			continue
+		}
+		attrs := map[string]string{}
+		record.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		return record, attrs, true
+	}
+	return slog.Record{}, nil, false
+}
+
+func newLoggingInboxArchiveServer(
+	t *testing.T, runner InboxArchiveRunner,
+) (*Server, *capturingLogger) {
+	t.Helper()
+	capture := &capturingLogger{}
+	srv := NewServerWithOptions(ServerOptions{
+		Config: &config.Config{
+			InboxArchive: config.InboxArchiveConfig{RemoteEnabled: true},
+		},
+		Store:         &operationArchiveStore{mockStore: &mockStore{}, uid: operationTestArchiveUID},
+		OperationGate: NewSerialOperationGate(),
+		InboxArchive:  runner,
+		Logger:        slog.New(capture),
+	})
+	return srv, capture
+}
+
+// TestInboxArchiveLogsWhatItDid: this is the only operation msgvault performs
+// that changes a mailbox it otherwise only reads, and it is normally triggered
+// by an agent rather than by someone watching. Without its own log line the
+// only trace is an HTTP access entry, which cannot answer "which account, how
+// many, did any fail?" afterwards.
+func TestInboxArchiveLogsWhatItDid(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	runner := &stubInboxArchiveRunner{result: InboxArchiveRunResult{Archived: 2}}
+	srv, capture := newLoggingInboxArchiveServer(t, runner)
+	ids := []string{"m-1", "m-2"}
+
+	token := authorizeInboxArchive(t, srv, ids)
+	w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
+		InboxArchiveExecuteRequest{ConfirmationToken: token, SourceMessageIDs: ids})
+	require.Equalf(http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	record, attrs, ok := capture.find("inbox archive completed")
+	require.True(ok, "an archive must leave a log line of its own")
+	assert.Equal(slog.LevelInfo, record.Level)
+	assert.Equal("alice@example.com", attrs["account"])
+	assert.Equal("1", attrs["source_id"])
+	assert.Equal("2", attrs["requested"])
+	assert.Equal("2", attrs["archived"])
+	assert.Equal("0", attrs["failed"])
+	assert.NotEmpty(attrs["batch"])
+	assert.NotEmpty(attrs["caller"], "a surprising archive must be traceable to who asked")
+
+	// Message identifiers are not logged; the outcome is what an operator
+	// needs, and failing ones are already in the response.
+	for _, value := range attrs {
+		assert.NotContains(value, "m-1")
+	}
+}
+
+// TestInboxArchiveLogsFailuresLouder: a run that lost messages or stopped
+// part-way must not read as routine success in a log scan.
+func TestInboxArchiveLogsFailuresLouder(t *testing.T) {
+	tests := []struct {
+		name    string
+		result  InboxArchiveRunResult
+		err     error
+		message string
+	}{
+		{
+			name:    "some messages refused",
+			result:  InboxArchiveRunResult{Archived: 1, Failed: 1, FailedIDs: []string{"m-2"}},
+			message: "inbox archive completed with failures",
+		},
+		{
+			name:    "stopped part-way",
+			result:  InboxArchiveRunResult{Archived: 1, Remaining: 1},
+			err:     errors.New("provider refused the rest"),
+			message: "inbox archive stopped part-way",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+
+			runner := &stubInboxArchiveRunner{result: tc.result, err: tc.err}
+			srv, capture := newLoggingInboxArchiveServer(t, runner)
+			ids := []string{"m-1", "m-2"}
+
+			token := authorizeInboxArchive(t, srv, ids)
+			w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
+				InboxArchiveExecuteRequest{ConfirmationToken: token, SourceMessageIDs: ids})
+			require.Equalf(http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+			record, attrs, ok := capture.find(tc.message)
+			require.True(ok, "expected a %q record", tc.message)
+			assert.Equal(slog.LevelWarn, record.Level, "a lossy run must not read as routine")
+			assert.Equal("1", attrs["archived"])
+		})
+	}
 }
