@@ -185,18 +185,53 @@ func TestArchiveFromInboxPlanNamesRealMessages(t *testing.T) {
 	assert.Equal("news@example.com", resp.Sample[0].From)
 }
 
-func TestArchiveFromInboxConfirmWithoutTokenIsRefused(t *testing.T) {
+// TestArchiveFromInboxConfirmWithoutTokenArchivesDirectly: confirm alone is
+// enough. The token binds an execute to one exact selection -- it is an
+// integrity check, not a human approval gate -- so a single-call archive mints
+// its own over the set it just resolved. Whether a model may archive at all was
+// decided by the operator when they enabled both opt-ins.
+func TestArchiveFromInboxConfirmWithoutTokenArchivesDirectly(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	archiver := &fakeInboxArchiver{
+		token:  "minted-inline",
+		result: InboxArchiveResult{BatchID: "batch-1", Archived: 2},
+	}
+	h := &handlers{engine: inboxArchiveEngine(), inboxArchiver: archiver}
+
+	resp := runTool[inboxArchiveExecuteResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": "from:news", "confirm": true},
+	)
+
+	assert.Equal("archived", resp.Status)
+	assert.Equal(2, resp.Archived)
+
+	// The token it spends must cover exactly the messages it resolved, so a
+	// selection cannot drift between minting and archiving.
+	require.Len(archiver.authorizeReqs, 1)
+	require.Len(archiver.executeReqs, 1)
+	assert.Equal([]string{"gmail-001", "gmail-002"}, archiver.authorizeReqs[0].SourceMessageIDs)
+	assert.Equal([]string{"gmail-001", "gmail-002"}, archiver.executeReqs[0].SourceMessageIDs)
+	assert.Equal("minted-inline", archiver.executeReqs[0].ConfirmationToken)
+}
+
+// TestArchiveFromInboxWithoutConfirmStillPlans: the plan remains available for
+// a broad or uncertain selection, and still changes nothing.
+func TestArchiveFromInboxWithoutConfirmStillPlans(t *testing.T) {
 	assert := assert.New(t)
 
 	archiver := &fakeInboxArchiver{}
 	h := &handlers{engine: inboxArchiveEngine(), inboxArchiver: archiver}
 
-	result := runToolExpectError(t, ToolArchiveFromInbox, h.archiveFromInbox,
-		map[string]any{"query": "from:news", "confirm": true})
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": "from:news"},
+	)
 
-	assert.Contains(resultText(t, result), "confirmation_required")
-	assert.Empty(archiver.executeReqs)
-	assert.Empty(archiver.authorizeReqs, "a bad confirm must not mint a token either")
+	assert.Equal("plan", resp.Status)
+	assert.Empty(archiver.executeReqs, "a plan must still archive nothing")
 }
 
 func TestArchiveFromInboxExecutesWithToken(t *testing.T) {

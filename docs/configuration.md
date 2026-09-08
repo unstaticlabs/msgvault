@@ -229,7 +229,7 @@ Keeping them apart means enabling the tool for one assistant does not quietly
 grant mailbox access to everything else holding your API key, and that a daemon
 you have not opted in on refuses the operation no matter who asks. See
 [MCP Server](/docs/usage/chat/#archiving-your-inbox-via-mcp) for the
-plan-then-confirm cycle and provider support.
+archiving flow, the optional plan, and provider support.
 
 ## People sweep inference
 
