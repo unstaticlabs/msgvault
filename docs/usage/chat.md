@@ -179,7 +179,7 @@ The MCP server exposes the following tools to connected AI clients:
 | `update_saved_view` | Patch supplied Saved View fields using optimistic revision checking. Write-class. | `id` (int, required), `revision` (int, required), at least one of `name`, `description`, `canonical_state`, `schema_version` |
 | `delete_saved_view` | Delete a Saved View definition, not archive messages. Write-class and destructive. | `id` (int, required), `revision` (int, required) |
 | `stage_deletion` | Stage messages for deletion (creates manifest only) | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string) |
-| `archive_from_inbox` | Remove messages from your inbox at the mail provider. Disabled unless both opt-ins are set. Called without `confirm` it returns a plan and changes nothing. | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string), `confirm` (bool), `confirmation_token` (string) |
+| `archive_from_inbox` | Remove messages from your inbox at the mail provider. Disabled unless both opt-ins are set. `confirm=true` archives; without `confirm` it returns a plan and changes nothing. | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string), `confirm` (bool), `confirmation_token` (string) |
 | `get_person_profile` | One durable person's overview from local derived state: display name, tracking, contact state (first/last contact, last inbound and outbound, interaction count, inferred channel), the curated `primary_channel`, non-sensitive attributes, current employment, typed relationships, contact points, dates, and categories. Excludes sensitive attributes, private Notes, addresses, and media; makes no provider calls. | `person_id` (int, required) |
 
 `search_metadata`, `search_message_bodies`, `semantic_search_messages`, and `list_messages` return paginated JSON. `search_metadata` reports an exact `total`; `search_message_bodies`, `semantic_search_messages`, and `list_messages` return `total = -1` because they do not run a separate count query:
@@ -342,12 +342,17 @@ daemon endpoint is reachable by anything holding your API key, not only the MCP
 server, so enabling the flag alone does not hand mailbox access to every other
 client — and with the config unset, the daemon refuses whoever asks.
 
-### The plan-then-confirm cycle
+### Archiving, and the optional plan
 
-The tool is one endpoint with two phases. Called without `confirm`, it changes
-nothing and returns a plan: how many messages match, a sample of real subjects
-and senders so you can see whether the selection is what you meant, and a
-one-shot `confirmation_token`.
+`confirm=true` archives the selection in one call. That is the normal path: you
+already decided a model may do this when you turned on both opt-ins, so the tool
+does not ask again.
+
+Called **without** `confirm`, it changes nothing and returns a plan instead: how
+many messages match, a sample of real subjects and senders so you can see
+whether the selection is what you meant, and a `confirmation_token`. Reach for
+that when a selection is broad or unfamiliar and you want to look before
+anything moves.
 
 ```json
 {
@@ -359,17 +364,19 @@ one-shot `confirmation_token`.
     {"from": "news@example.com", "subject": "Weekly digest", "sent_at": "2023-11-04"}
   ],
   "confirmation_token": "op2....",
-  "next_step": "Show this plan to the user. Only if they explicitly agree, call archive_from_inbox again with the same selection, confirm=true and that token. Nothing has changed yet."
+  "next_step": "Call archive_from_inbox again with the same selection, confirm=true and this token. Nothing has changed yet."
 }
 ```
 
-The token is bound to that exact set of messages and can be spent once. If the
-selection changes between the plan and your answer, the token is refused and the
-assistant has to show you a fresh plan — so what you approved is what happens.
+The token is bound to that exact set of messages and can be spent once, so if
+the selection moves between the plan and your answer the token is refused and
+you get a fresh plan — what you looked at is what happens. It is an integrity
+check on the selection rather than an approval step: a direct `confirm=true`
+call mints its own token over the messages it just resolved.
 
 Add `label:INBOX` to your selection. Archiving a message that has already left
-the inbox is harmless, but including such messages inflates the count in the
-plan and makes it harder to see what you are agreeing to.
+the inbox is harmless, but including such messages inflates the count and makes
+it harder to see what will actually move.
 
 At most 1000 messages are archived per call. Larger selections report how many
 remain; repeat the cycle to continue. Interrupting a run is safe — messages

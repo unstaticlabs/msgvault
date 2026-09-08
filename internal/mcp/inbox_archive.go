@@ -76,8 +76,11 @@ type InboxArchiveResult struct {
 //
 // The split into authorize and execute exists so the token that permits an
 // archive is minted by the daemon, bound to one exact set of messages, and
-// spent once. A plan the model showed the user cannot then be redeemed against
-// a different set of messages.
+// spent once. It is an integrity check on the selection, not a human approval
+// gate: a plan shown to a user cannot later be redeemed against different
+// messages, and a single-call archive mints its own token over the set it just
+// resolved. Whether a model may archive at all is the operator's decision,
+// taken by enabling both --allow-mailbox-writes and the daemon's own opt-in.
 type InboxArchiver interface {
 	// AuthorizeInboxArchive mints a one-shot confirmation token for this set of
 	// messages, or returns ErrMailboxWritesDisabled when the daemon has not
@@ -133,10 +136,10 @@ func archiveFromInboxDefinition(_ *handlers) toolDefinition {
 		ToolArchiveFromInbox,
 		"Remove messages from the account's inbox at the mail provider. This CHANGES THE USER'S LIVE MAILBOX. "+
 			"It does not delete anything: archived messages keep every other label, stay searchable at the provider, "+
-			"and stay in the local archive. "+
-			"Call without 'confirm' first: that returns a plan with the message count, a sample, and a "+
-			"confirmation_token, and changes nothing. Show the plan to the user, get their explicit agreement, "+
-			"then call again with confirm=true and that token. Never pass confirm=true on the first call. "+
+			"and stay in the local archive; the user can move them back from their mail client. "+
+			"Call with confirm=true to archive the selection in one call. Call without 'confirm' to get a plan "+
+			"first -- the count, a sample, and a confirmation_token -- which changes nothing; do that when the "+
+			"selection is broad or you are not confident it matches what the user asked for. "+
 			"Use EITHER 'query' (Gmail-style search) OR structured filters, not both; add label:INBOX to the "+
 			"selection so the count reflects messages that are actually in the inbox. "+
 			"At most 1000 messages per call; call again to continue a larger selection.",
@@ -152,9 +155,10 @@ func archiveFromInboxDefinition(_ *handlers) toolDefinition {
 			toolArgBefore:    beforeProperty(),
 			"has_attachment": booleanSchema("Only messages with attachments"),
 			"confirm": booleanSchema(
-				"Set true only after the user has seen the plan and agreed to it. Requires confirmation_token."),
+				"Archive the selection. Without it the call returns a plan and changes nothing."),
 			"confirmation_token": stringSchema(
-				"The confirmation_token returned by the preceding plan call. Valid for that exact set of messages, once."),
+				"Optional. The confirmation_token from a preceding plan call, which binds this archive to the " +
+					"exact set of messages that plan described. Omit it to archive the current selection directly."),
 		}),
 		inboxArchiveOutputSchema(),
 		(*handlers).archiveFromInbox,
@@ -171,12 +175,6 @@ func (h *handlers) archiveFromInbox(ctx context.Context, req toolRequest) (*tool
 	confirm, _ := args["confirm"].(bool)
 	token, _ := args["confirmation_token"].(string)
 	token = strings.TrimSpace(token)
-
-	if confirm && token == "" {
-		return toolErrorResult(
-			"confirmation_required: call without 'confirm' first, show the returned plan to the user, " +
-				"and pass the confirmation_token it returns"), nil
-	}
 
 	selection, result, err := h.resolveMutationTargets(
 		ctx, args, maxArchiveFromInboxResults, "inbox archive")
@@ -203,6 +201,28 @@ func (h *handlers) archiveFromInbox(ctx context.Context, req toolRequest) (*tool
 
 	if !confirm {
 		return h.planInboxArchive(ctx, selection, source, sourceMessageIDs, truncated)
+	}
+
+	// confirm without a token archives in one call. The token binds an execute
+	// to one exact set of messages; it is an integrity check, not a human
+	// approval gate. Minting it here closes the same gap for a single-call
+	// archive, because the set it binds is the set this call just resolved.
+	// Whether a model may do this at all was decided by the operator when they
+	// enabled both --allow-mailbox-writes and the daemon's own opt-in.
+	if token == "" {
+		minted, mintErr := h.inboxArchiver.AuthorizeInboxArchive(ctx, InboxArchiveAuthorizeRequest{
+			Account:          source.Identifier,
+			SourceID:         source.ID,
+			Description:      selection.description,
+			SourceMessageIDs: sourceMessageIDs,
+		})
+		if translated := translateInboxArchiveErr(mintErr); translated != nil {
+			return translated, nil
+		}
+		if mintErr != nil {
+			return nil, newInternalError("authorize inbox archive", mintErr)
+		}
+		token = minted
 	}
 
 	return h.executeInboxArchive(ctx, source, sourceMessageIDs, token, truncated)
