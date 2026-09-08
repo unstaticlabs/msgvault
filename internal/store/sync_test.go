@@ -643,6 +643,61 @@ func TestScopedStoreRejectsEveryImporterMutationAfterSupersession(t *testing.T) 
 	checks.Zero(staleEmailThreads)
 }
 
+// An archive whose FTS index is missing still has to report supersession from
+// UpsertFTS. The index write is skipped there, but the generation fence is not
+// about what gets indexed — it is about whether this generation may write at
+// all — and the exhaustive list above only proves the fenced path on builds
+// where FTS is available.
+func TestScopedStoreRejectsFTSWriteOnArchiveWithoutFTSIndex(t *testing.T) {
+	requirements := require.New(t)
+	// Deliberately a SQLite archive in both lanes rather than a
+	// SkipIfPostgres: only removing the index is dialect-specific, while the
+	// ordering under test — fence first, then availability — is not.
+	dbPath := filepath.Join(t.TempDir(), "no-fts.db")
+
+	seed, err := store.OpenForTest(dbPath)
+	requirements.NoError(err, "open seed archive")
+	requirements.NoError(seed.InitSchema(), "seed InitSchema")
+	_, err = seed.DB().Exec(`DROP TABLE IF EXISTS messages_fts`)
+	requirements.NoError(err, "drop the FTS index")
+	requirements.NoError(seed.Close(), "close seed archive")
+
+	// Reopened without InitSchema: re-running it would recreate the FTS
+	// objects and the open-time probe would report them available again.
+	st, err := store.OpenForTest(dbPath)
+	requirements.NoError(err, "reopen archive")
+	t.Cleanup(func() { _ = st.Close() })
+	requirements.False(st.FTS5Available(), "archive must have no FTS index")
+
+	source, err := st.GetOrCreateSource("gmail", "test@example.com")
+	requirements.NoError(err, "GetOrCreateSource")
+	conversationID, err := st.EnsureConversation(source.ID, "default-thread", "Default Thread")
+	requirements.NoError(err, "EnsureConversation")
+	messageID, err := st.UpsertMessage(&store.Message{
+		ConversationID:  conversationID,
+		SourceID:        source.ID,
+		SourceMessageID: "generation-fence-message",
+		MessageType:     "email",
+		SizeEstimate:    1000,
+	})
+	requirements.NoError(err, "UpsertMessage")
+
+	oldID, err := st.StartSync(source.ID, "full")
+	requirements.NoError(err, "StartSync")
+	stale := st.ScopedToSync(source.ID, oldID)
+	requirements.NoError(st.FailSync(oldID, "worker stopped"))
+	newID, err := st.StartSync(source.ID, "full")
+	requirements.NoError(err, "StartSync")
+
+	requirements.ErrorIs(
+		stale.UpsertFTS(messageID, "stale", "stale", "", "", ""),
+		store.ErrSyncRunSuperseded)
+	// The running generation still gets the no-op, not an error: the fence is
+	// the only thing an unindexed archive adds to this call.
+	requirements.NoError(
+		st.ScopedToSync(source.ID, newID).UpsertFTS(messageID, "live", "live", "", "", ""))
+}
+
 func TestScopedSourceWriteMatchesStartSyncLockOrder(t *testing.T) {
 	f := storetest.New(t)
 	if !f.Store.IsPostgreSQL() {
