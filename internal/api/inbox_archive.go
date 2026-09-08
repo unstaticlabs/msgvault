@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -308,7 +309,64 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 		// stopped rather than as a failure that touched nothing.
 		response.PartialFailure = err.Error()
 	}
+	s.logInboxArchiveRun(r, grant, len(req.SourceMessageIDs), response)
 	writeJSON(w, http.StatusOK, response)
+}
+
+// logInboxArchiveRun records that messages left the user's inbox at the mail
+// provider.
+//
+// This is the only operation msgvault performs that changes a mailbox it
+// otherwise only reads, and it is normally triggered by an agent rather than by
+// a person watching. Without a line of its own the sole trace is an HTTP access
+// log entry, which says a request happened but not to which account, how many
+// messages moved, or whether any of them failed -- so answering "did that
+// actually do anything?" afterwards means inferring it from provider history
+// IDs and row counts. Log what was asked for and what happened.
+//
+// Message identifiers are deliberately not logged: the outcome is what an
+// operator needs, and the failing ones are already in the response.
+func (s *Server) logInboxArchiveRun(
+	r *http.Request,
+	grant inboxArchiveGrant,
+	requested int,
+	response InboxArchiveExecuteResponse,
+) {
+	if s.logger == nil {
+		return
+	}
+	fields := []any{
+		slog.String("batch", response.BatchID),
+		slog.String("account", grant.Account),
+		slog.Int64("source_id", grant.SourceID),
+		slog.String("caller", s.inboxArchiveCaller(r)),
+		slog.Int("requested", requested),
+		slog.Int("archived", response.Archived),
+		slog.Int("failed", response.Failed),
+		slog.Int("remaining", response.Remaining),
+		slog.Bool("yielded", response.Yielded),
+	}
+	if response.PartialFailure != "" {
+		s.logger.Warn("inbox archive stopped part-way",
+			append(fields, slog.String("error", response.PartialFailure))...)
+		return
+	}
+	if response.Failed > 0 {
+		s.logger.Warn("inbox archive completed with failures", fields...)
+		return
+	}
+	s.logger.Info("inbox archive completed", fields...)
+}
+
+// inboxArchiveCaller names who asked, so a surprising archive can be traced to
+// a person or a key rather than only to a source address.
+func (s *Server) inboxArchiveCaller(r *http.Request) string {
+	principal := s.requestPrincipal(r)
+	name := principal.Name
+	if name == "" {
+		name = "unknown"
+	}
+	return string(principal.Kind) + ":" + name
 }
 
 // inboxArchiveBatchID names the run in a way the caller can quote back to the
