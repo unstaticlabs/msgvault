@@ -4,5 +4,5 @@
 
 export interface InboxArchiveExecuteRequest {
   confirmation_token: string;
-  source_message_ids: string[];
+  source_message_ids?: string[];
 }

@@ -4687,7 +4687,7 @@ func (i InboxArchiveAuthorizeResponse) Validate() error {
 
 type InboxArchiveExecuteRequest struct {
 	ConfirmationToken string   `json:"confirmation_token" validate:"required"`
-	SourceMessageIds  []string `json:"source_message_ids" validate:"required"`
+	SourceMessageIds  []string `json:"source_message_ids,omitempty"`
 }
 
 func (i InboxArchiveExecuteRequest) Validate() error {

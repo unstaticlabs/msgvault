@@ -2,12 +2,15 @@ package mcp
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/query/querytest"
+	"go.kenn.io/msgvault/internal/search"
 )
 
 // fakeInboxArchiver records what the tool asked the daemon to do.
@@ -153,7 +156,8 @@ func TestArchiveFromInboxPlanChangesNothing(t *testing.T) {
 	assert.Equal(2, resp.MessageCount)
 	assert.False(resp.Truncated)
 	assert.Equal("token-xyz", resp.ConfirmationToken)
-	assert.Contains(resp.NextStep, "explicitly agree")
+	assert.Contains(resp.NextStep, "confirmation_token=\"token-xyz\"")
+	assert.Contains(resp.NextStep, "no selection argument is needed")
 	assert.Empty(archiver.executeReqs, "a plan must not archive anything")
 
 	require.Len(t, archiver.authorizeReqs, 1)
@@ -234,31 +238,61 @@ func TestArchiveFromInboxWithoutConfirmStillPlans(t *testing.T) {
 	assert.Empty(archiver.executeReqs, "a plan must still archive nothing")
 }
 
-func TestArchiveFromInboxExecutesWithToken(t *testing.T) {
+// TestArchiveFromInboxRedeemsAPlanByTokenAlone: a confirmation token names the
+// exact messages the daemon recorded when it minted the token, so redeeming it
+// must not depend on the caller reproducing the selection. Re-resolving here
+// could only produce a different set -- which is the drift the token exists to
+// prevent -- and it is what made a plan unconfirmable when its query could not
+// be rebuilt.
+func TestArchiveFromInboxRedeemsAPlanByTokenAlone(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 
 	archiver := &fakeInboxArchiver{
-		result: InboxArchiveResult{BatchID: "batch-1", Archived: 2},
+		result: InboxArchiveResult{
+			BatchID: "batch-1", Account: "alice@example.com", Archived: 2,
+		},
 	}
-	h := &handlers{engine: inboxArchiveEngine(), inboxArchiver: archiver}
+	engine := inboxArchiveEngine()
+	engine.SearchFastFunc = func(
+		context.Context, *search.Query, query.MessageFilter, int, int,
+	) ([]query.MessageSummary, error) {
+		assert.Fail("redeeming a token must not re-resolve the selection")
+		return nil, nil
+	}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
 
 	resp := runTool[inboxArchiveExecuteResponse](
 		t, ToolArchiveFromInbox, h.archiveFromInbox,
-		map[string]any{
-			"query": "from:news", "confirm": true, "confirmation_token": "token-xyz",
-		},
+		map[string]any{"confirm": true, "confirmation_token": "token-xyz"},
 	)
 
 	assert.Equal("archived", resp.Status)
 	assert.Equal("batch-1", resp.BatchID)
+	assert.Equal("alice@example.com", resp.Account)
 	assert.Equal(2, resp.Archived)
-	assert.Contains(resp.NextStep, "incremental sync")
+	assert.NotContains(resp.NextStep, "incremental sync")
+	assert.Contains(resp.NextStep, "this plan covered",
+		"a redeemed plan may be part of a larger selection and must not claim it is finished")
 
 	require.Len(archiver.executeReqs, 1)
 	assert.Equal("token-xyz", archiver.executeReqs[0].ConfirmationToken)
-	assert.Equal([]string{"gmail-001", "gmail-002"},
-		archiver.executeReqs[0].SourceMessageIDs)
+	assert.Empty(archiver.executeReqs[0].SourceMessageIDs,
+		"the daemon holds the set the token covers")
+}
+
+// TestArchiveFromInboxTokenWithoutConfirmChangesNothing: a token alone is not a
+// request to archive. Treating it as one would turn a caller that meant to
+// inspect the plan into one that executed it.
+func TestArchiveFromInboxTokenWithoutConfirmChangesNothing(t *testing.T) {
+	archiver := &fakeInboxArchiver{}
+	h := &handlers{engine: inboxArchiveEngine(), inboxArchiver: archiver}
+
+	result := runToolExpectError(t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"confirmation_token": "token-xyz"})
+
+	assert.Contains(t, result.text, "confirm=true")
+	assert.Empty(t, archiver.executeReqs)
 }
 
 func TestArchiveFromInboxReportsRemainingWork(t *testing.T) {
@@ -349,4 +383,244 @@ func TestArchiveFromInboxWithoutSeamIsUnavailable(t *testing.T) {
 		map[string]any{"query": "from:news"})
 
 	assert.Contains(t, resultText(t, result), "mailbox_writes_unavailable")
+}
+
+// TestArchiveFromInboxResolvesAgainstTheArchiveOfRecord: the analytics cache is
+// rebuilt when messages arrive or are deleted, never when their labels change.
+// A tool that archives by removing a label therefore cannot read its own work
+// back out of the cache: the batch it just archived still looks unarchived, the
+// same messages are selected again, and the run never converges. When the call
+// names one Gmail account the selection is resolved against the archive of
+// record instead.
+func TestArchiveFromInboxResolvesAgainstTheArchiveOfRecord(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	engine := inboxArchiveEngine()
+	var resolvedFilter query.MessageFilter
+	engine.GetDeletionTargetsBySearchFunc = func(
+		_ context.Context, _ *search.Query, filter query.MessageFilter, mode query.DeletionSearchMode,
+	) ([]query.DeletionTarget, error) {
+		resolvedFilter = filter
+		assert.Equal(query.DeletionSearchFast, mode)
+		return []query.DeletionTarget{{
+			MessageID: 7, SourceID: 1, SourceType: "gmail",
+			SourceIdentifier: "alice@example.com", SourceMessageID: "gmail-007",
+		}}, nil
+	}
+	engine.SearchFastFunc = func(
+		context.Context, *search.Query, query.MessageFilter, int, int,
+	) ([]query.MessageSummary, error) {
+		assert.Fail("a Gmail account must not be resolved from the analytics cache")
+		return nil, nil
+	}
+	archiver := &fakeInboxArchiver{token: "token-fresh"}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"account": "alice@example.com", "query": "label:INBOX from:news"},
+	)
+
+	assert.False(resp.Stale, "a fresh resolution must not be reported as stale")
+	assert.Equal(1, resp.MessageCount)
+	require.NotNil(resp.TotalMatching)
+	assert.Equal(1, *resp.TotalMatching)
+	assert.False(resp.HasMore)
+	require.NotNil(resolvedFilter.SourceID)
+	assert.Equal(int64(1), *resolvedFilter.SourceID, "the resolution must stay scoped to the account")
+
+	require.Len(archiver.authorizeReqs, 1)
+	assert.Equal([]string{"gmail-007"}, archiver.authorizeReqs[0].SourceMessageIDs)
+}
+
+// TestArchiveFromInboxPlanKeepsTheWholeSelectionText: the plan's selection is
+// what a person reads to recognise a wrong batch, and a caller that mistakes it
+// for a query to replay must not be handed a truncated one. It used to be cut
+// at 50 characters, which silently dropped the tail of a date bound.
+func TestArchiveFromInboxPlanKeepsTheWholeSelectionText(t *testing.T) {
+	longQuery := "label:INBOX from:notifications@some-quite-long-sender.example.com before:2026-02-01"
+	h := &handlers{engine: inboxArchiveEngine(), inboxArchiver: &fakeInboxArchiver{token: "t"}}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": longQuery},
+	)
+
+	assert.Equal(t, "query: "+longQuery, resp.Selection)
+}
+
+// TestArchiveFromInboxReportsWhatItDidNotCover: a selection larger than one
+// call must say so, or a caller cannot tell "exactly this many matched" from
+// "this is the first page". Without it a backlog is worked through by guessing.
+func TestArchiveFromInboxReportsWhatItDidNotCover(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	engine := inboxArchiveEngine()
+	engine.GetDeletionTargetsBySearchFunc = func(
+		context.Context, *search.Query, query.MessageFilter, query.DeletionSearchMode,
+	) ([]query.DeletionTarget, error) {
+		targets := make([]query.DeletionTarget, maxArchiveFromInboxResults+25)
+		for i := range targets {
+			targets[i] = query.DeletionTarget{
+				MessageID: int64(i + 1), SourceID: 1, SourceType: "gmail",
+				SourceIdentifier: "alice@example.com",
+				SourceMessageID:  "gmail-" + strconv.Itoa(i),
+			}
+		}
+		return targets, nil
+	}
+	archiver := &fakeInboxArchiver{token: "token-big"}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"account": "alice@example.com", "query": "label:INBOX"},
+	)
+
+	assert.Equal(maxArchiveFromInboxResults, resp.MessageCount)
+	assert.True(resp.HasMore)
+	require.NotNil(resp.TotalMatching)
+	assert.Equal(maxArchiveFromInboxResults+25, *resp.TotalMatching)
+	assert.Contains(resp.NextStep, strconv.Itoa(maxArchiveFromInboxResults+25))
+
+	require.Len(archiver.authorizeReqs, 1)
+	assert.Len(archiver.authorizeReqs[0].SourceMessageIDs, maxArchiveFromInboxResults)
+}
+
+// TestArchiveFromInboxPagesPastTheDaemonPageCap: the daemon clamps one search
+// page to 500 whatever the caller asks for, so a single request for the tool's
+// full selection silently returned 500 and reported nothing about the rest.
+func TestArchiveFromInboxPagesPastTheDaemonPageCap(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	const available = 1200
+	all := make([]query.MessageSummary, available)
+	for i := range all {
+		all[i] = query.MessageSummary{
+			ID: int64(i + 1), SourceID: 1, SourceMessageID: "gmail-" + strconv.Itoa(i),
+		}
+	}
+	engine := inboxArchiveEngine()
+	var pages []int
+	engine.SearchFastFunc = func(
+		_ context.Context, _ *search.Query, _ query.MessageFilter, limit, offset int,
+	) ([]query.MessageSummary, error) {
+		// The daemon's own ceiling, reproduced: asking for more returns 500.
+		if limit > 500 {
+			limit = 500
+		}
+		pages = append(pages, limit)
+		if offset >= len(all) {
+			return nil, nil
+		}
+		return all[offset:min(offset+limit, len(all))], nil
+	}
+	engine.SearchFastCountFunc = func(
+		context.Context, *search.Query, query.MessageFilter,
+	) (int64, error) {
+		return available, nil
+	}
+	archiver := &fakeInboxArchiver{token: "token-paged"}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": "label:INBOX"},
+	)
+
+	assert.Equal(maxArchiveFromInboxResults, resp.MessageCount)
+	assert.True(resp.HasMore)
+	require.NotNil(resp.TotalMatching)
+	assert.Equal(available, *resp.TotalMatching)
+	assert.Equal([]int{500, 500}, pages, "the selection must be paged in units the daemon honours")
+	assert.True(resp.Stale, "a cache-resolved selection must say so")
+}
+
+// TestArchiveFromInboxDoesNotSelectAMessageTwice: results come back newest
+// first, so mail arriving while the pages are walked shifts every later result
+// back by one and a message can land on two pages. Selecting it twice would
+// double-count the batch.
+func TestArchiveFromInboxDoesNotSelectAMessageTwice(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	page := func(first int64, n int) []query.MessageSummary {
+		out := make([]query.MessageSummary, n)
+		for i := range out {
+			id := first + int64(i)
+			out[i] = query.MessageSummary{
+				ID: id, SourceID: 1,
+				SourceMessageID: "gmail-" + strconv.FormatInt(id, 10),
+			}
+		}
+		return out
+	}
+	engine := inboxArchiveEngine()
+	calls := 0
+	engine.SearchFastFunc = func(
+		context.Context, *search.Query, query.MessageFilter, int, int,
+	) ([]query.MessageSummary, error) {
+		calls++
+		switch calls {
+		case 1:
+			return page(1, 500), nil
+		case 2:
+			// One message arrived, so this page repeats the last of page one.
+			return page(500, 200), nil
+		default:
+			return nil, nil
+		}
+	}
+	archiver := &fakeInboxArchiver{token: "token-dedup"}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": "label:INBOX"},
+	)
+
+	assert.Equal(699, resp.MessageCount, "the repeated message must be selected once")
+	require.Len(archiver.authorizeReqs, 1)
+	ids := archiver.authorizeReqs[0].SourceMessageIDs
+	assert.Len(ids, 699)
+	unique := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		require.Falsef(unique[id], "duplicate id %s", id)
+		unique[id] = true
+	}
+}
+
+// TestArchiveFromInboxFallsBackWhenTheSizeIsUnknown: the fresh path resolves
+// every match in one unbounded query, which is only safe when the size of the
+// selection is known. If the count fails, resolving anyway could pull a whole
+// archive into memory on both sides, so the bounded cache path is used and the
+// caller is told the selection may be stale.
+func TestArchiveFromInboxFallsBackWhenTheSizeIsUnknown(t *testing.T) {
+	assert := assert.New(t)
+
+	engine := inboxArchiveEngine()
+	engine.SearchFastCountFunc = func(
+		context.Context, *search.Query, query.MessageFilter,
+	) (int64, error) {
+		return 0, errors.New("count unavailable")
+	}
+	engine.GetDeletionTargetsBySearchFunc = func(
+		context.Context, *search.Query, query.MessageFilter, query.DeletionSearchMode,
+	) ([]query.DeletionTarget, error) {
+		assert.Fail("an unbounded resolution must not run on an unknown selection size")
+		return nil, nil
+	}
+	h := &handlers{engine: engine, inboxArchiver: &fakeInboxArchiver{token: "t"}}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"account": "alice@example.com", "query": "label:INBOX"},
+	)
+
+	assert.True(resp.Stale)
+	assert.Equal(2, resp.MessageCount)
+	assert.Nil(resp.TotalMatching, "an unknown total must be absent, not reported as zero")
 }

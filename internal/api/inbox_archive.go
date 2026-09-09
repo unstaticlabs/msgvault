@@ -84,9 +84,15 @@ type InboxArchiveAuthorizeResponse struct {
 }
 
 // InboxArchiveExecuteRequest redeems a confirmation token.
+//
+// SourceMessageIDs is optional. The token already names an exact set, recorded
+// when it was minted, so a caller that has the token need not hold the list or
+// rebuild the query that produced it. Supplying ids keeps the older, stricter
+// contract: they must match the ones the token covers, which lets a caller
+// assert it is confirming the plan it believes it is.
 type InboxArchiveExecuteRequest struct {
 	ConfirmationToken string   `json:"confirmation_token"`
-	SourceMessageIDs  []string `json:"source_message_ids"`
+	SourceMessageIDs  []string `json:"source_message_ids,omitempty"`
 }
 
 // InboxArchiveExecuteResponse reports the outcome.
@@ -107,13 +113,20 @@ type InboxArchiveExecuteResponse struct {
 }
 
 // inboxArchiveGrant records what one confirmation token permits.
+//
+// SourceMessageIDs is the exact set the token covers. Holding it here is what
+// lets a caller confirm a plan by naming the token alone: it does not have to
+// keep the list, and it cannot rebuild a query that resolves to a different
+// set between the plan and the confirmation.
 type inboxArchiveGrant struct {
-	SourceID      int64
-	Account       string
-	SelectionHash string
-	MessageCount  int
-	IssuedAt      time.Time
-	ExpiresAt     time.Time
+	SourceID         int64
+	Account          string
+	Description      string
+	SelectionHash    string
+	SourceMessageIDs []string
+	MessageCount     int
+	IssuedAt         time.Time
+	ExpiresAt        time.Time
 }
 
 // inboxArchiveGrants holds outstanding confirmation tokens.
@@ -127,6 +140,15 @@ type inboxArchiveGrants struct {
 	mu     sync.Mutex
 	grants map[string]inboxArchiveGrant
 }
+
+// maxOutstandingInboxArchiveGrants bounds how many unredeemed plans are kept.
+//
+// Each grant now holds the message ids it covers, so the store is no longer
+// negligible: a thousand ids is tens of kilobytes, and planning is not gated
+// by the operation gate. A person has a handful of plans open at once, so a
+// bound this far above that costs nothing real and stops a caller that only
+// ever plans from growing the daemon's memory until it is killed.
+const maxOutstandingInboxArchiveGrants = 64
 
 // issue mints a token for a grant, pruning anything already expired.
 func (g *inboxArchiveGrants) issue(grant inboxArchiveGrant) (string, error) {
@@ -144,6 +166,17 @@ func (g *inboxArchiveGrants) issue(grant inboxArchiveGrant) (string, error) {
 		if grant.IssuedAt.After(existing.ExpiresAt) {
 			delete(g.grants, candidate)
 		}
+	}
+	// Still full of live plans: drop the oldest, which is the one whose own
+	// expiry is nearest and the least likely to still be waiting on an answer.
+	for len(g.grants) >= maxOutstandingInboxArchiveGrants {
+		oldest := ""
+		for candidate, existing := range g.grants {
+			if oldest == "" || existing.IssuedAt.Before(g.grants[oldest].IssuedAt) {
+				oldest = candidate
+			}
+		}
+		delete(g.grants, oldest)
 	}
 	g.grants[token] = grant
 	return token, nil
@@ -212,12 +245,14 @@ func (s *Server) handleInboxArchiveAuthorize(w http.ResponseWriter, r *http.Requ
 	now := time.Now().UTC()
 	expiry := now.Add(inboxArchiveTokenTTL)
 	token, err := s.inboxArchiveGrants.issue(inboxArchiveGrant{
-		SourceID:      req.SourceID,
-		Account:       req.Account,
-		SelectionHash: inboxArchiveSelectionHash(req.SourceID, req.SourceMessageIDs),
-		MessageCount:  len(req.SourceMessageIDs),
-		IssuedAt:      now,
-		ExpiresAt:     expiry,
+		SourceID:         req.SourceID,
+		Account:          req.Account,
+		Description:      req.Description,
+		SelectionHash:    inboxArchiveSelectionHash(req.SourceID, req.SourceMessageIDs),
+		SourceMessageIDs: append([]string(nil), req.SourceMessageIDs...),
+		MessageCount:     len(req.SourceMessageIDs),
+		IssuedAt:         now,
+		ExpiresAt:        expiry,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "token_error", "could not mint a confirmation token")
@@ -260,13 +295,25 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 			"the confirmation token is unknown, expired, or already used")
 		return
 	}
-	if !validateInboxArchiveSelection(w, grant.SourceID, req.SourceMessageIDs) {
-		return
-	}
-	if inboxArchiveSelectionHash(grant.SourceID, req.SourceMessageIDs) != grant.SelectionHash {
-		writeInboxArchiveTokenInvalid(w,
-			"the confirmation token was issued for a different set of messages")
-		return
+	// No ids means "archive the plan this token names". The set was fixed when
+	// the token was minted, so there is nothing to check it against.
+	sourceMessageIDs := req.SourceMessageIDs
+	if len(sourceMessageIDs) == 0 {
+		sourceMessageIDs = grant.SourceMessageIDs
+		if len(sourceMessageIDs) == 0 {
+			writeInboxArchiveTokenInvalid(w,
+				"the confirmation token no longer names any messages")
+			return
+		}
+	} else {
+		if !validateInboxArchiveSelection(w, grant.SourceID, sourceMessageIDs) {
+			return
+		}
+		if inboxArchiveSelectionHash(grant.SourceID, sourceMessageIDs) != grant.SelectionHash {
+			writeInboxArchiveTokenInvalid(w,
+				"the confirmation token was issued for a different set of messages")
+			return
+		}
 	}
 
 	// The operation gate is already held for this request by
@@ -277,7 +324,7 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 	result, err := runner.RunInboxArchive(r.Context(), InboxArchiveRunRequest{
 		SourceID:         grant.SourceID,
 		Account:          grant.Account,
-		SourceMessageIDs: req.SourceMessageIDs,
+		SourceMessageIDs: sourceMessageIDs,
 	})
 	switch {
 	case errors.Is(err, ErrInboxArchiveUnsupportedSource):
@@ -309,7 +356,7 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 		// stopped rather than as a failure that touched nothing.
 		response.PartialFailure = err.Error()
 	}
-	s.logInboxArchiveRun(r, grant, len(req.SourceMessageIDs), response)
+	s.logInboxArchiveRun(r, grant, len(sourceMessageIDs), response)
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -324,7 +371,10 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 // actually do anything?" afterwards means inferring it from provider history
 // IDs and row counts. Log what was asked for and what happened.
 //
-// Message identifiers are deliberately not logged: the outcome is what an
+// The selection is logged because it is the closest thing to an intent: it
+// says what the caller asked for, which is what an operator compares against
+// the counts when an archive looks larger than it should have been. Individual
+// message identifiers are deliberately not logged: the outcome is what an
 // operator needs, and the failing ones are already in the response.
 func (s *Server) logInboxArchiveRun(
 	r *http.Request,
@@ -340,6 +390,7 @@ func (s *Server) logInboxArchiveRun(
 		slog.String("account", grant.Account),
 		slog.Int64("source_id", grant.SourceID),
 		slog.String("caller", s.inboxArchiveCaller(r)),
+		slog.String("selection", grant.Description),
 		slog.Int("requested", requested),
 		slog.Int("archived", response.Archived),
 		slog.Int("failed", response.Failed),

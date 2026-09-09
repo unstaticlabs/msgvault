@@ -228,6 +228,7 @@ func (a daemonMCPInboxArchiver) ExecuteInboxArchive(
 	}
 	return mcpserver.InboxArchiveResult{
 		BatchID:   result.BatchID,
+		Account:   result.Account,
 		Archived:  result.Archived,
 		Failed:    result.Failed,
 		Remaining: result.Remaining,

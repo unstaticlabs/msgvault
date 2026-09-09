@@ -179,7 +179,7 @@ The MCP server exposes the following tools to connected AI clients:
 | `update_saved_view` | Patch supplied Saved View fields using optimistic revision checking. Write-class. | `id` (int, required), `revision` (int, required), at least one of `name`, `description`, `canonical_state`, `schema_version` |
 | `delete_saved_view` | Delete a Saved View definition, not archive messages. Write-class and destructive. | `id` (int, required), `revision` (int, required) |
 | `stage_deletion` | Stage messages for deletion (creates manifest only) | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string) |
-| `archive_from_inbox` | Remove messages from your inbox at the mail provider. Disabled unless both opt-ins are set. `confirm=true` archives; without `confirm` it returns a plan and changes nothing. | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string), `confirm` (bool), `confirmation_token` (string) |
+| `archive_from_inbox` | Remove messages from your inbox at the mail provider. Disabled unless both opt-ins are set. `confirm=true` archives; without `confirm` it returns a plan and changes nothing. `confirmation_token` with `confirm=true` archives that plan and needs no selection. | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string), `confirm` (bool), `confirmation_token` (string) |
 | `get_person_profile` | One durable person's overview from local derived state: display name, tracking, contact state (first/last contact, last inbound and outbound, interaction count, inferred channel), the curated `primary_channel`, non-sensitive attributes, current employment, typed relationships, contact points, dates, and categories. Excludes sensitive attributes, private Notes, addresses, and media; makes no provider calls. | `person_id` (int, required) |
 
 `search_metadata`, `search_message_bodies`, `semantic_search_messages`, and `list_messages` return paginated JSON. `search_metadata` reports an exact `total`; `search_message_bodies`, `semantic_search_messages`, and `list_messages` return `total = -1` because they do not run a separate count query:
@@ -359,29 +359,67 @@ anything moves.
   "status": "plan",
   "account": "you@gmail.com",
   "selection": "query: label:INBOX from:newsletter before:2024-01-01",
-  "message_count": 412,
+  "message_count": 1000,
+  "total_matching": 1412,
+  "has_more": true,
   "sample": [
     {"from": "news@example.com", "subject": "Weekly digest", "sent_at": "2023-11-04"}
   ],
   "confirmation_token": "op2....",
-  "next_step": "Call archive_from_inbox again with the same selection, confirm=true and this token. Nothing has changed yet."
+  "next_step": "Nothing has changed yet. To archive exactly these 1000 messages, call archive_from_inbox again with confirm=true and confirmation_token=\"op2....\" — no selection argument is needed."
 }
 ```
 
-The token is bound to that exact set of messages and can be spent once, so if
-the selection moves between the plan and your answer the token is refused and
-you get a fresh plan — what you looked at is what happens. It is an integrity
-check on the selection rather than an approval step: a direct `confirm=true`
-call mints its own token over the messages it just resolved.
+The token *is* the plan. It names the exact messages the plan covered, recorded
+by the daemon when it was minted, so confirming needs nothing but the token and
+`confirm=true` — the query does not have to be repeated and cannot drift into a
+different set between the two calls. `selection` is there for you to read, not
+to send back. A token can be spent once; a direct `confirm=true` call mints its
+own over the messages it just resolved.
 
 Add `label:INBOX` to your selection. Archiving a message that has already left
 the inbox is harmless, but including such messages inflates the count and makes
 it harder to see what will actually move.
 
-At most 1000 messages are archived per call. Larger selections report how many
-remain; repeat the cycle to continue. Interrupting a run is safe — messages
-already archived drop out of an inbox-scoped selection, so the next call picks
-up where the last one stopped.
+At most 1000 messages move per call. `total_matching` says how many the
+selection matches in total and `has_more` says whether this call covered them
+all, so a backlog is worked through by repeating until `has_more` is false
+rather than by guessing. Interrupting a run is safe — messages already archived
+drop out of an inbox-scoped selection, so the next call picks up where the last
+one stopped.
+
+### Unattended and scheduled runs
+
+There is no separate mandate to register. Turning on both opt-ins **is** the
+standing authorization: it is explicit, it is written down where you can review
+and revoke it, and it is scoped by the API key the caller presents. A scheduled
+agent running under that key archives without stopping to ask, in one call —
+`confirm=true` with a selection, or `confirm=true` with a plan's token.
+
+Every run is recorded in the daemon log with the account, the selection the
+caller asked for, who asked, and how many messages moved, failed and remain:
+
+```
+level=INFO msg="inbox archive completed" batch=inbox-archive-1757... account=you@gmail.com
+  caller=api_key:assistant selection="query: label:INBOX from:newsletter before:2024-01-01"
+  requested=412 archived=412 failed=0 remaining=0
+```
+
+A run that stopped part-way or archived nothing logs at `WARN` with the reason.
+
+### What a fresh selection reads
+
+Search tools read an analytics cache, which is rebuilt when messages arrive or
+are deleted — not when their labels change. An archive removes a label, so a
+selection resolved from that cache still offers messages a previous call
+already archived, and a loop over it never converges.
+
+When the call names one Gmail account with `account`, the selection is resolved
+against the archive of record instead, and reflects what the previous call
+archived immediately. Otherwise the plan sets `"stale": true` and says so in
+`next_step`. Either way the archive result is authoritative: `search_metadata`
+may keep reporting an archived message as `INBOX` until the analytics cache is
+next rebuilt.
 
 ### Provider support
 

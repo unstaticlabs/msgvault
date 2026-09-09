@@ -657,7 +657,10 @@ func testNumericCompatibility(t *testing.T) {
 	}{
 		{name: "omitted", arguments: map[string]any{}, wantLimit: 20},
 		{name: "zero", arguments: map[string]any{"limit": 0}, wantLimit: 20},
-		{name: "clamped", arguments: map[string]any{"limit": 5000, "offset": 5000}, wantLimit: 50, wantOffset: 1000},
+		// The offset is not clamped to the page ceiling: doing that stops
+		// pagination at the first maxLimit results and hands the caller the
+		// same page for every offset beyond it.
+		{name: "clamped", arguments: map[string]any{"limit": 5000, "offset": 5000}, wantLimit: 50, wantOffset: 5000},
 	}
 	for _, toolName := range searchTools {
 		for _, variant := range variants {
@@ -716,7 +719,7 @@ func testNumericCompatibility(t *testing.T) {
 		{name: "omitted", arguments: map[string]any{}, wantReturn: 10},
 		{name: "zero", arguments: map[string]any{"limit": 0}, wantReturn: 0},
 		{name: "clamped", arguments: map[string]any{"limit": 5000}, wantReturn: 1000},
-		{name: "offset clamped", arguments: map[string]any{"offset": 5000}, wantReturn: 10, wantOffset: 1000},
+		{name: "offset past the end", arguments: map[string]any{"offset": 5000}, wantReturn: 0, wantOffset: 5000},
 	} {
 		t.Run(ToolSearchInMessage+"/"+test.name, func(t *testing.T) {
 			args := map[string]any{"id": 1, "query": "match"}

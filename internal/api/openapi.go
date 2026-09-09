@@ -298,7 +298,14 @@ import (
 // catching up with upstream; they take a number above the auth work instead,
 // because 2.21.0 shipped without them and >= 2.20.0 would otherwise claim them
 // on a daemon that has none.
-const APISchemaVersion = "2.22.0"
+// 2.23.0 makes source_message_ids optional on POST
+// /api/v1/inbox-archive/execute. The daemon records the exact set of messages
+// when it mints a confirmation token, so a caller holding the token no longer
+// has to keep the list or rebuild the query that produced it -- which removes
+// the class of failure where a plan could not be confirmed because its
+// selection could not be reproduced. Ids remain accepted and, when present,
+// must still match the token.
+const APISchemaVersion = "2.23.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
