@@ -2204,10 +2204,6 @@ type mutationResolveOptions struct {
 	// a minute ago still looks like it is in the inbox and the same batch is
 	// selected again on the next pass.
 	preferFresh bool
-	// nonGmailFilterAdvice is appended when structured filters are used on a
-	// source the filter path cannot see. What to do instead differs by tool, so
-	// the caller supplies it; an empty string means there is nothing to suggest.
-	nonGmailFilterAdvice string
 }
 
 // mutationSearchPageSize is how many results one search request asks for.
@@ -2381,29 +2377,6 @@ func (h *handlers) resolveMutationTargets(
 		selection.hasMore = len(selection.targets) >= limit &&
 			(total == unknownMatchTotal || total > len(selection.targets))
 		return selection, nil, nil
-	}
-
-	// The structured-filter path resolves through the backend's deletion-target
-	// filter, which is scoped to Gmail sources. On any other source it matches
-	// nothing -- and "no messages match the specified criteria" is a wrong
-	// answer, not an empty one: it says the mailbox is clean when the selection
-	// was never capable of seeing it. Say so instead.
-	// Only a source whose type is recorded and is known not to be Gmail is
-	// refused. An unrecorded type is not evidence of anything, and refusing on
-	// it would turn missing metadata into an unusable account.
-	if sourceID != nil {
-		if info, ok := accountsByID[*sourceID]; ok &&
-			info.SourceType != "" && info.SourceType != sourceTypeGmail {
-			message := fmt.Sprintf(
-				"account %q is a %s source, and the structured filters (from, domain, label, "+
-					"after, before, has_attachment) resolve through a path that only covers Gmail "+
-					"sources, so they would report no matches whatever the account holds.",
-				info.Identifier, info.SourceType)
-			if opts.nonGmailFilterAdvice != "" {
-				message += " " + opts.nonGmailFilterAdvice
-			}
-			return nil, toolErrorResult(message), nil
-		}
 	}
 
 	// One more than the limit, so a full page can be distinguished from a
@@ -2584,13 +2557,7 @@ func truncateSelectionDescription(description string) string {
 
 func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolResult, error) {
 	selection, result, err := h.resolveMutationTargets(ctx, req.GetArguments(),
-		mutationResolveOptions{
-			limit:     maxStageDeletionResults,
-			operation: "deletion",
-			// No alternative to offer: remote deletion is executed through the
-			// Gmail API, so a non-Gmail source cannot be staged by any selector.
-			nonGmailFilterAdvice: "Remote deletion covers Gmail accounts only.",
-		})
+		mutationResolveOptions{limit: maxStageDeletionResults, operation: "deletion"})
 	if result != nil || err != nil {
 		return result, err
 	}

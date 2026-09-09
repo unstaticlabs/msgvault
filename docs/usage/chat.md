@@ -426,7 +426,7 @@ next rebuilt.
 | Source | Supported | Notes |
 |---|---|---|
 | Gmail (OAuth) | Yes | One `batchModify` removing the `INBOX` label. No new OAuth scope: `gmail.modify` is already part of the standard grant. Accounts added with `add-account --readonly` are refused. |
-| IMAP | Yes, via `query` | One `UID MOVE` per message into the `\Archive` mailbox, or a folder named `Archive`/`Archived`/`Archives`. Messages with no `Message-ID` header are skipped, because the archive could not rejoin them to their existing row after the move. Select with `query`, not the structured filters: those resolve through a Gmail-scoped path and are refused on an IMAP account rather than reporting a misleading zero. |
+| IMAP | Yes | One `UID MOVE` per message into the `\Archive` mailbox, or a folder named `Archive`/`Archived`/`Archives`. Messages with no `Message-ID` header are skipped, because the archive could not rejoin them to their existing row after the move. |
 | Gmail over IMAP | No | These accounts sync from All Mail, never from INBOX, so the inbox copy is not addressable over IMAP. Add the account with OAuth instead. |
 | Everything else | No | Slack, Teams, imported archives and the like return `unsupported_source`. |
 
