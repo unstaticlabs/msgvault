@@ -222,6 +222,11 @@ func (h *handlers) archiveFromInbox(ctx context.Context, req toolRequest) (*tool
 		limit:       maxArchiveFromInboxResults,
 		operation:   "inbox archive",
 		preferFresh: true,
+		// Archiving does support IMAP, so there is a way through: the 'query'
+		// selector resolves without that Gmail-scoped path.
+		nonGmailFilterAdvice: "Use 'query' instead -- for example " +
+			"query=\"label:INBOX from:someone@example.com\" -- which resolves " +
+			"this account's messages. Nothing has been changed.",
 	})
 	if result != nil || err != nil {
 		return result, err

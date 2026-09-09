@@ -624,3 +624,58 @@ func TestArchiveFromInboxFallsBackWhenTheSizeIsUnknown(t *testing.T) {
 	assert.Equal(2, resp.MessageCount)
 	assert.Nil(resp.TotalMatching, "an unknown total must be absent, not reported as zero")
 }
+
+// TestArchiveFromInboxRefusesStructuredFiltersOnNonGmail: the structured-filter
+// path resolves through the backend's deletion-target filter, which is scoped to
+// Gmail sources. On an IMAP account it matched nothing, and the tool reported
+// "no messages match the specified criteria" -- a wrong answer rather than an
+// empty one, since it says the inbox is clean when the selection was never
+// capable of seeing it. Archiving does support IMAP through 'query', so the
+// refusal has to name the way through.
+func TestArchiveFromInboxRefusesStructuredFiltersOnNonGmail(t *testing.T) {
+	assert := assert.New(t)
+
+	engine := inboxArchiveEngine()
+	engine.Accounts = append(engine.Accounts, query.AccountInfo{
+		ID: 2, SourceType: "imap", Identifier: "bob@mail.example.com",
+	})
+	engine.GetDeletionTargetsByFilterFunc = func(
+		context.Context, query.MessageFilter,
+	) ([]query.DeletionTarget, error) {
+		assert.Fail("a source the filter path cannot see must be refused before the query")
+		return nil, nil
+	}
+	archiver := &fakeInboxArchiver{}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
+
+	result := runToolExpectError(t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"account": "bob@mail.example.com", "domain": "newsletter.example.com"})
+
+	assert.Contains(result.text, "imap")
+	assert.Contains(result.text, "only covers Gmail")
+	assert.Contains(result.text, "'query'")
+	assert.Empty(archiver.authorizeReqs, "nothing may be authorized")
+}
+
+// TestArchiveFromInboxStillTakesAQueryOnNonGmail: the refusal above must not
+// become a ban on the account. The query selector resolves through the search
+// path, which is source-agnostic, and that is how an IMAP inbox is archived.
+func TestArchiveFromInboxStillTakesAQueryOnNonGmail(t *testing.T) {
+	engine := inboxArchiveEngine()
+	engine.Accounts = []query.AccountInfo{
+		{ID: 2, SourceType: "imap", Identifier: "bob@mail.example.com"},
+	}
+	engine.SearchFastResults = []query.MessageSummary{
+		{ID: 5, SourceID: 2, Subject: "Digest", SourceMessageID: "INBOX|12"},
+	}
+	h := &handlers{engine: engine, inboxArchiver: &fakeInboxArchiver{token: "t"}}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"account": "bob@mail.example.com", "query": "label:INBOX"},
+	)
+
+	assert.Equal(t, "plan", resp.Status)
+	assert.Equal(t, 1, resp.MessageCount)
+	assert.True(t, resp.Stale, "a non-Gmail account has no fresh resolver, and must say so")
+}
