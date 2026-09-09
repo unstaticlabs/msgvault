@@ -3370,7 +3370,9 @@ func TestStageDeletion(t *testing.T) {
 			t, "stage_deletion", h.stageDeletion,
 			map[string]any{"domain": "example.com"},
 		)
-		assert.Equal(t, maxStageDeletionResults, capturedFilter.Pagination.Limit, "limit")
+		// One over the tool's cap: the extra row is what distinguishes a
+		// selection that ends exactly at the cap from one that was truncated.
+		assert.Equal(t, maxStageDeletionResults+1, capturedFilter.Pagination.Limit, "limit")
 	})
 }
 

@@ -525,3 +525,73 @@ func TestInboxArchiveLogsFailuresLouder(t *testing.T) {
 		})
 	}
 }
+
+// TestInboxArchiveExecutesFromTheTokenAlone: the token already names an exact
+// set, recorded when it was minted. Requiring the caller to send that set back
+// meant a plan could not be confirmed unless the caller could reproduce the
+// list -- and a caller that rebuilt it from a query could confirm a different
+// set than the one it was shown.
+func TestInboxArchiveExecutesFromTheTokenAlone(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	runner := &stubInboxArchiveRunner{result: InboxArchiveRunResult{Archived: 3}}
+	srv := newInboxArchiveServer(t, true, runner)
+	ids := []string{"m-1", "m-2", "m-3"}
+
+	token := authorizeInboxArchive(t, srv, ids)
+	w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
+		InboxArchiveExecuteRequest{ConfirmationToken: token})
+	require.Equalf(http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var resp InboxArchiveExecuteResponse
+	require.NoError(json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(3, resp.Archived)
+
+	require.Len(runner.calls, 1)
+	assert.Equal(ids, runner.calls[0].SourceMessageIDs,
+		"the daemon must archive the set the token was minted for")
+}
+
+// TestInboxArchiveStillRejectsMismatchedIDs: sending ids remains a way for a
+// caller to assert which plan it believes it is confirming, so a set that does
+// not match the token must still be refused rather than quietly replaced by
+// the recorded one.
+func TestInboxArchiveStillRejectsMismatchedIDs(t *testing.T) {
+	runner := &stubInboxArchiveRunner{}
+	srv := newInboxArchiveServer(t, true, runner)
+
+	token := authorizeInboxArchive(t, srv, []string{"m-1", "m-2"})
+	w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
+		InboxArchiveExecuteRequest{ConfirmationToken: token, SourceMessageIDs: []string{"m-9"}})
+
+	assert.Equal(t, http.StatusPreconditionFailed, w.Code)
+	assert.Equal(t, "confirmation_token_invalid", decodeErrorEnvelope(t, w).Error)
+	assert.Empty(t, runner.calls)
+}
+
+// TestInboxArchiveLogsTheSelection: the counts say how much moved, but not what
+// the caller asked for. An operator comparing an archive that looks too large
+// against the request needs the selection that produced it.
+func TestInboxArchiveLogsTheSelection(t *testing.T) {
+	var buf bytes.Buffer
+	runner := &stubInboxArchiveRunner{result: InboxArchiveRunResult{Archived: 1}}
+	srv := newInboxArchiveServer(t, true, runner)
+	srv.logger = slog.New(slog.NewJSONHandler(&buf, nil))
+
+	w := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/authorize",
+		InboxArchiveAuthorizeRequest{
+			Account: "alice@example.com", SourceID: 1,
+			Description:      "query: label:INBOX from:news before:2026-02-01",
+			SourceMessageIDs: []string{"m-1"},
+		})
+	require.Equal(t, http.StatusOK, w.Code)
+	var authorized InboxArchiveAuthorizeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &authorized))
+
+	executed := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
+		InboxArchiveExecuteRequest{ConfirmationToken: authorized.ConfirmationToken})
+	require.Equalf(t, http.StatusOK, executed.Code, "body: %s", executed.Body.String())
+
+	assert.Contains(t, buf.String(), "query: label:INBOX from:news before:2026-02-01")
+}
