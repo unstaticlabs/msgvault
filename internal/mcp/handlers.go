@@ -2449,19 +2449,34 @@ func (h *handlers) pageSearchFast(
 }
 
 // pageSearch collects up to limit results, pageSize at a time.
+//
+// Results are ordered newest first, so mail arriving while the pages are being
+// walked shifts everything back by an offset and a message can appear on two
+// pages. Deduplicating here keeps a message from being staged or archived twice
+// in one batch; the opposite drift, a message slipping between pages, only
+// leaves it for the next call.
 func (h *handlers) pageSearch(
 	limit, pageSize int,
 	operation string,
 	fetch func(page, offset int) ([]query.MessageSummary, error),
 ) ([]query.MessageSummary, error) {
 	var results []query.MessageSummary
+	seen := make(map[int64]bool)
+	offset := 0
 	for len(results) < limit {
 		page := min(limit-len(results), pageSize)
-		batch, err := fetch(page, len(results))
+		batch, err := fetch(page, offset)
 		if err != nil {
 			return nil, newInternalError("search messages for "+operation, err)
 		}
-		results = append(results, batch...)
+		offset += len(batch)
+		for _, msg := range batch {
+			if seen[msg.ID] {
+				continue
+			}
+			seen[msg.ID] = true
+			results = append(results, msg)
+		}
 		if len(batch) < page {
 			break
 		}

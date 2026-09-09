@@ -535,3 +535,57 @@ func TestArchiveFromInboxPagesPastTheDaemonPageCap(t *testing.T) {
 	assert.Equal([]int{500, 500}, pages, "the selection must be paged in units the daemon honours")
 	assert.True(resp.Stale, "a cache-resolved selection must say so")
 }
+
+// TestArchiveFromInboxDoesNotSelectAMessageTwice: results come back newest
+// first, so mail arriving while the pages are walked shifts every later result
+// back by one and a message can land on two pages. Selecting it twice would
+// double-count the batch.
+func TestArchiveFromInboxDoesNotSelectAMessageTwice(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	page := func(first int64, n int) []query.MessageSummary {
+		out := make([]query.MessageSummary, n)
+		for i := range out {
+			id := first + int64(i)
+			out[i] = query.MessageSummary{
+				ID: id, SourceID: 1,
+				SourceMessageID: "gmail-" + strconv.FormatInt(id, 10),
+			}
+		}
+		return out
+	}
+	engine := inboxArchiveEngine()
+	calls := 0
+	engine.SearchFastFunc = func(
+		context.Context, *search.Query, query.MessageFilter, int, int,
+	) ([]query.MessageSummary, error) {
+		calls++
+		switch calls {
+		case 1:
+			return page(1, 500), nil
+		case 2:
+			// One message arrived, so this page repeats the last of page one.
+			return page(500, 200), nil
+		default:
+			return nil, nil
+		}
+	}
+	archiver := &fakeInboxArchiver{token: "token-dedup"}
+	h := &handlers{engine: engine, inboxArchiver: archiver}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"query": "label:INBOX"},
+	)
+
+	assert.Equal(699, resp.MessageCount, "the repeated message must be selected once")
+	require.Len(archiver.authorizeReqs, 1)
+	ids := archiver.authorizeReqs[0].SourceMessageIDs
+	assert.Len(ids, 699)
+	unique := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		require.Falsef(unique[id], "duplicate id %s", id)
+		unique[id] = true
+	}
+}
