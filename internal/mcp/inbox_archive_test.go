@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 
@@ -590,4 +591,36 @@ func TestArchiveFromInboxDoesNotSelectAMessageTwice(t *testing.T) {
 		require.Falsef(unique[id], "duplicate id %s", id)
 		unique[id] = true
 	}
+}
+
+// TestArchiveFromInboxFallsBackWhenTheSizeIsUnknown: the fresh path resolves
+// every match in one unbounded query, which is only safe when the size of the
+// selection is known. If the count fails, resolving anyway could pull a whole
+// archive into memory on both sides, so the bounded cache path is used and the
+// caller is told the selection may be stale.
+func TestArchiveFromInboxFallsBackWhenTheSizeIsUnknown(t *testing.T) {
+	assert := assert.New(t)
+
+	engine := inboxArchiveEngine()
+	engine.SearchFastCountFunc = func(
+		context.Context, *search.Query, query.MessageFilter,
+	) (int64, error) {
+		return 0, errors.New("count unavailable")
+	}
+	engine.GetDeletionTargetsBySearchFunc = func(
+		context.Context, *search.Query, query.MessageFilter, query.DeletionSearchMode,
+	) ([]query.DeletionTarget, error) {
+		assert.Fail("an unbounded resolution must not run on an unknown selection size")
+		return nil, nil
+	}
+	h := &handlers{engine: engine, inboxArchiver: &fakeInboxArchiver{token: "t"}}
+
+	resp := runTool[inboxArchivePlanResponse](
+		t, ToolArchiveFromInbox, h.archiveFromInbox,
+		map[string]any{"account": "alice@example.com", "query": "label:INBOX"},
+	)
+
+	assert.True(resp.Stale)
+	assert.Equal(2, resp.MessageCount)
+	assert.Nil(resp.TotalMatching, "an unknown total must be absent, not reported as zero")
 }

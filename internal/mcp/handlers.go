@@ -2516,7 +2516,12 @@ func (h *handlers) resolveFreshSearchTargets(
 	if info, ok := accountsByID[*sourceID]; !ok || info.SourceType != sourceTypeGmail {
 		return nil, false
 	}
-	if total != unknownMatchTotal && total > freshResolveCeiling {
+	// The fresh path resolves every match in one unbounded query, so it is only
+	// safe when the size of the selection is known and small. An unknown total
+	// falls back to the bounded cache path: stale results a caller is told
+	// about are better than a query that could pull a whole archive into
+	// memory on both sides.
+	if total == unknownMatchTotal || total > freshResolveCeiling {
 		return nil, false
 	}
 	resolver, ok := h.engine.(query.DeletionTargetSearchResolver)
