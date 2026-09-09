@@ -271,6 +271,8 @@ func TestArchiveFromInboxRedeemsAPlanByTokenAlone(t *testing.T) {
 	assert.Equal("alice@example.com", resp.Account)
 	assert.Equal(2, resp.Archived)
 	assert.NotContains(resp.NextStep, "incremental sync")
+	assert.Contains(resp.NextStep, "this plan covered",
+		"a redeemed plan may be part of a larger selection and must not claim it is finished")
 
 	require.Len(archiver.executeReqs, 1)
 	assert.Equal("token-xyz", archiver.executeReqs[0].ConfirmationToken)

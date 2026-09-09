@@ -2699,3 +2699,40 @@ func TestEngineTextSearchRejectsUnconfirmedAccount(t *testing.T) {
 		})
 	}
 }
+
+// TestEngineGetDeletionTargetsBySearchSendsTheAccountScope: search.Format
+// deliberately omits AccountIDs, treating them as transport state, so a caller
+// that scopes a query to one account by setting them alone would send an
+// unscoped query over the wire. archive_from_inbox resolves an account-scoped
+// selection through here, so the scope has to travel as source_id on the
+// filter.
+func TestEngineGetDeletionTargetsBySearchSendsTheAccountScope(t *testing.T) {
+	assertions := assert.New(t)
+	sourceID := int64(7)
+	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/health":
+			writeJSONResponse(t, w, map[string]any{"status": "ok", "api_schema_version": "2.16.0"})
+		case "/api/v1/messages/gmail-ids":
+			assertions.Equal("7", r.URL.Query().Get("source_id"))
+			assertions.Equal("fast", r.URL.Query().Get("search_mode"))
+			assertions.Equal("label:INBOX", r.URL.Query().Get("q"))
+			writeJSONResponse(t, w, map[string]any{
+				"gmail_ids": []string{"gm-1"}, "search_query": "label:INBOX", "search_mode": "fast",
+				"targets": []map[string]any{{
+					"message_id": 1, "source_id": 7, "source_type": "gmail",
+					"source_identifier": "account@example.invalid", "source_message_id": "gm-1",
+				}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	scoped := search.Parse("label:INBOX")
+	scoped.AccountIDs = []int64{sourceID}
+	targets, err := NewEngineAdapter(store).GetDeletionTargetsBySearch(
+		t.Context(), scoped, query.MessageFilter{SourceID: &sourceID}, query.DeletionSearchFast)
+	require.NoError(t, err)
+	assertions.Len(targets, 1)
+}

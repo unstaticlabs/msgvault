@@ -379,6 +379,12 @@ func inboxArchiveMorePhrase(selection *mutationSelection) string {
 	return fmt.Sprintf("The selection matches %d messages in total.", selection.totalMatching)
 }
 
+// inboxArchiveResultIsAuthoritative points at the gap between what moved and
+// what a search will say moved.
+const inboxArchiveResultIsAuthoritative = "The messages are out of the inbox at the provider and " +
+	"in the local archive; searching the archive may keep listing them as INBOX until its analytics " +
+	"cache is next rebuilt, so trust this result over a search."
+
 // inboxArchiveStaleWarning explains a selection resolved from the analytics
 // cache rather than the archive of record. The cache is rebuilt when messages
 // arrive or are deleted, not when their labels change, so it can still offer
@@ -451,10 +457,14 @@ func inboxArchiveNextStep(result InboxArchiveResult, selection *mutationSelectio
 			" Call again with the same selection to continue, until has_more is false."
 	case result.Failed > 0:
 		return "Some messages could not be archived and kept their inbox label; they are listed in failed_ids."
+	case selection == nil:
+		// A redeemed plan covers the messages that plan named, which may have
+		// been only the first part of a larger selection. This call cannot see
+		// that, so it must not claim the selection is finished.
+		return "The messages this plan covered are archived. " + inboxArchiveResultIsAuthoritative +
+			" If the plan reported has_more, run the same selection again to continue."
 	default:
-		return "The selection is archived. The messages are out of the inbox at the provider and " +
-			"in the local archive; searching the archive may keep listing them as INBOX until its " +
-			"analytics cache is next rebuilt, so trust this result over a search."
+		return "The selection is archived. " + inboxArchiveResultIsAuthoritative
 	}
 }
 
