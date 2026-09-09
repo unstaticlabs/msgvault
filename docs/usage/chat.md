@@ -87,6 +87,11 @@ It is separate from `[remote].api_key`, which authenticates `msgvault mcp` to a
 selected remote msgvault daemon. Stdio transport does not use bearer
 authentication.
 
+The listener also serves its own icon at `/icon.png`, and the same mark at
+`/favicon.ico`, without authentication. The server declares the first in the
+MCP `icons` field so a client can show it beside the connector, including
+before anyone has signed in; no client renders that field yet.
+
 Named `[[auth.api_keys]]` entries are accepted on the same listener, and each
 key sees only the tools its role permits: a `viewer` key gets the read tools, a
 `member` key adds Saved View management and profile Notes (still behind

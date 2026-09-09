@@ -234,7 +234,7 @@ func newMCPServerWithPolicy(
 	policy *invocationPolicy,
 ) *sdkmcp.Server {
 	s := sdkmcp.NewServer(
-		&sdkmcp.Implementation{Name: "msgvault", Version: "1.0.0"},
+		serverImplementation(),
 		&sdkmcp.ServerOptions{
 			Capabilities: &sdkmcp.ServerCapabilities{
 				Resources: &sdkmcp.ResourceCapabilities{},
@@ -377,6 +377,7 @@ func newMCPHTTPServerWithPolicy(
 		bearerAuthHandler(httpOpts.APIKey, httpOpts.Keys, httpOpts.OIDC, httpServer),
 	)
 	mux.Handle("/mcp", noStoreHandler(protected))
+	registerIconRoutes(mux)
 	if httpOpts.OIDC != nil && httpOpts.OIDC.Config().BearerEnabled() {
 		metadata := protectedResourceMetadataHandler(httpOpts.OIDC)
 		mux.Handle(protectedResourceMetadataPath, metadata)
