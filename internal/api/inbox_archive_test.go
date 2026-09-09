@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -574,6 +575,8 @@ func TestInboxArchiveStillRejectsMismatchedIDs(t *testing.T) {
 // the caller asked for. An operator comparing an archive that looks too large
 // against the request needs the selection that produced it.
 func TestInboxArchiveLogsTheSelection(t *testing.T) {
+	require := require.New(t)
+
 	var buf bytes.Buffer
 	runner := &stubInboxArchiveRunner{result: InboxArchiveRunResult{Archived: 1}}
 	srv := newInboxArchiveServer(t, true, runner)
@@ -585,13 +588,46 @@ func TestInboxArchiveLogsTheSelection(t *testing.T) {
 			Description:      "query: label:INBOX from:news before:2026-02-01",
 			SourceMessageIDs: []string{"m-1"},
 		})
-	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(http.StatusOK, w.Code)
 	var authorized InboxArchiveAuthorizeResponse
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &authorized))
+	require.NoError(json.Unmarshal(w.Body.Bytes(), &authorized))
 
 	executed := doInboxArchivePost(t, srv, "/api/v1/inbox-archive/execute",
 		InboxArchiveExecuteRequest{ConfirmationToken: authorized.ConfirmationToken})
-	require.Equalf(t, http.StatusOK, executed.Code, "body: %s", executed.Body.String())
+	require.Equalf(http.StatusOK, executed.Code, "body: %s", executed.Body.String())
 
 	assert.Contains(t, buf.String(), "query: label:INBOX from:news before:2026-02-01")
+}
+
+// TestInboxArchiveGrantsAreBounded: a grant now carries the message ids it
+// covers, so the store is no longer negligible and a caller that only ever
+// plans must not be able to grow it without bound.
+func TestInboxArchiveGrantsAreBounded(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	var grants inboxArchiveGrants
+	issued := time.Now().UTC()
+
+	var last string
+	for i := range maxOutstandingInboxArchiveGrants + 8 {
+		token, err := grants.issue(inboxArchiveGrant{
+			SourceID:         1,
+			SourceMessageIDs: []string{"m-" + strconv.Itoa(i)},
+			IssuedAt:         issued.Add(time.Duration(i) * time.Second),
+			ExpiresAt:        issued.Add(time.Hour),
+		})
+		require.NoError(err)
+		last = token
+	}
+
+	assert.LessOrEqual(len(grants.grants), maxOutstandingInboxArchiveGrants)
+
+	// The newest plan survives, so a caller that plans and then confirms is
+	// never the one evicted.
+	grant, ok := grants.claim(last, issued.Add(time.Minute))
+	require.True(ok)
+	assert.Equal(
+		[]string{"m-" + strconv.Itoa(maxOutstandingInboxArchiveGrants+7)},
+		grant.SourceMessageIDs)
 }

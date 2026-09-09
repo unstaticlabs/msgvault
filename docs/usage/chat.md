@@ -388,6 +388,25 @@ rather than by guessing. Interrupting a run is safe — messages already archive
 drop out of an inbox-scoped selection, so the next call picks up where the last
 one stopped.
 
+### Unattended and scheduled runs
+
+There is no separate mandate to register. Turning on both opt-ins **is** the
+standing authorization: it is explicit, it is written down where you can review
+and revoke it, and it is scoped by the API key the caller presents. A scheduled
+agent running under that key archives without stopping to ask, in one call —
+`confirm=true` with a selection, or `confirm=true` with a plan's token.
+
+Every run is recorded in the daemon log with the account, the selection the
+caller asked for, who asked, and how many messages moved, failed and remain:
+
+```
+level=INFO msg="inbox archive completed" batch=inbox-archive-1757... account=you@gmail.com
+  caller=api_key:assistant selection="query: label:INBOX from:newsletter before:2024-01-01"
+  requested=412 archived=412 failed=0 remaining=0
+```
+
+A run that stopped part-way or archived nothing logs at `WARN` with the reason.
+
 ### What a fresh selection reads
 
 Search tools read an analytics cache, which is rebuilt when messages arrive or

@@ -141,6 +141,15 @@ type inboxArchiveGrants struct {
 	grants map[string]inboxArchiveGrant
 }
 
+// maxOutstandingInboxArchiveGrants bounds how many unredeemed plans are kept.
+//
+// Each grant now holds the message ids it covers, so the store is no longer
+// negligible: a thousand ids is tens of kilobytes, and planning is not gated
+// by the operation gate. A person has a handful of plans open at once, so a
+// bound this far above that costs nothing real and stops a caller that only
+// ever plans from growing the daemon's memory until it is killed.
+const maxOutstandingInboxArchiveGrants = 64
+
 // issue mints a token for a grant, pruning anything already expired.
 func (g *inboxArchiveGrants) issue(grant inboxArchiveGrant) (string, error) {
 	token, err := newInboxArchiveToken()
@@ -157,6 +166,17 @@ func (g *inboxArchiveGrants) issue(grant inboxArchiveGrant) (string, error) {
 		if grant.IssuedAt.After(existing.ExpiresAt) {
 			delete(g.grants, candidate)
 		}
+	}
+	// Still full of live plans: drop the oldest, which is the one whose own
+	// expiry is nearest and the least likely to still be waiting on an answer.
+	for len(g.grants) >= maxOutstandingInboxArchiveGrants {
+		oldest := ""
+		for candidate, existing := range g.grants {
+			if oldest == "" || existing.IssuedAt.Before(g.grants[oldest].IssuedAt) {
+				oldest = candidate
+			}
+		}
+		delete(g.grants, oldest)
 	}
 	g.grants[token] = grant
 	return token, nil

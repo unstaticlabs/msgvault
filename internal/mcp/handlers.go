@@ -664,7 +664,7 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 		return toolErrorResult(err.Error()), nil
 	}
 	limit := searchLimitArg(args)
-	offset := offsetArg(args, toolArgOffset)
+	offset := offsetArg(args)
 
 	account, _ := args[toolArgAccount].(string)
 	sourceID, err := h.getAccountID(ctx, account)
@@ -841,7 +841,7 @@ func (h *handlers) searchMessageBodies(ctx context.Context, req toolRequest) (*t
 		return toolErrorResult(err.Error()), nil
 	}
 	limit := searchLimitArg(args)
-	offset := offsetArg(args, toolArgOffset)
+	offset := offsetArg(args)
 
 	account, _ := args[toolArgAccount].(string)
 	sourceID, err := h.getAccountID(ctx, account)
@@ -993,7 +993,7 @@ func (h *handlers) searchMessageBodiesHybrid(
 	}
 
 	limit := searchLimitArg(args)
-	offset := offsetArg(args, toolArgOffset)
+	offset := offsetArg(args)
 
 	freeText := strings.Join(parsed.TextTerms, " ")
 
@@ -1135,7 +1135,7 @@ func (h *handlers) searchMessageBodiesHybridViaSearcher(
 	queryStr string, parsed *search.Query, mode string, explain bool,
 ) (*toolResult, error) {
 	limit := searchLimitArg(args)
-	offset := offsetArg(args, toolArgOffset)
+	offset := offsetArg(args)
 
 	freeText := strings.Join(parsed.TextTerms, " ")
 	if freeText == "" {
@@ -1732,7 +1732,7 @@ func (h *handlers) searchInMessage(ctx context.Context, req toolRequest) (*toolR
 
 	mode, _ := args[toolArgMode].(string)
 	limit := limitArg(args, toolArgLimit, 10)
-	offset := offsetArg(args, toolArgOffset)
+	offset := offsetArg(args)
 
 	switch mode {
 	case "", "keyword":
@@ -1916,7 +1916,7 @@ func (h *handlers) listMessages(ctx context.Context, req toolRequest) (*toolResu
 		SourceID: sourceID,
 		Pagination: query.Pagination{
 			Limit:  listLimitArg(args) + 1,
-			Offset: offsetArg(args, toolArgOffset),
+			Offset: offsetArg(args),
 		},
 	}
 
@@ -2082,8 +2082,8 @@ func limitArg(args map[string]any, key string, def int) int {
 // larger than that then receives the same page for every further offset and
 // pages forever. An offset is bounded by the size of the archive, not by the
 // size of a page.
-func offsetArg(args map[string]any, key string) int {
-	v, ok := args[key].(float64)
+func offsetArg(args map[string]any) int {
+	v, ok := args[toolArgOffset].(float64)
 	if !ok {
 		return 0
 	}
@@ -2208,11 +2208,16 @@ type mutationResolveOptions struct {
 
 // mutationSearchPageSize is how many results one search request asks for.
 //
-// The daemon clamps a search page to 500 whatever the caller asks for, so a
-// single request for a larger selection silently returns 500 and reports
-// nothing about the rest. Paging in units the daemon will honour is what makes
-// the caller's own limit mean what it says.
-const mutationSearchPageSize = 500
+// The daemon clamps a search page whatever the caller asks for, and says
+// nothing about what it dropped, so a single request for a larger selection
+// silently returns one page and reports it as the whole answer. Paging in units
+// the daemon will honour is what makes the caller's own limit mean what it
+// says. The two endpoints clamp differently, so each is paged at its own
+// ceiling rather than both at the smaller one.
+const (
+	mutationSearchPageSize   = 500
+	mutationFullTextPageSize = 100
+)
 
 // sourceTypeGmail names the provider whose sources the deletion-target
 // resolver covers.
@@ -2317,11 +2322,9 @@ func (h *handlers) resolveMutationTargets(
 			total = int(counted)
 		}
 
-		if targets, ok, err := h.resolveFreshSearchTargets(
+		if targets, ok := h.resolveFreshSearchTargets(
 			ctx, q, filter, sourceID, accountsByID, total, opts,
-		); err != nil {
-			return nil, nil, err
-		} else if ok {
+		); ok {
 			selection.totalMatching = len(targets)
 			selection.hasMore = len(targets) > limit
 			if len(targets) > limit {
@@ -2341,9 +2344,12 @@ func (h *handlers) resolveMutationTargets(
 		// above describes the metadata search, not this one, so it is dropped
 		// rather than reported against a different match set.
 		if len(results) == 0 && len(q.TextTerms) > 0 {
-			results, err = h.engine.Search(ctx, q, limit, 0)
+			results, err = h.pageSearch(limit, mutationFullTextPageSize, operation,
+				func(page, offset int) ([]query.MessageSummary, error) {
+					return h.engine.Search(ctx, q, page, offset)
+				})
 			if err != nil {
-				return nil, nil, newInternalError("fallback search messages for "+operation, err)
+				return nil, nil, err
 			}
 			total = unknownMatchTotal
 		}
@@ -2436,13 +2442,22 @@ func (h *handlers) pageSearchFast(
 	limit int,
 	operation string,
 ) ([]query.MessageSummary, error) {
+	return h.pageSearch(limit, mutationSearchPageSize, operation,
+		func(page, offset int) ([]query.MessageSummary, error) {
+			return h.engine.SearchFast(ctx, q, filter, page, offset)
+		})
+}
+
+// pageSearch collects up to limit results, pageSize at a time.
+func (h *handlers) pageSearch(
+	limit, pageSize int,
+	operation string,
+	fetch func(page, offset int) ([]query.MessageSummary, error),
+) ([]query.MessageSummary, error) {
 	var results []query.MessageSummary
 	for len(results) < limit {
-		page := limit - len(results)
-		if page > mutationSearchPageSize {
-			page = mutationSearchPageSize
-		}
-		batch, err := h.engine.SearchFast(ctx, q, filter, page, len(results))
+		page := min(limit-len(results), pageSize)
+		batch, err := fetch(page, len(results))
 		if err != nil {
 			return nil, newInternalError("search messages for "+operation, err)
 		}
@@ -2476,22 +2491,22 @@ func (h *handlers) resolveFreshSearchTargets(
 	accountsByID map[int64]query.AccountInfo,
 	total int,
 	opts mutationResolveOptions,
-) ([]query.DeletionTarget, bool, error) {
+) ([]query.DeletionTarget, bool) {
 	if !opts.preferFresh || sourceID == nil {
-		return nil, false, nil
+		return nil, false
 	}
 	// The resolver is scoped to Gmail sources. Narrowing an unscoped or
 	// non-Gmail selection to whatever it happens to cover would silently drop
 	// matches, so it is only used where it answers the whole question.
 	if info, ok := accountsByID[*sourceID]; !ok || info.SourceType != sourceTypeGmail {
-		return nil, false, nil
+		return nil, false
 	}
 	if total != unknownMatchTotal && total > freshResolveCeiling {
-		return nil, false, nil
+		return nil, false
 	}
 	resolver, ok := h.engine.(query.DeletionTargetSearchResolver)
 	if !ok {
-		return nil, false, nil
+		return nil, false
 	}
 
 	targets, err := resolver.GetDeletionTargetsBySearch(
@@ -2499,16 +2514,16 @@ func (h *handlers) resolveFreshSearchTargets(
 	if err != nil {
 		// An older daemon, or one whose engine cannot take a stable snapshot,
 		// answers here. The cache path still works, so this is not fatal.
-		return nil, false, nil
+		return nil, false
 	}
 	for _, target := range targets {
 		if target.SourceID <= 0 ||
 			strings.TrimSpace(target.SourceType) == "" ||
 			strings.TrimSpace(target.SourceIdentifier) == "" {
-			return nil, false, nil
+			return nil, false
 		}
 	}
-	return targets, true, nil
+	return targets, true
 }
 
 // truncateSelectionDescription bounds the human-readable description that ends
@@ -2570,10 +2585,12 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 	}
 
 	resp := stageDeletionResponse{
-		BatchID:      manifest.ID,
-		MessageCount: len(gmailIDs),
-		Status:       string(manifest.Status),
-		NextStep:     "In the invoking CLI's config.toml, set '[deletion] remote_enabled = true' for durable consent and run 'msgvault delete-staged'; for one command instead, run 'MSGVAULT_ENABLE_REMOTE_DELETE=1 msgvault delete-staged'. Run 'msgvault cancel-deletion " + manifest.ID + "' to cancel",
+		BatchID:       manifest.ID,
+		MessageCount:  len(gmailIDs),
+		Status:        string(manifest.Status),
+		TotalMatching: matchTotal(selection),
+		HasMore:       selection.hasMore,
+		NextStep:      "In the invoking CLI's config.toml, set '[deletion] remote_enabled = true' for durable consent and run 'msgvault delete-staged'; for one command instead, run 'MSGVAULT_ENABLE_REMOTE_DELETE=1 msgvault delete-staged'. Run 'msgvault cancel-deletion " + manifest.ID + "' to cancel",
 	}
 
 	return jsonResult(resp)
@@ -2613,7 +2630,7 @@ func (h *handlers) searchByDomains(ctx context.Context, req toolRequest) (*toolR
 	}
 
 	limit := limitArg(args, toolArgLimit, 100)
-	offset := offsetArg(args, toolArgOffset)
+	offset := offsetArg(args)
 
 	afterDate, err := getDateArg(args, toolArgAfter)
 	if err != nil {

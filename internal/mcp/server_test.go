@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -4280,4 +4281,52 @@ func TestMCPHTTPServerMountsProtectedEndpoint(t *testing.T) {
 	stdlibServer.Handler.ServeHTTP(authorized, authorizedRequest)
 	checks.Equal(http.StatusMethodNotAllowed, authorized.Code)
 	checks.Equal(http.MethodPost, authorized.Header().Get("Allow"))
+}
+
+// TestStageDeletionReportsWhatItDidNotStage: the daemon clamps one search page
+// to 500 whatever the caller asks for, so staging a large query used to save a
+// manifest of 500 and report it as the whole selection. Whatever the cap, the
+// caller has to be told the selection was larger.
+func TestStageDeletionReportsWhatItDidNotStage(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+
+	const available = 1300
+	all := make([]query.MessageSummary, available)
+	for i := range all {
+		all[i] = query.MessageSummary{
+			ID: int64(i + 1), SourceID: 1, SourceMessageID: "gmail-" + strconv.Itoa(i),
+		}
+	}
+	eng := &querytest.MockEngine{
+		Accounts: []query.AccountInfo{
+			{ID: 1, SourceType: "gmail", Identifier: "test@gmail.com"},
+		},
+		SearchFastFunc: func(
+			_ context.Context, _ *search.Query, _ query.MessageFilter, limit, offset int,
+		) ([]query.MessageSummary, error) {
+			// The daemon's own ceiling, reproduced.
+			limit = min(limit, 500)
+			if offset >= len(all) {
+				return nil, nil
+			}
+			return all[offset:min(offset+limit, len(all))], nil
+		},
+		SearchFastCountFunc: func(
+			context.Context, *search.Query, query.MessageFilter,
+		) (int64, error) {
+			return available, nil
+		},
+	}
+	h := &handlers{engine: eng, dataDir: t.TempDir()}
+
+	resp := runTool[stageDeletionResponse](
+		t, "stage_deletion", h.stageDeletion,
+		map[string]any{"query": "label:INBOX from:news"},
+	)
+
+	assert.Equal(available, resp.MessageCount, "every match must be staged, not one page")
+	assert.False(resp.HasMore)
+	require.NotNil(resp.TotalMatching)
+	assert.Equal(available, *resp.TotalMatching)
 }

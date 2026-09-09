@@ -862,5 +862,11 @@ type stageDeletionResponse struct {
 	BatchID      string `json:"batch_id"`
 	MessageCount int    `json:"message_count"`
 	Status       string `json:"status"`
-	NextStep     string `json:"next_step"`
+	// TotalMatching and HasMore describe the selection behind the batch. A
+	// selection larger than one call can stage has to say so: staging silently
+	// capped at a page told the caller its whole selection was covered when
+	// most of it was not.
+	TotalMatching *int   `json:"total_matching,omitempty"`
+	HasMore       bool   `json:"has_more"`
+	NextStep      string `json:"next_step"`
 }
