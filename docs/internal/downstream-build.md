@@ -27,6 +27,7 @@ Keep this list short; every entry is a permanent merge burden.
 |---|---|
 | `internal/update/update.go`: release owner `unstaticlabs` | `msgvault update` and the TUI's background check must look at this repository's releases, not upstream's, or they would replace a downstream binary with an upstream one. |
 | `.github/workflows/ci-pr.yml`: reusable workflow reference | Pull requests here must run this repository's `ci.yml`. |
+| `internal/mcp/icon.go`: the icon and website URLs | An MCP `icons` entry is fetched out of band, so its source must be absolute and names this deployment's hostname. Upstream would want it configurable; the routes and assets themselves are not deployment-specific. |
 | this file | — |
 
 ## Keeping up with upstream

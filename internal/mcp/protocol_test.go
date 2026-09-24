@@ -31,6 +31,20 @@ const task3ModernProtocolVersion = "2026-07-28"
 
 const task5ExpectedServerVersion = "1.0.0"
 
+// expectedServerInfo is the declared implementation as it reaches the wire.
+// Responses carry it whole — name, version, websiteUrl and the SEP-973 icon —
+// so the assertions below compare against the declaration itself; icon_test.go
+// asserts what that declaration contains.
+func expectedServerInfo(t *testing.T) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(serverImplementation())
+	require.NoError(t, err)
+	var info map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &info))
+	require.Equal(t, task5ExpectedServerVersion, info["version"])
+	return info
+}
+
 type task3RPCError struct {
 	Code    int64  `json:"code"`
 	Message string `json:"message"`
@@ -312,7 +326,7 @@ func TestRawStdioModern(t *testing.T) {
 	checks.Contains(instructions, "Only Notes with user provenance are user-authored")
 	meta, ok := discover.Result["_meta"].(map[string]any)
 	must.True(ok, "discover result: %#v", discover.Result)
-	checks.Equal(map[string]any{"name": "msgvault", "version": task5ExpectedServerVersion}, meta["io.modelcontextprotocol/serverInfo"])
+	checks.Equal(expectedServerInfo(t), meta["io.modelcontextprotocol/serverInfo"])
 
 	listed := peer.call(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`)
 	must.Nil(listed.Error)
@@ -323,7 +337,7 @@ func TestRawStdioModern(t *testing.T) {
 	checks.Equal("complete", called.Result["resultType"])
 	callMeta, ok := called.Result["_meta"].(map[string]any)
 	must.True(ok, "tool result: %#v", called.Result)
-	checks.Equal(map[string]any{"name": "msgvault", "version": task5ExpectedServerVersion}, callMeta["io.modelcontextprotocol/serverInfo"])
+	checks.Equal(expectedServerInfo(t), callMeta["io.modelcontextprotocol/serverInfo"])
 	task5AssertRawJSONParity(t, called.Result)
 
 	removed := peer.call(t, `{"jsonrpc":"2.0","id":4,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}`)
@@ -340,7 +354,7 @@ func TestRawStdioLegacy(t *testing.T) {
 	initialized := peer.call(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"raw-legacy","version":"raw-legacy-version"}}}`)
 	must.Nil(initialized.Error)
 	checks.Equal("2025-11-25", initialized.Result["protocolVersion"])
-	checks.Equal(map[string]any{"name": "msgvault", "version": task5ExpectedServerVersion}, initialized.Result["serverInfo"])
+	checks.Equal(expectedServerInfo(t), initialized.Result["serverInfo"])
 
 	peer.writeLiteralLine(t, `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`)
 	listed := peer.call(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
@@ -428,10 +442,7 @@ func TestMCPModernHTTPDiscovery(t *testing.T) {
 	assert.Contains(response.Result["supportedVersions"], task3ModernProtocolVersion)
 	meta, ok := response.Result["_meta"].(map[string]any)
 	require.True(t, ok, "result: %#v", response.Result)
-	assert.Equal(map[string]any{
-		"name":    "msgvault",
-		"version": "1.0.0",
-	}, meta["io.modelcontextprotocol/serverInfo"])
+	assert.Equal(expectedServerInfo(t), meta["io.modelcontextprotocol/serverInfo"])
 	assert.Empty(recorder.Header().Get("Mcp-Session-Id"))
 	assert.Equal("no-store", recorder.Header().Get("Cache-Control"))
 }
