@@ -398,10 +398,10 @@ func queryAddressesFromGenerated(addresses []generated.Address) []query.Address 
 
 func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query.MessageDetail {
 	if resp == nil {
-		return &query.MessageDetail{
-			CalendarState: calendarStateFromGenerated(resp.CalendarState)}
+		return &query.MessageDetail{}
 	}
 	return &query.MessageDetail{
+		CalendarState:        calendarStateFromGenerated(resp.CalendarState),
 		ID:                   resp.ID,
 		SourceMessageID:      resp.SourceMessageID,
 		ConversationID:       resp.ConversationID,
