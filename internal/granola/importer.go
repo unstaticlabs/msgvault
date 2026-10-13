@@ -491,8 +491,8 @@ func normalizeEmail(email string) string {
 }
 
 func emailDomain(email string) string {
-	if i := strings.LastIndex(email, "@"); i >= 0 {
-		return email[i+1:]
+	if _, domain, found := strings.CutLast(email, "@"); found {
+		return domain
 	}
 	return ""
 }
