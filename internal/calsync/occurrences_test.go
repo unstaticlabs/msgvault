@@ -154,7 +154,7 @@ func TestOccurrenceRefresh_RealClientSupersedesChangedRecurrence(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, detail.CalendarState)
 	assert.Equal(t, "superseded", detail.CalendarState.Status, "API details must expose the historical state")
-	queryDetail, err := query.NewSQLiteEngine(st.DB()).GetMessage(t.Context(), historical.id)
+	queryDetail, err := query.NewEngine(st.DB(), st.IsPostgreSQL()).GetMessage(t.Context(), historical.id)
 	require.NoError(t, err)
 	require.NotNil(t, queryDetail.CalendarState)
 	assert.Equal(t, "superseded", queryDetail.CalendarState.Status, "query details must expose the historical state")

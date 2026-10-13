@@ -46,7 +46,7 @@ func TestMCPGetMessageExposesRealArchivedCalendarState(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, st.SetMessageMetadata(id, sql.NullString{String: `{"status":"superseded","source_status_before_superseded":"confirmed","recurring_event_id":"series","original_start_time":"2030-03-01T09:00:00Z","start":"2030-03-01T09:00:00Z","end":"2030-03-01T10:00:00Z","superseded_reason":"not_in_expanded_window","all_day":false}`, Valid: true}))
 	require.NoError(t, st.UpsertMessageBody(id, sql.NullString{String: "[QA] historical body", Valid: true}, sql.NullString{}))
-	handlers := newTestHandlers(query.NewSQLiteEngine(st.DB()))
+	handlers := newTestHandlers(query.NewEngine(st.DB(), st.IsPostgreSQL()))
 	response := runTool[getMessageResponse](t, "get_message", handlers.getMessage, map[string]any{"id": float64(id)})
 	require.NotNil(t, response.CalendarState)
 	assert.Equal(t, "superseded", response.CalendarState.Status)
