@@ -398,7 +398,8 @@ func queryAddressesFromGenerated(addresses []generated.Address) []query.Address 
 
 func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query.MessageDetail {
 	if resp == nil {
-		return &query.MessageDetail{}
+		return &query.MessageDetail{
+			CalendarState: calendarStateFromGenerated(resp.CalendarState)}
 	}
 	return &query.MessageDetail{
 		ID:                   resp.ID,
@@ -892,4 +893,17 @@ func calendarCoverageFromGenerated(c *generated.CalendarCoverage) *store.Calenda
 		return nil
 	}
 	return &store.CalendarCoverage{Start: stringValue(c.Start), End: stringValue(c.End), Complete: c.Complete, Status: c.Status, RefreshedAt: stringValue(c.RefreshedAt), AttemptedAt: stringValue(c.AttemptedAt)}
+}
+
+func calendarStateFromGenerated(state *generated.CalendarEventState) *store.CalendarEventState {
+	if state == nil {
+		return nil
+	}
+	return &store.CalendarEventState{
+		Status: stringValue(state.Status), Start: stringValue(state.Start), End: stringValue(state.End),
+		TimeZone: stringValue(state.TimeZone), AllDay: state.AllDay, Recurrence: state.Recurrence,
+		RecurringEventID: stringValue(state.RecurringEventID), OriginalStartTime: stringValue(state.OriginalStartTime),
+		SourceStatusBeforeSuperseded: stringValue(state.SourceStatusBeforeSuperseded),
+		SupersededReason:             stringValue(state.SupersededReason), SupersededAt: stringValue(state.SupersededAt),
+	}
 }

@@ -806,6 +806,20 @@ func (c CalendarCoverage) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(c))
 }
 
+type CalendarEventState struct {
+	AllDay                       bool     `json:"all_day"`
+	End                          *string  `json:"end,omitempty"`
+	OriginalStartTime            *string  `json:"original_start_time,omitempty"`
+	Recurrence                   []string `json:"recurrence,omitempty"`
+	RecurringEventID             *string  `json:"recurring_event_id,omitempty"`
+	SourceStatusBeforeSuperseded *string  `json:"source_status_before_superseded,omitempty"`
+	Start                        *string  `json:"start,omitempty"`
+	Status                       *string  `json:"status,omitempty"`
+	SupersededAt                 *string  `json:"superseded_at,omitempty"`
+	SupersededReason             *string  `json:"superseded_reason,omitempty"`
+	TimeZone                     *string  `json:"time_zone,omitempty"`
+}
+
 type CancelDeletionResponse struct {
 	ID     string `json:"id" validate:"required"`
 	Status string `json:"status" validate:"required"`
@@ -1705,6 +1719,7 @@ type CliMessageResponse struct {
 	Bcc                  []CliMessageAddress    `json:"bcc" validate:"required"`
 	BodyHTML             string                 `json:"body_html" validate:"required"`
 	BodyText             string                 `json:"body_text" validate:"required"`
+	CalendarState        *CalendarEventState    `json:"calendar_state,omitempty"`
 	Cc                   []CliMessageAddress    `json:"cc" validate:"required"`
 	ConversationID       int64                  `json:"conversation_id"`
 	DeletedAt            *time.Time             `json:"deleted_at,omitempty" validate:"required"`
@@ -1744,6 +1759,13 @@ func (c CliMessageResponse) Validate() error {
 	}
 	if err := typesValidator.Var(c.BodyText, "required"); err != nil {
 		errors = errors.Append("BodyText", err)
+	}
+	if c.CalendarState != nil {
+		if v, ok := any(c.CalendarState).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("CalendarState", err)
+			}
+		}
 	}
 	for i, item := range c.Cc {
 		if v, ok := any(item).(runtime.Validator); ok {
@@ -4966,30 +4988,31 @@ type MergePersonRequest struct {
 }
 
 type MessageDetail struct {
-	Attachments     []AttachmentInfo `json:"attachments" validate:"required"`
-	Bcc             []string         `json:"bcc,omitempty"`
-	Body            string           `json:"body" validate:"required"`
-	BodyHTML        *string          `json:"body_html,omitempty"`
-	BodyOmitted     *bool            `json:"body_omitted,omitempty"`
-	Cc              []string         `json:"cc,omitempty"`
-	ConversationID  *int64           `json:"conversation_id,omitempty"`
-	DeletedAt       *string          `json:"deleted_at,omitempty"`
-	From            string           `json:"from" validate:"required"`
-	FromEmail       *string          `json:"from_email,omitempty"`
-	FromName        *string          `json:"from_name,omitempty"`
-	FromPhone       *string          `json:"from_phone,omitempty"`
-	HasAttachments  bool             `json:"has_attachments"`
-	ID              int64            `json:"id"`
-	IsFromMe        *bool            `json:"is_from_me,omitempty"`
-	Labels          []string         `json:"labels" validate:"required"`
-	MessageType     *string          `json:"message_type,omitempty"`
-	SentAt          string           `json:"sent_at" validate:"required"`
-	SizeBytes       int64            `json:"size_bytes"`
-	Snippet         string           `json:"snippet" validate:"required"`
-	SourceID        *int64           `json:"source_id,omitempty"`
-	SourceMessageID *string          `json:"source_message_id,omitempty"`
-	Subject         string           `json:"subject" validate:"required"`
-	To              []string         `json:"to" validate:"required"`
+	Attachments     []AttachmentInfo    `json:"attachments" validate:"required"`
+	Bcc             []string            `json:"bcc,omitempty"`
+	Body            string              `json:"body" validate:"required"`
+	BodyHTML        *string             `json:"body_html,omitempty"`
+	BodyOmitted     *bool               `json:"body_omitted,omitempty"`
+	CalendarState   *CalendarEventState `json:"calendar_state,omitempty"`
+	Cc              []string            `json:"cc,omitempty"`
+	ConversationID  *int64              `json:"conversation_id,omitempty"`
+	DeletedAt       *string             `json:"deleted_at,omitempty"`
+	From            string              `json:"from" validate:"required"`
+	FromEmail       *string             `json:"from_email,omitempty"`
+	FromName        *string             `json:"from_name,omitempty"`
+	FromPhone       *string             `json:"from_phone,omitempty"`
+	HasAttachments  bool                `json:"has_attachments"`
+	ID              int64               `json:"id"`
+	IsFromMe        *bool               `json:"is_from_me,omitempty"`
+	Labels          []string            `json:"labels" validate:"required"`
+	MessageType     *string             `json:"message_type,omitempty"`
+	SentAt          string              `json:"sent_at" validate:"required"`
+	SizeBytes       int64               `json:"size_bytes"`
+	Snippet         string              `json:"snippet" validate:"required"`
+	SourceID        *int64              `json:"source_id,omitempty"`
+	SourceMessageID *string             `json:"source_message_id,omitempty"`
+	Subject         string              `json:"subject" validate:"required"`
+	To              []string            `json:"to" validate:"required"`
 }
 
 func (m MessageDetail) Validate() error {
@@ -5003,6 +5026,13 @@ func (m MessageDetail) Validate() error {
 	}
 	if err := typesValidator.Var(m.Body, "required"); err != nil {
 		errors = errors.Append("Body", err)
+	}
+	if m.CalendarState != nil {
+		if v, ok := any(m.CalendarState).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("CalendarState", err)
+			}
+		}
 	}
 	if err := typesValidator.Var(m.From, "required"); err != nil {
 		errors = errors.Append("From", err)

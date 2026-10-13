@@ -1,13 +1,14 @@
 package calsync
 
 import (
-	"go.kenn.io/msgvault/internal/gcal"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/gcal"
+	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -53,6 +54,7 @@ func TestOccurrenceRefresh_RealClientRecurrenceAndRecovery(t *testing.T) {
 	coverage = store.ParseCalendarCoverage(src.SyncConfig)
 	require.NoError(t, st.UpdateSourceSyncCursor(src.ID, "masters-T1"))
 	cs.occurrencePages[""] = `{"items":[{"id":"i1","status":"confirmed","recurringEventId":"series","summary":"[QA] moved appointment","originalStartTime":{"dateTime":"2030-03-31T09:00:00+02:00"},"start":{"dateTime":"2030-03-31T11:00:00+02:00"},"end":{"dateTime":"2030-03-31T12:00:00+02:00"}}],"nextPageToken":"p2"}`
+	cs.incPages["masters-T1"] = `{"items":[{"id":"moved-exception","status":"confirmed","recurringEventId":"series","summary":"[QA] moved in master delta","originalStartTime":{"dateTime":"2030-03-31T09:00:00+02:00"},"start":{"dateTime":"2030-03-31T11:00:00+02:00"},"end":{"dateTime":"2030-03-31T12:00:00+02:00"}}, {"id":"cancelled-exception","status":"cancelled","recurringEventId":"allday-series","originalStartTime":{"date":"2030-04-01"}}],"nextSyncToken":"masters-T2"}`
 	cs.occurrenceErrorPage = "p2"
 	_, err = s.Incremental(t.Context())
 	require.ErrorContains(t, err, "expand recurring events")
@@ -60,7 +62,11 @@ func TestOccurrenceRefresh_RealClientRecurrenceAndRecovery(t *testing.T) {
 	assert.Equal(t, "masters-T1", src.SyncCursor.String, "failed expansion cannot advance the master cursor")
 	occurrence, ok = loadEvent(t, st, src.ID, "series|2030-03-31T07:00:00Z")
 	require.True(t, ok)
-	assert.Equal(t, "[QA] after DST", occurrence.subject, "first page was buffered, not published before failed second page")
+	assert.Equal(t, "[QA] after DST", occurrence.subject, "neither master exception nor expanded page was published before failed second page")
+	assert.Equal(t, "2030-03-31T07:00:00Z", occurrence.sentAt.Time.UTC().Format(time.RFC3339))
+	retainedAllDay, retained := loadEvent(t, st, src.ID, "allday-series|2030-04-01")
+	require.True(t, retained)
+	assert.Equal(t, "confirmed", retainedAllDay.meta["status"], "deferred master cancellation must not mutate the previous successful cache")
 	failedCoverage := store.ParseCalendarCoverage(src.SyncConfig)
 	require.NotNil(t, failedCoverage)
 	assert.False(t, failedCoverage.Complete)
@@ -103,4 +109,66 @@ func TestOccurrenceDefaultWindowAndMasterCursorAreIndependent(t *testing.T) {
 	assert.Equal(t, now.Year()-1, start.Year())
 	assert.Equal(t, now.Year()+1, end.Year())
 	assert.True(t, coverage.Complete)
+}
+
+func TestOccurrenceRefresh_RealClientSupersedesChangedRecurrence(t *testing.T) {
+	cs := &calFakeServer{
+		calendarListJSON: `{"items":[{"id":"primary","accessRole":"owner"}]}`,
+		fullPages:        map[string]string{"": `{"items":[{"id":"series","status":"confirmed","summary":"[QA] weekly series","start":{"dateTime":"2030-03-01T09:00:00Z"},"end":{"dateTime":"2030-03-01T10:00:00Z"},"recurrence":["RRULE:FREQ=WEEKLY"]},{"id":"oneoff","status":"confirmed","summary":"[QA] standalone","start":{"dateTime":"2030-04-01T09:00:00Z"},"end":{"dateTime":"2030-04-01T10:00:00Z"}}],"nextSyncToken":"T1"}`},
+		incPages:         map[string]string{},
+		occurrencePages: map[string]string{"": `{"items":[
+   {"id":"weekly1","status":"confirmed","summary":"[QA] weekly first","recurringEventId":"series","originalStartTime":{"dateTime":"2030-03-01T09:00:00Z"},"start":{"dateTime":"2030-03-01T09:00:00Z"},"end":{"dateTime":"2030-03-01T10:00:00Z"}},
+   {"id":"weekly2","status":"confirmed","summary":"[QA] weekly second","recurringEventId":"series","originalStartTime":{"dateTime":"2030-03-08T09:00:00Z"},"start":{"dateTime":"2030-03-08T09:00:00Z"},"end":{"dateTime":"2030-03-08T10:00:00Z"}},
+   {"id":"future","status":"confirmed","summary":"[QA] later archive","recurringEventId":"series","originalStartTime":{"dateTime":"2030-07-01T09:00:00Z"},"start":{"dateTime":"2030-07-01T09:00:00Z"},"end":{"dateTime":"2030-07-01T10:00:00Z"}},
+   {"id":"boundary","status":"confirmed","summary":"[QA] UTC boundary","recurringEventId":"series","originalStartTime":{"dateTime":"2030-05-01T01:00:00+02:00"},"start":{"dateTime":"2030-05-01T01:00:00+02:00"},"end":{"dateTime":"2030-05-01T02:00:00+02:00"}}
+  ]}`},
+	}
+	server := cs.start(t)
+	defer server.Close()
+	st := testutil.NewTestStore(t)
+	syncer := New(realCalClient(t, server), st, Options{AccountEmail: testAccount, TimeMin: "2030-03-01T00:00:00Z", TimeMax: "2030-09-01T00:00:00Z"}).WithLogger(quietLogger())
+	_, err := syncer.Full(t.Context())
+	require.NoError(t, err)
+	src := primarySource(t, st)
+	old, ok := loadEvent(t, st, src.ID, "series|2030-03-01T09:00:00Z")
+	require.True(t, ok)
+	previousBody := old.body
+	cs.fullPages[""] = `{"items":[{"id":"series","status":"confirmed","summary":"[QA] monthly at new time","start":{"dateTime":"2030-04-01T11:00:00Z"},"end":{"dateTime":"2030-04-01T12:00:00Z"},"recurrence":["RRULE:FREQ=MONTHLY"]},{"id":"oneoff","status":"confirmed","summary":"[QA] standalone","start":{"dateTime":"2030-04-01T09:00:00Z"},"end":{"dateTime":"2030-04-01T10:00:00Z"}}],"nextSyncToken":"T2"}`
+	cs.occurrencePages[""] = `{"items":[{"id":"monthly","status":"confirmed","summary":"[QA] current monthly","recurringEventId":"series","originalStartTime":{"dateTime":"2030-04-01T11:00:00Z"},"start":{"dateTime":"2030-04-01T11:00:00Z"},"end":{"dateTime":"2030-04-01T12:00:00Z"}}]}`
+	syncer.opts.TimeMax = "2030-05-01T00:00:00Z"
+	_, err = syncer.Full(t.Context())
+	require.NoError(t, err)
+	for _, identity := range []string{"series|2030-03-01T09:00:00Z", "series|2030-03-08T09:00:00Z", "series|2030-04-30T23:00:00Z"} {
+		historical, ok := loadEvent(t, st, src.ID, identity)
+		require.True(t, ok)
+		assert.Equal(t, "superseded", historical.meta["status"], "removed weekly/time identities cannot remain confirmed")
+		assert.Equal(t, "confirmed", historical.meta["source_status_before_superseded"])
+		assert.Equal(t, "not_in_expanded_window", historical.meta["superseded_reason"])
+	}
+	historical, ok := loadEvent(t, st, src.ID, "series|2030-03-01T09:00:00Z")
+	require.True(t, ok)
+	assert.Equal(t, previousBody, historical.body, "history content must be retained")
+	assert.Equal(t, old.id, historical.id, "retire history rather than delete/reinsert")
+	detail, err := st.GetMessage(historical.id)
+	require.NoError(t, err)
+	require.NotNil(t, detail.CalendarState)
+	assert.Equal(t, "superseded", detail.CalendarState.Status, "API details must expose the historical state")
+	queryDetail, err := query.NewSQLiteEngine(st.DB()).GetMessage(t.Context(), historical.id)
+	require.NoError(t, err)
+	require.NotNil(t, queryDetail.CalendarState)
+	assert.Equal(t, "superseded", queryDetail.CalendarState.Status, "query details must expose the historical state")
+	later, ok := loadEvent(t, st, src.ID, "series|2030-07-01T09:00:00Z")
+	require.True(t, ok)
+	assert.Equal(t, "confirmed", later.meta["status"], "a narrower refresh cannot retire evidence outside its window")
+	oneoff, ok := loadEvent(t, st, src.ID, "oneoff")
+	require.True(t, ok)
+	assert.Equal(t, "confirmed", oneoff.meta["status"])
+	current, ok := loadEvent(t, st, src.ID, "series|2030-04-01T11:00:00Z")
+	require.True(t, ok)
+	assert.Equal(t, "confirmed", current.meta["status"])
+	src = primarySource(t, st)
+	assert.True(t, store.ParseCalendarCoverage(src.SyncConfig).Complete)
+	_, err = syncer.Full(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, 7, countMessages(t, st, src.ID), "repeating the snapshot retains history without duplication")
 }

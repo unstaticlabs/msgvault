@@ -28,7 +28,7 @@ type CalendarCacheSource struct {
 func calendarCache(accounts []query.AccountInfo, q *search.Query) *CalendarCache {
 	response := &CalendarCache{
 		Scope: "registered_calendars", Status: "unavailable",
-		Notice:  "This is an archive, not live availability. Empty results do not establish a free schedule. Check calendar registration, coverage and freshness. Series masters and cancelled events remain archived; inspect event metadata before counting appointments.",
+		Notice:  "This is an archive, not live availability. Empty results do not establish a free schedule. Check calendar registration, coverage and freshness. Series masters, cancelled and superseded events remain archived; inspect get_message.calendar_state before counting appointments.",
 		Sources: []CalendarCacheSource{},
 	}
 	for _, account := range accounts {

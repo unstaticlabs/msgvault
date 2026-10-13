@@ -121,9 +121,11 @@ Date boundaries are UTC instants. An event that crosses a boundary may be
 included because Google's `timeMin` tests its end and `timeMax` tests its start.
 All-day date values remain date-only in stored event metadata.
 
-The occurrence refresh fetches every page before publishing occurrences. A
+The occurrence refresh fetches every page before publishing occurrences,
+including moved and cancelled exception records delivered by the master feed. A
 failed page leaves the previous occurrence data in place and reports incomplete
-coverage; the master token does not advance. Retry the same command after the
+coverage; the master token does not advance. Full traversals containing deferred exceptions restart
+from the beginning after interruption so exceptions cannot be skipped. Retry the same command after the
 provider is available. Moved events and cancelled instances upsert by series ID
 and original start, so retries do not create a second copy. One-off events are
 not re-ingested by the expansion phase.
@@ -145,7 +147,13 @@ exclude read-only calendars unless `--all-calendars` or an explicit calendar
 selection was used. Provider failures, an incomplete refresh, stale data, and
 searches outside the expanded window all limit the answer. Use live Google
 Calendar for authoritative availability. Series masters and cancelled events
-remain searchable history; inspect event metadata before counting appointments.
+remain searchable history; inspect event metadata before counting appointments. `get_message` and API message details expose
+`calendar_state`, including recurrence identity, interval and archive status.
+When a completed window no longer contains a previously active occurrence (for
+example after changing a weekly rule to monthly), that occurrence is retained
+with `status=superseded`, its prior provider status and a timestamp. Its body and
+original provider JSON remain history. Entries outside the refreshed window are
+not retired. Superseded records are history, not current appointments.
 The default occurrence window bounds expansion of infinite recurrence rules;
 it does not cap the archival master history.
 

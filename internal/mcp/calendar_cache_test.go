@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"database/sql"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestCalendarCache_EmptyUnavailableIncompleteStaleAndOutside(t *testing.T) {
@@ -32,4 +34,23 @@ func TestCalendarCache_EmptyUnavailableIncompleteStaleAndOutside(t *testing.T) {
 	q.AccountIDs = []int64{99}
 	assert.Equal(t, "unavailable", calendarCache(accounts, q).Status)
 	assert.Nil(t, calendarCache([]query.AccountInfo{{SourceType: "gmail"}}, nil), "mail-only stats should not gain unrelated calendar fields")
+}
+
+func TestMCPGetMessageExposesRealArchivedCalendarState(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("gcal", "qa@example.com/primary")
+	require.NoError(t, err)
+	conversation, err := st.EnsureConversationWithType(source.ID, "series", "calendar", "[QA] series")
+	require.NoError(t, err)
+	id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conversation, SourceMessageID: "series|2030-03-01T09:00:00Z", MessageType: "calendar_event", Subject: sql.NullString{String: "[QA] retired occurrence", Valid: true}})
+	require.NoError(t, err)
+	require.NoError(t, st.SetMessageMetadata(id, sql.NullString{String: `{"status":"superseded","source_status_before_superseded":"confirmed","recurring_event_id":"series","original_start_time":"2030-03-01T09:00:00Z","start":"2030-03-01T09:00:00Z","end":"2030-03-01T10:00:00Z","superseded_reason":"not_in_expanded_window","all_day":false}`, Valid: true}))
+	require.NoError(t, st.UpsertMessageBody(id, sql.NullString{String: "[QA] historical body", Valid: true}, sql.NullString{}))
+	handlers := newTestHandlers(query.NewSQLiteEngine(st.DB()))
+	response := runTool[getMessageResponse](t, "get_message", handlers.getMessage, map[string]any{"id": float64(id)})
+	require.NotNil(t, response.CalendarState)
+	assert.Equal(t, "superseded", response.CalendarState.Status)
+	assert.Equal(t, "confirmed", response.CalendarState.SourceStatusBeforeSuperseded)
+	assert.Equal(t, "series", response.CalendarState.RecurringEventID)
+	assert.Equal(t, "[QA] historical body", response.BodyText)
 }

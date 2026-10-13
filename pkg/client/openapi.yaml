@@ -971,6 +971,35 @@ components:
         - complete
         - status
       type: object
+    CalendarEventState:
+      properties:
+        all_day:
+          type: boolean
+        end:
+          type: string
+        original_start_time:
+          type: string
+        recurrence:
+          items:
+            type: string
+          type: array
+        recurring_event_id:
+          type: string
+        source_status_before_superseded:
+          type: string
+        start:
+          type: string
+        status:
+          type: string
+        superseded_at:
+          type: string
+        superseded_reason:
+          type: string
+        time_zone:
+          type: string
+      required:
+        - all_day
+      type: object
     CancelDeletionResponse:
       properties:
         id:
@@ -1877,6 +1906,8 @@ components:
           type: string
         body_text:
           type: string
+        calendar_state:
+          $ref: "#/components/schemas/CalendarEventState"
         cc:
           items:
             $ref: "#/components/schemas/CliMessageAddress"
@@ -5387,6 +5418,8 @@ components:
           type: string
         body_omitted:
           type: boolean
+        calendar_state:
+          $ref: "#/components/schemas/CalendarEventState"
         cc:
           items:
             type: string

@@ -255,6 +255,7 @@ func (s *Syncer) syncCalendarFull(
 	}
 	pageToken := resumePageToken
 	finalToken := ""
+	var deferredInstances []gcal.Event
 	ingested := 0
 	limitHit := false
 
@@ -292,6 +293,21 @@ func (s *Syncer) syncCalendarFull(
 				break
 			}
 			ev := page.Items[i]
+			if ev.RecurringEventID != "" {
+				deferredInstances = append(deferredInstances, ev)
+				ingested++
+				// The pending instances are in memory. A crash must replay the full feed,
+				// including exceptions outside the expansion window, not resume after them.
+				if resumeEligible {
+					checkpoint := cp
+					checkpoint.PageToken = ""
+					if err := s.store.UpdateSyncCheckpoint(syncID, &checkpoint); err != nil {
+						return fail(err)
+					}
+					resumeEligible = false
+				}
+				continue
+			}
 			added, cancelled, err := s.persistOne(src.ID, cal, ev, result)
 			if err != nil {
 				return fail(fmt.Errorf("persist event %s: %w", ev.ID, err))
@@ -338,7 +354,7 @@ func (s *Syncer) syncCalendarFull(
 		if err != nil {
 			return fail(err)
 		}
-		if err := s.refreshOccurrences(ctx, fresh, cal, result); err != nil {
+		if err := s.refreshOccurrences(ctx, fresh, cal, result, deferredInstances); err != nil {
 			return fail(err)
 		}
 	}

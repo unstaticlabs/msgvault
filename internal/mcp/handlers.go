@@ -1502,31 +1502,32 @@ func lineNumberAt(body string, byteOffset int) int {
 }
 
 type getMessageResponse struct {
-	ID                   int64                  `json:"id"`
-	SourceMessageID      string                 `json:"source_message_id"`
-	ConversationID       int64                  `json:"conversation_id"`
-	SourceConversationID string                 `json:"source_conversation_id"`
-	Subject              string                 `json:"subject"`
-	MessageType          string                 `json:"message_type,omitempty"`
-	Snippet              string                 `json:"snippet"`
-	SentAt               time.Time              `json:"sent_at"`
-	ReceivedAt           *time.Time             `json:"received_at,omitempty"`
-	DeletedAt            *time.Time             `json:"deleted_at,omitempty"`
-	SizeEstimate         int64                  `json:"size_estimate"`
-	HasAttachments       bool                   `json:"has_attachments"`
-	From                 []query.Address        `json:"from"`
-	To                   []query.Address        `json:"to"`
-	Cc                   []query.Address        `json:"cc"`
-	Bcc                  []query.Address        `json:"bcc"`
-	BodyText             string                 `json:"body_text"`
-	BodyHTML             string                 `json:"body_html"`
-	BodyFormat           string                 `json:"body_format,omitempty"`
-	BodyLength           int                    `json:"body_length"`
-	BodyReturned         int                    `json:"body_returned"`
-	Offset               int                    `json:"offset"`
-	HasMore              bool                   `json:"has_more"`
-	Labels               []string               `json:"labels"`
-	Attachments          []query.AttachmentInfo `json:"attachments"`
+	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
+	ID                   int64                     `json:"id"`
+	SourceMessageID      string                    `json:"source_message_id"`
+	ConversationID       int64                     `json:"conversation_id"`
+	SourceConversationID string                    `json:"source_conversation_id"`
+	Subject              string                    `json:"subject"`
+	MessageType          string                    `json:"message_type,omitempty"`
+	Snippet              string                    `json:"snippet"`
+	SentAt               time.Time                 `json:"sent_at"`
+	ReceivedAt           *time.Time                `json:"received_at,omitempty"`
+	DeletedAt            *time.Time                `json:"deleted_at,omitempty"`
+	SizeEstimate         int64                     `json:"size_estimate"`
+	HasAttachments       bool                      `json:"has_attachments"`
+	From                 []query.Address           `json:"from"`
+	To                   []query.Address           `json:"to"`
+	Cc                   []query.Address           `json:"cc"`
+	Bcc                  []query.Address           `json:"bcc"`
+	BodyText             string                    `json:"body_text"`
+	BodyHTML             string                    `json:"body_html"`
+	BodyFormat           string                    `json:"body_format,omitempty"`
+	BodyLength           int                       `json:"body_length"`
+	BodyReturned         int                       `json:"body_returned"`
+	Offset               int                       `json:"offset"`
+	HasMore              bool                      `json:"has_more"`
+	Labels               []string                  `json:"labels"`
+	Attachments          []query.AttachmentInfo    `json:"attachments"`
 }
 
 func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult, error) {
@@ -1596,6 +1597,7 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 	}
 
 	return jsonResult(getMessageResponse{
+		CalendarState:        msg.CalendarState,
 		ID:                   msg.ID,
 		SourceMessageID:      msg.SourceMessageID,
 		ConversationID:       msg.ConversationID,

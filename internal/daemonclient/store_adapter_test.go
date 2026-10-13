@@ -2531,3 +2531,19 @@ func TestGetCLIAccountsPreservesCalendarCoverage(t *testing.T) {
 	assert.True(t, accounts[0].CalendarCoverage.Complete)
 	assert.Equal(t, "2026-01-01T00:00:00Z", accounts[0].CalendarCoverage.Start)
 }
+
+func TestDaemonMessageDetailsPreserveCalendarHistoryState(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":41,"subject":"[QA] old occurrence","message_type":"calendar_event","from":"","to":[],"cc":[],"bcc":[],"sent_at":"2030-03-01T09:00:00Z","snippet":"","labels":[],"has_attach":false,"size_bytes":0,"body":"[QA] historical body","attachments":[],"calendar_state":{"status":"superseded","source_status_before_superseded":"confirmed","recurring_event_id":"series","original_start_time":"2030-03-01T09:00:00Z","all_day":false}}`))
+	}))
+	defer srv.Close()
+	message, err := newTestStore(srv, "key").GetMessageContext(t.Context(), 41)
+	require.NoError(t, err)
+	require.NotNil(t, message.CalendarState)
+	assert.Equal(t, "superseded", message.CalendarState.Status)
+	detail := queryDetailFromAPIMessage(message)
+	require.NotNil(t, detail.CalendarState)
+	assert.Equal(t, "confirmed", detail.CalendarState.SourceStatusBeforeSuperseded)
+	assert.Equal(t, "series", detail.CalendarState.RecurringEventID)
+}

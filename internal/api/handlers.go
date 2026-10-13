@@ -290,6 +290,7 @@ type MessageSummary struct {
 
 // MessageDetail represents a full message response.
 type MessageDetail struct {
+	CalendarState *store.CalendarEventState `json:"calendar_state,omitempty"`
 	MessageSummary
 
 	Body     string `json:"body"`
@@ -493,6 +494,7 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 	}
 
 	return MessageDetail{
+		CalendarState:   qMsg.CalendarState,
 		ID:              qMsg.ID,
 		SourceID:        qMsg.SourceID,
 		SourceMessageID: qMsg.SourceMessageID,
@@ -721,6 +723,7 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	detail := MessageDetail{
+		CalendarState:  msg.CalendarState,
 		MessageSummary: toMessageSummary(*msg),
 		Body:           msg.Body,
 		BodyHTML:       msg.BodyHTML,

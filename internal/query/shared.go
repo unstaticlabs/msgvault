@@ -496,13 +496,15 @@ func getMessageByQueryShared(ctx context.Context, db *sql.DB, rebind rebindFunc,
 			COALESCE(m.size_estimate, 0),
 			m.has_attachments,
 			COALESCE(m.is_from_me, FALSE),
-			m.deleted_from_source_at
+			m.deleted_from_source_at,
+ m.metadata
 		FROM %smessages m
 		LEFT JOIN %sconversations conv ON conv.id = m.conversation_id
 		WHERE %s
 	`, tablePrefix, tablePrefix, whereClause)
 
 	var msg MessageDetail
+	var metadata sql.NullString
 	var sentAt, receivedAt, deletedAt sql.NullTime
 	err := db.QueryRowContext(ctx, rebind(query), args...).Scan(
 		&msg.ID,
@@ -519,6 +521,7 @@ func getMessageByQueryShared(ctx context.Context, db *sql.DB, rebind rebindFunc,
 		&msg.HasAttachments,
 		&msg.IsFromMe,
 		&deletedAt,
+		&metadata,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil //nolint:nilnil // Engine.GetMessage/GetMessageBySourceID use (nil, nil) for not-found; callers chain fallback lookups on the nil result
@@ -527,6 +530,7 @@ func getMessageByQueryShared(ctx context.Context, db *sql.DB, rebind rebindFunc,
 		return nil, fmt.Errorf("get message: %w", err)
 	}
 
+	msg.CalendarState = store.ParseCalendarEventState(msg.MessageType, metadata)
 	if sentAt.Valid {
 		msg.SentAt = sentAt.Time
 	}
