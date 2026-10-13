@@ -838,6 +838,7 @@ func searchPersonFilesDefinition(_ *handlers) toolDefinition {
 // without changing existing JSON field names.
 type searchMetadataResponse struct {
 	paginatedResponse[query.MessageSummary]
+
 	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
 }
 type searchInMessageResponse paginatedResponse[messageMatch]

@@ -960,8 +960,9 @@ type hybridGenerationSummary = HybridGeneration
 // It is returned for all modes (keyword, vector, hybrid); Mode/PoolSaturated/Generation
 // are only meaningful for vector/hybrid.
 type searchMessageBodiesResponse struct {
-	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
 	paginatedResponse[searchMessageItem]
+
+	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
 
 	Mode          string                  `json:"mode"`
 	PoolSaturated bool                    `json:"pool_saturated"`

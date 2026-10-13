@@ -290,8 +290,9 @@ type MessageSummary struct {
 
 // MessageDetail represents a full message response.
 type MessageDetail struct {
-	CalendarState *store.CalendarEventState `json:"calendar_state,omitempty"`
 	MessageSummary
+
+	CalendarState *store.CalendarEventState `json:"calendar_state,omitempty"`
 
 	Body     string `json:"body"`
 	BodyHTML string `json:"body_html,omitempty"`

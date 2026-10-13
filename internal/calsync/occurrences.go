@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -38,7 +39,7 @@ func (s *Syncer) refreshOccurrences(ctx context.Context, src *store.Source, cal 
 		}
 	}
 	if !start.Before(end) {
-		return fmt.Errorf("occurrence start must precede end")
+		return errors.New("occurrence start must precede end")
 	}
 	// Preserve the last successful range/time even while a new attempt fails.
 	cfg := parseSourceConfig(src.SyncConfig)
@@ -86,13 +87,13 @@ func (s *Syncer) refreshOccurrences(ctx context.Context, src *store.Source, cal 
 			}
 		}
 		if s.opts.Limit > 0 && len(events) > s.opts.Limit {
-			return fail(fmt.Errorf("occurrence refresh exceeded --limit; coverage remains incomplete"))
+			return fail(errors.New("occurrence refresh exceeded --limit; coverage remains incomplete"))
 		}
 		if page.NextPageToken == "" {
 			break
 		}
 		if seenPages[page.NextPageToken] {
-			return fail(fmt.Errorf("occurrence pagination repeated a page token"))
+			return fail(errors.New("occurrence pagination repeated a page token"))
 		}
 		seenPages[page.NextPageToken] = true
 		pageToken = page.NextPageToken
@@ -147,7 +148,7 @@ func (s *Syncer) markCalendarIncomplete(sourceID int64) error {
 // supersedeMissingOccurrences records disappearance as archive history, not a
 // provider cancellation. Only previously active occurrences overlapping this
 // fully traversed window are candidates; one-off events and masters are kept.
-func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Time, observed map[string]bool, now time.Time, calendarTimeZone string) error {
+func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Time, observed map[string]bool, now time.Time, calendarTimeZone string) (result error) {
 	// SQLite retains timestamp offsets as text. Compare parsed event intervals,
 	// not lexical sent_at values, or an occurrence near a UTC boundary can be
 	// missed. The source/type predicate confines this read to one calendar.
@@ -155,6 +156,11 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 	if err != nil {
 		return fmt.Errorf("read occurrence window: %w", err)
 	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			result = errors.Join(result, fmt.Errorf("close occurrence window: %w", closeErr))
+		}
+	}()
 	type pending struct {
 		id       int64
 		metadata sql.NullString
@@ -165,15 +171,13 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 		var identity string
 		var raw sql.NullString
 		if err := rows.Scan(&id, &identity, &raw); err != nil {
-			rows.Close()
-			return err
+			return fmt.Errorf("scan archived occurrence: %w", err)
 		}
 		if observed[identity] || !raw.Valid {
 			continue
 		}
 		var metadata map[string]any
 		if err := json.Unmarshal([]byte(raw.String), &metadata); err != nil {
-			rows.Close()
 			return fmt.Errorf("decode archived occurrence: %w", err)
 		}
 		series, _ := metadata["recurring_event_id"].(string)
@@ -189,16 +193,14 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 		}
 		from, ok, zoneErr := metadataInstant(currentStart, eventTimeZone)
 		if zoneErr != nil {
-			rows.Close()
-			return zoneErr
+			return fmt.Errorf("resolve archived occurrence timezone: %w", zoneErr)
 		}
 		if !ok {
 			continue
 		}
 		to, ok, zoneErr := metadataInstant(currentEnd, eventTimeZone)
 		if zoneErr != nil {
-			rows.Close()
-			return zoneErr
+			return fmt.Errorf("resolve archived occurrence timezone: %w", zoneErr)
 		}
 		if !ok {
 			to = from
@@ -212,18 +214,12 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 		metadata["superseded_at"] = now.Format(time.RFC3339)
 		encoded, err := json.Marshal(metadata)
 		if err != nil {
-			rows.Close()
-			return err
+			return fmt.Errorf("encode superseded occurrence: %w", err)
 		}
 		updates = append(updates, pending{id: id, metadata: sql.NullString{String: string(encoded), Valid: true}})
 	}
-	scanErr := rows.Err()
-	closeErr := rows.Close()
-	if scanErr != nil {
-		return scanErr
-	}
-	if closeErr != nil {
-		return closeErr
+	if scanErr := rows.Err(); scanErr != nil {
+		return fmt.Errorf("iterate archived occurrences: %w", scanErr)
 	}
 	for _, update := range updates {
 		if err := s.store.SetMessageMetadata(update.id, update.metadata); err != nil {
@@ -239,7 +235,7 @@ func metadataInstant(value, zone string) (time.Time, bool, error) {
 	}
 	if _, err := time.Parse("2006-01-02", value); err == nil {
 		if zone == "" {
-			return time.Time{}, false, fmt.Errorf("all-day occurrence timezone is unavailable; window not reconciled")
+			return time.Time{}, false, errors.New("all-day occurrence timezone is unavailable; window not reconciled")
 		}
 		location, err := time.LoadLocation(zone)
 		if err != nil {
@@ -247,7 +243,7 @@ func metadataInstant(value, zone string) (time.Time, bool, error) {
 		}
 		day, err := time.ParseInLocation("2006-01-02", value, location)
 		if err != nil {
-			return time.Time{}, false, err
+			return time.Time{}, false, fmt.Errorf("parse all-day occurrence date: %w", err)
 		}
 		return day.UTC(), true, nil
 	}
