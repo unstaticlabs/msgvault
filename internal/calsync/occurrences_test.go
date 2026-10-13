@@ -1,6 +1,7 @@
 package calsync
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -171,4 +172,47 @@ func TestOccurrenceRefresh_RealClientSupersedesChangedRecurrence(t *testing.T) {
 	_, err = syncer.Full(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, 7, countMessages(t, st, src.ID), "repeating the snapshot retains history without duplication")
+}
+
+func TestOccurrenceRefresh_RealClientAllDayTimezones(t *testing.T) {
+	cases := []struct{ name, calendarZone, eventZone, start, end, status string }{
+		{"Honolulu outside UTC morning", "Pacific/Honolulu", "", "2030-03-01T00:00:00Z", "2030-03-01T06:00:00Z", "confirmed"},
+		{"Tokyo event override outside UTC evening", "UTC", "Asia/Tokyo", "2030-03-01T18:00:00Z", "2030-03-02T03:00:00Z", "confirmed"},
+		{"Honolulu overlaps next UTC morning", "Pacific/Honolulu", "", "2030-03-02T04:00:00Z", "2030-03-02T06:00:00Z", "superseded"},
+		{"Tokyo overlaps previous UTC evening", "Asia/Tokyo", "", "2030-02-28T17:00:00Z", "2030-02-28T20:00:00Z", "superseded"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			zoneField := ""
+			if test.eventZone != "" {
+				zoneField = `,"timeZone":"` + test.eventZone + `"`
+			}
+			cs := &calFakeServer{
+				calendarListJSON: fmt.Sprintf(`{"items":[{"id":"primary","accessRole":"owner","timeZone":%q}]}`, test.calendarZone),
+				fullPages:        map[string]string{"": `{"items":[]}`}, incPages: map[string]string{},
+				occurrencePages: map[string]string{"": `{"items":[{"id":"all-day","status":"confirmed","summary":"[QA] all-day","recurringEventId":"series","originalStartTime":{"date":"2030-03-01"},"start":{"date":"2030-03-01"` + zoneField + `},"end":{"date":"2030-03-02"` + zoneField + `}}]}`},
+			}
+			server := cs.start(t)
+			defer server.Close()
+			st := testutil.NewTestStore(t)
+			syncer := New(realCalClient(t, server), st, Options{AccountEmail: testAccount, TimeMin: "2030-02-27T00:00:00Z", TimeMax: "2030-03-04T00:00:00Z"}).WithLogger(quietLogger())
+			_, err := syncer.Full(t.Context())
+			require.NoError(t, err)
+			src := primarySource(t, st)
+			before, ok := loadEvent(t, st, src.ID, "series|2030-03-01")
+			require.True(t, ok)
+			cs.occurrencePages[""] = `{"items":[]}`
+			syncer.opts.TimeMin = test.start
+			syncer.opts.TimeMax = test.end
+			_, err = syncer.Full(t.Context())
+			require.NoError(t, err)
+			after, ok := loadEvent(t, st, src.ID, "series|2030-03-01")
+			require.True(t, ok)
+			assert.Equal(t, test.status, after.meta["status"])
+			assert.Equal(t, "2030-03-01", after.meta["start"], "timezone comparison must not change date-only storage")
+			assert.Equal(t, "2030-03-01", after.meta["original_start_time"])
+			assert.Equal(t, before.id, after.id)
+			assert.Equal(t, before.body, after.body)
+		})
+	}
 }

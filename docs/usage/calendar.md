@@ -119,7 +119,11 @@ msgvault sync-calendar you@gmail.com --full --after 2026-01-01 --before 2027-01-
 
 Date boundaries are UTC instants. An event that crosses a boundary may be
 included because Google's `timeMin` tests its end and `timeMax` tests its start.
-All-day date values remain date-only in stored event metadata.
+All-day date values remain date-only in stored event metadata and occurrence
+identities. Reconciliation converts their interval boundaries using the event's
+timezone, falling back to the calendar timezone; it never treats a local day as
+a UTC day. Missing timezone information makes coverage incomplete instead of
+retiring an event whose relationship to the window is unknown.
 
 The occurrence refresh fetches every page before publishing occurrences,
 including moved and cancelled exception records delivered by the master feed. A

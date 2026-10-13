@@ -74,6 +74,10 @@ func (s *Syncer) refreshOccurrences(ctx context.Context, src *store.Source, cal 
 		if err != nil {
 			return fail(fmt.Errorf("expand recurring events: %w", err))
 		}
+		if cal.TimeZone == "" && page.TimeZone != "" {
+			cal.TimeZone = page.TimeZone
+			cfg.TimeZone = page.TimeZone
+		}
 		for _, event := range page.Items {
 			// One-off events already belong to the master feed. A master returned as a
 			// cancellation belongs there too. Do not ingest either for a second time.
@@ -114,7 +118,7 @@ func (s *Syncer) refreshOccurrences(ctx context.Context, src *store.Source, cal 
 			return fail(fmt.Errorf("persist expanded occurrence: %w", err))
 		}
 	}
-	if err := s.supersedeMissingOccurrences(src.ID, start, end, observed, now); err != nil {
+	if err := s.supersedeMissingOccurrences(src.ID, start, end, observed, now, cal.TimeZone); err != nil {
 		return fail(err)
 	}
 	coverage.Start = start.UTC().Format(time.RFC3339)
@@ -143,7 +147,7 @@ func (s *Syncer) markCalendarIncomplete(sourceID int64) error {
 // supersedeMissingOccurrences records disappearance as archive history, not a
 // provider cancellation. Only previously active occurrences overlapping this
 // fully traversed window are candidates; one-off events and masters are kept.
-func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Time, observed map[string]bool, now time.Time) error {
+func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Time, observed map[string]bool, now time.Time, calendarTimeZone string) error {
 	// SQLite retains timestamp offsets as text. Compare parsed event intervals,
 	// not lexical sent_at values, or an occurrence near a UTC boundary can be
 	// missed. The source/type predicate confines this read to one calendar.
@@ -179,11 +183,23 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 		}
 		currentStart, _ := metadata["start"].(string)
 		currentEnd, _ := metadata["end"].(string)
-		from, ok := metadataInstant(currentStart)
+		eventTimeZone, _ := metadata["time_zone"].(string)
+		if eventTimeZone == "" {
+			eventTimeZone = calendarTimeZone
+		}
+		from, ok, zoneErr := metadataInstant(currentStart, eventTimeZone)
+		if zoneErr != nil {
+			rows.Close()
+			return zoneErr
+		}
 		if !ok {
 			continue
 		}
-		to, ok := metadataInstant(currentEnd)
+		to, ok, zoneErr := metadataInstant(currentEnd, eventTimeZone)
+		if zoneErr != nil {
+			rows.Close()
+			return zoneErr
+		}
 		if !ok {
 			to = from
 		}
@@ -217,12 +233,23 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 	return nil
 }
 
-func metadataInstant(value string) (time.Time, bool) {
+func metadataInstant(value, zone string) (time.Time, bool, error) {
 	if instant, err := time.Parse(time.RFC3339, value); err == nil {
-		return instant, true
+		return instant, true, nil
 	}
-	if day, err := time.Parse("2006-01-02", value); err == nil {
-		return day.UTC(), true
+	if _, err := time.Parse("2006-01-02", value); err == nil {
+		if zone == "" {
+			return time.Time{}, false, fmt.Errorf("all-day occurrence timezone is unavailable; window not reconciled")
+		}
+		location, err := time.LoadLocation(zone)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("all-day occurrence timezone is invalid: %w", err)
+		}
+		day, err := time.ParseInLocation("2006-01-02", value, location)
+		if err != nil {
+			return time.Time{}, false, err
+		}
+		return day.UTC(), true, nil
 	}
-	return time.Time{}, false
+	return time.Time{}, false, nil
 }
