@@ -110,6 +110,9 @@ func (s *Syncer) incrementalCalendar(ctx context.Context, src *store.Source, cal
 	scoped.store = s.store.ScopedToSync(src.ID, syncID)
 	s = &scoped
 	fail := func(e error) error {
+		if coverageErr := s.markCalendarIncomplete(src.ID); coverageErr != nil {
+			e = errors.Join(e, coverageErr)
+		}
 		_ = s.store.FailSync(syncID, e.Error())
 		return e
 	}
@@ -118,6 +121,10 @@ func (s *Syncer) incrementalCalendar(ctx context.Context, src *store.Source, cal
 	pageToken := ""
 	finalToken := ""
 	cp := store.Checkpoint{}
+
+	if err := s.markCalendarIncomplete(src.ID); err != nil {
+		return fail(err)
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -184,6 +191,9 @@ func (s *Syncer) incrementalCalendar(ctx context.Context, src *store.Source, cal
 		return fail(fmt.Errorf("%d calendar event(s) failed to persist; sync token not advanced so they retry on the next sync", cp.ErrorsCount))
 	}
 
+	if err := s.refreshOccurrences(ctx, src, cal, result); err != nil {
+		return fail(err)
+	}
 	if err := s.store.RecomputeConversationStats(src.ID); err != nil {
 		s.logger.Warn("recompute conversation stats failed", "calendar", cal.ID, "error", err)
 	}

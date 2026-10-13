@@ -259,8 +259,15 @@ func (s *Syncer) syncCalendarFull(
 	limitHit := false
 
 	fail := func(e error) error {
+		if coverageErr := s.markCalendarIncomplete(src.ID); coverageErr != nil {
+			e = errors.Join(e, coverageErr)
+		}
 		_ = s.store.FailSync(syncID, e.Error())
 		return e
+	}
+
+	if err := s.markCalendarIncomplete(src.ID); err != nil {
+		return fail(err)
 	}
 
 	for {
@@ -325,6 +332,15 @@ func (s *Syncer) syncCalendarFull(
 	// complete, unbounded traversal advances the cursor.
 	if limitHit || s.opts.TimeMin != "" || s.opts.TimeMax != "" {
 		finalToken = ""
+	}
+	if !limitHit {
+		fresh, err := s.store.GetSourceByID(src.ID)
+		if err != nil {
+			return fail(err)
+		}
+		if err := s.refreshOccurrences(ctx, fresh, cal, result); err != nil {
+			return fail(err)
+		}
 	}
 	if err := s.store.RecomputeConversationStats(src.ID); err != nil {
 		s.logger.Warn("recompute conversation stats failed", "calendar", cal.ID, "error", err)
@@ -577,7 +593,12 @@ func normalizeAccountEmail(email string) string {
 // sourceConfigJSON builds the sync_config payload. account_email is the token
 // key; the rest is descriptive.
 func (s *Syncer) sourceConfigJSON(cal gcal.Calendar) string {
+	var coverage *store.CalendarCoverage
+	if src, err := s.store.GetSourceByIdentifier(s.opts.AccountEmail + "/" + cal.ID); err == nil && src != nil {
+		coverage = store.ParseCalendarCoverage(src.SyncConfig)
+	}
 	return buildSourceConfigJSON(sourceConfig{
+		Coverage:        coverage,
 		AccountEmail:    s.opts.AccountEmail,
 		CalendarID:      cal.ID,
 		CalendarSummary: cal.Summary,

@@ -14,12 +14,13 @@ import (
 
 // sourceConfig is the JSON persisted in sources.sync_config for a calendar.
 type sourceConfig struct {
-	AccountEmail    string `json:"account_email"`
-	CalendarID      string `json:"calendar_id"`
-	CalendarSummary string `json:"calendar_summary,omitempty"`
-	AccessRole      string `json:"access_role,omitempty"`
-	Primary         bool   `json:"primary,omitempty"`
-	TimeZone        string `json:"time_zone,omitempty"`
+	Coverage        *store.CalendarCoverage `json:"occurrence_coverage,omitempty"`
+	AccountEmail    string                  `json:"account_email"`
+	CalendarID      string                  `json:"calendar_id"`
+	CalendarSummary string                  `json:"calendar_summary,omitempty"`
+	AccessRole      string                  `json:"access_role,omitempty"`
+	Primary         bool                    `json:"primary,omitempty"`
+	TimeZone        string                  `json:"time_zone,omitempty"`
 }
 
 func buildSourceConfigJSON(c sourceConfig) string {

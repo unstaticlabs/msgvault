@@ -465,6 +465,7 @@ func cliAccountsFromGenerated(resp *generated.ListCLIAccountsResponse) []CLIAcco
 	out := make([]CLIAccount, len(resp.Accounts))
 	for i, account := range resp.Accounts {
 		out[i] = CLIAccount{
+			CalendarCoverage:   calendarCoverageFromGenerated(account.CalendarCoverage),
 			ID:                 account.ID,
 			Email:              account.Email,
 			Type:               account.Type,
@@ -884,4 +885,11 @@ func intValue(value *int64) int {
 		return 0
 	}
 	return int(*value)
+}
+
+func calendarCoverageFromGenerated(c *generated.CalendarCoverage) *store.CalendarCoverage {
+	if c == nil {
+		return nil
+	}
+	return &store.CalendarCoverage{Start: stringValue(c.Start), End: stringValue(c.End), Complete: c.Complete, Status: c.Status, RefreshedAt: stringValue(c.RefreshedAt), AttemptedAt: stringValue(c.AttemptedAt)}
 }

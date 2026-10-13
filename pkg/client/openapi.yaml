@@ -953,6 +953,24 @@ components:
       required:
         - status
       type: object
+    CalendarCoverage:
+      properties:
+        attempted_at:
+          type: string
+        complete:
+          type: boolean
+        end:
+          type: string
+        refreshed_at:
+          type: string
+        start:
+          type: string
+        status:
+          type: string
+      required:
+        - complete
+        - status
+      type: object
     CancelDeletionResponse:
       properties:
         id:
@@ -1585,6 +1603,8 @@ components:
       type: object
     CliAccountResponse:
       properties:
+        calendar_coverage:
+          $ref: "#/components/schemas/CalendarCoverage"
         display_name:
           type: string
         email:
@@ -10501,6 +10521,8 @@ components:
           $ref: "#/components/schemas/SyncRunStatus"
           nullable: true
           type: ""
+        calendar_coverage:
+          $ref: "#/components/schemas/CalendarCoverage"
         can_sync:
           type: boolean
         display_name:

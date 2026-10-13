@@ -688,7 +688,7 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 		return nil, newInternalError("count metadata search", err)
 	}
 
-	return jsonResult(searchMetadataResponse(newPaginatedResponse(results, totalMatched, offset)))
+	return jsonResult(searchMetadataResponse{paginatedResponse: newPaginatedResponse(results, totalMatched, offset), CalendarCache: h.calendarQueryCache(ctx, q)})
 }
 
 func (h *handlers) searchDocuments(ctx context.Context, req toolRequest) (*toolResult, error) {
@@ -894,6 +894,7 @@ func (h *handlers) searchMessageBodies(ctx context.Context, req toolRequest) (*t
 
 	return jsonResult(searchMessageBodiesResponse{
 		paginatedResponse: newPaginatedResponseNoTotal(data, offset, hasMore),
+		CalendarCache:     h.calendarQueryCache(ctx, q),
 		Mode:              searchModeKeyword,
 	})
 }
@@ -959,6 +960,7 @@ type hybridGenerationSummary = HybridGeneration
 // It is returned for all modes (keyword, vector, hybrid); Mode/PoolSaturated/Generation
 // are only meaningful for vector/hybrid.
 type searchMessageBodiesResponse struct {
+	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
 	paginatedResponse[searchMessageItem]
 
 	Mode          string                  `json:"mode"`
@@ -1967,9 +1969,10 @@ func (h *handlers) listMessages(ctx context.Context, req toolRequest) (*toolResu
 // VectorSearch is omitempty so archives without vector search do not
 // surface an empty sub-object to callers.
 type getStatsResponse struct {
-	Stats        *query.TotalStats   `json:"stats"`
-	Accounts     []query.AccountInfo `json:"accounts"`
-	VectorSearch *vector.StatsView   `json:"vector_search,omitempty"`
+	CalendarCache *CalendarCache      `json:"calendar_cache,omitempty"`
+	Stats         *query.TotalStats   `json:"stats"`
+	Accounts      []query.AccountInfo `json:"accounts"`
+	VectorSearch  *vector.StatsView   `json:"vector_search,omitempty"`
 }
 
 func (h *handlers) getStats(ctx context.Context, _ toolRequest) (*toolResult, error) {
@@ -1989,9 +1992,10 @@ func (h *handlers) getStats(ctx context.Context, _ toolRequest) (*toolResult, er
 	}
 
 	return jsonResult(getStatsResponse{
-		Stats:        stats,
-		Accounts:     accounts,
-		VectorSearch: vs,
+		CalendarCache: calendarCache(accounts, nil),
+		Stats:         stats,
+		Accounts:      accounts,
+		VectorSearch:  vs,
 	})
 }
 

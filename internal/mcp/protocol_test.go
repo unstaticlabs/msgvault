@@ -135,6 +135,9 @@ func newTask5RawStdioPeerWithServer(t *testing.T, server *sdkmcp.Server) *task5R
 		cancel:         cancel,
 		done:           done,
 	}
+	// MCP tools/list contains structured schemas and legitimately exceeds the
+	// Scanner default 64KiB line size. Bound the wire reader at 2MiB instead.
+	peer.responseLines.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	t.Cleanup(func() {
 		cancel()
 		_ = clientRequestWriter.Close()

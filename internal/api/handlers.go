@@ -100,21 +100,22 @@ type SourceStatusResponse struct {
 
 // SourceStatus represents one source and its read-only sync status.
 type SourceStatus struct {
-	ID                    int64          `json:"id"`
-	SourceType            string         `json:"source_type"`
-	Identifier            string         `json:"identifier"`
-	DisplayName           *string        `json:"display_name"`
-	LastSyncAt            *string        `json:"last_sync_at"`
-	UpdatedAt             string         `json:"updated_at"`
-	ActiveSync            *SyncRunStatus `json:"active_sync"`
-	LatestSync            *SyncRunStatus `json:"latest_sync"`
-	LastSuccessfulSync    *SyncRunStatus `json:"last_successful_sync"`
-	CanSync               bool           `json:"can_sync"`
-	SyncUnavailableReason string         `json:"sync_unavailable_reason,omitempty"`
-	Scheduled             bool           `json:"scheduled"`
-	Schedule              string         `json:"schedule,omitempty"`
-	NextSyncAt            *string        `json:"next_sync_at"`
-	SchedulerLastError    string         `json:"scheduler_last_error,omitempty"`
+	CalendarCoverage      *store.CalendarCoverage `json:"calendar_coverage,omitempty"`
+	ID                    int64                   `json:"id"`
+	SourceType            string                  `json:"source_type"`
+	Identifier            string                  `json:"identifier"`
+	DisplayName           *string                 `json:"display_name"`
+	LastSyncAt            *string                 `json:"last_sync_at"`
+	UpdatedAt             string                  `json:"updated_at"`
+	ActiveSync            *SyncRunStatus          `json:"active_sync"`
+	LatestSync            *SyncRunStatus          `json:"latest_sync"`
+	LastSuccessfulSync    *SyncRunStatus          `json:"last_successful_sync"`
+	CanSync               bool                    `json:"can_sync"`
+	SyncUnavailableReason string                  `json:"sync_unavailable_reason,omitempty"`
+	Scheduled             bool                    `json:"scheduled"`
+	Schedule              string                  `json:"schedule,omitempty"`
+	NextSyncAt            *string                 `json:"next_sync_at"`
+	SchedulerLastError    string                  `json:"scheduler_last_error,omitempty"`
 }
 
 // SyncRunStatus represents the API-visible details for a sync run.
@@ -1482,10 +1483,11 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Source) (SourceStatus, error) {
 	status := SourceStatus{
-		ID:         source.ID,
-		SourceType: source.SourceType,
-		Identifier: source.Identifier,
-		UpdatedAt:  source.UpdatedAt.UTC().Format(time.RFC3339),
+		CalendarCoverage: store.ParseCalendarCoverage(source.SyncConfig),
+		ID:               source.ID,
+		SourceType:       source.SourceType,
+		Identifier:       source.Identifier,
+		UpdatedAt:        source.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 	if source.DisplayName.Valid {
 		status.DisplayName = new(source.DisplayName.String)

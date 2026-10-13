@@ -35,9 +35,11 @@ import (
 )
 
 type calFakeServer struct {
-	calendarListJSON string
-	fullPages        map[string]string // keyed by incoming pageToken ("" = first page)
-	incPages         map[string]string // keyed by incoming syncToken
+	calendarListJSON    string
+	fullPages           map[string]string // keyed by incoming pageToken ("" = first page)
+	occurrencePages     map[string]string
+	occurrenceErrorPage string
+	incPages            map[string]string // keyed by incoming syncToken
 }
 
 func (cs *calFakeServer) start(t *testing.T) *httptest.Server {
@@ -49,7 +51,23 @@ func (cs *calFakeServer) start(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(cs.calendarListJSON))
 		case strings.HasSuffix(r.URL.Path, "/events"):
 			q := r.URL.Query()
-			assert.Equal(t, "false", q.Get("singleEvents"), "must request masters")
+			if q.Get("singleEvents") == "true" {
+				assert.Empty(t, q.Get("syncToken"))
+				assert.NotEmpty(t, q.Get("timeMin"))
+				assert.NotEmpty(t, q.Get("timeMax"))
+				if cs.occurrenceErrorPage != "" && q.Get("pageToken") == cs.occurrenceErrorPage {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":"synthetic incomplete page"}`))
+					return
+				}
+				body := cs.occurrencePages[q.Get("pageToken")]
+				if body == "" {
+					body = `{"items":[]}`
+				}
+				_, _ = w.Write([]byte(body))
+				return
+			}
+			assert.Equal(t, "false", q.Get("singleEvents"), "canonical token feed must request masters")
 			assert.Equal(t, "true", q.Get("showDeleted"), "must include cancellations")
 			if tok := q.Get("syncToken"); tok != "" {
 				assert.Empty(t, q.Get("timeMin"), "timeMin must not accompany syncToken")

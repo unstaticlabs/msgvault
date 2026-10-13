@@ -21,8 +21,9 @@ type MockAPI struct {
 	// FullEvents[calendarID] is the ordered pages of events for a full sync
 	// (no syncToken). FullSyncToken[calendarID] is the NextSyncToken delivered
 	// on the final full page.
-	FullEvents    map[string][][]Event
-	FullSyncToken map[string]string
+	OccurrenceEvents map[string][][]Event
+	FullEvents       map[string][][]Event
+	FullSyncToken    map[string]string
 
 	// IncEvents[incomingSyncToken] is the ordered pages returned when a caller
 	// lists with that syncToken. IncNextToken[incomingSyncToken] is the
@@ -50,12 +51,13 @@ type MockAPI struct {
 // NewMockAPI returns an empty mock with initialized maps.
 func NewMockAPI() *MockAPI {
 	return &MockAPI{
-		FullEvents:    map[string][][]Event{},
-		FullSyncToken: map[string]string{},
-		IncEvents:     map[string][][]Event{},
-		IncNextToken:  map[string]string{},
-		GoneTokens:    map[string]bool{},
-		EventsByID:    map[string]map[string]Event{},
+		OccurrenceEvents: map[string][][]Event{},
+		FullEvents:       map[string][][]Event{},
+		FullSyncToken:    map[string]string{},
+		IncEvents:        map[string][][]Event{},
+		IncNextToken:     map[string]string{},
+		GoneTokens:       map[string]bool{},
+		EventsByID:       map[string]map[string]Event{},
 	}
 }
 
@@ -81,6 +83,9 @@ func (m *MockAPI) ListEvents(_ context.Context, calendarID string, p EventsListP
 		return nil, m.ListEventsErr
 	}
 
+	if p.SingleEvents {
+		return pageAt(m.OccurrenceEvents[calendarID], pageIdx(p.PageToken), ""), nil
+	}
 	if p.SyncToken != "" {
 		if m.GoneTokens[p.SyncToken] {
 			return nil, &GoneError{Path: "events:" + calendarID}

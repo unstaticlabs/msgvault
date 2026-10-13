@@ -2517,3 +2517,17 @@ type readCloserImpl struct {
 func (rc *readCloserImpl) Close() error {
 	return nil
 }
+
+func TestGetCLIAccountsPreservesCalendarCoverage(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accounts":[{"id":8,"email":"calendar@example.com/primary","type":"gcal","display_name":"[QA] calendar","message_count":2,"source_deleted_count":0,"last_sync":null,"calendar_coverage":{"start":"2026-01-01T00:00:00Z","end":"2027-01-01T00:00:00Z","refreshed_at":"2026-10-13T00:00:00Z","attempted_at":"2026-10-13T00:00:00Z","complete":true,"status":"complete"}}]}`))
+	}))
+	defer srv.Close()
+	accounts, err := newTestStore(srv, "key").GetCLIAccounts(t.Context())
+	require.NoError(t, err)
+	require.Len(t, accounts, 1)
+	require.NotNil(t, accounts[0].CalendarCoverage)
+	assert.True(t, accounts[0].CalendarCoverage.Complete)
+	assert.Equal(t, "2026-01-01T00:00:00Z", accounts[0].CalendarCoverage.Start)
+}

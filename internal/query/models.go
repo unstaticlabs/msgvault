@@ -7,6 +7,8 @@ package query
 import (
 	"maps"
 	"time"
+
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // AggregateRow represents a single row in an aggregate view.
@@ -357,10 +359,11 @@ func DefaultAggregateOptions() AggregateOptions {
 
 // AccountInfo represents a source account.
 type AccountInfo struct {
-	ID          int64
-	SourceType  string
-	Identifier  string // email address
-	DisplayName string
+	CalendarCoverage *store.CalendarCoverage `json:"calendar_coverage,omitempty"`
+	ID               int64
+	SourceType       string
+	Identifier       string // email address
+	DisplayName      string
 }
 
 // StatsOptions configures a stats query.

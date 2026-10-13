@@ -811,14 +811,15 @@ type cliIdentityRowResponse struct {
 }
 
 type cliAccountResponse struct {
-	ID                 int64      `json:"id"`
-	Email              string     `json:"email"`
-	Type               string     `json:"type"`
-	DisplayName        string     `json:"display_name"`
-	OAuthApp           string     `json:"oauth_app,omitempty"`
-	MessageCount       int64      `json:"message_count"`
-	SourceDeletedCount int64      `json:"source_deleted_count"`
-	LastSync           *time.Time `json:"last_sync"`
+	CalendarCoverage   *store.CalendarCoverage `json:"calendar_coverage,omitempty"`
+	ID                 int64                   `json:"id"`
+	Email              string                  `json:"email"`
+	Type               string                  `json:"type"`
+	DisplayName        string                  `json:"display_name"`
+	OAuthApp           string                  `json:"oauth_app,omitempty"`
+	MessageCount       int64                   `json:"message_count"`
+	SourceDeletedCount int64                   `json:"source_deleted_count"`
+	LastSync           *time.Time              `json:"last_sync"`
 }
 
 type cliMessageResponse struct {
@@ -2518,6 +2519,7 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		account := cliAccountResponse{
+			CalendarCoverage:   store.ParseCalendarCoverage(src.SyncConfig),
 			ID:                 src.ID,
 			Email:              src.Identifier,
 			Type:               src.SourceType,
