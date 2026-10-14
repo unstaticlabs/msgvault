@@ -1013,3 +1013,34 @@ func TestApplyIMAPMailboxDeltas_ResetPersistsFlagChange(t *testing.T) {
 	_, gotSteadyFlags := membershipMessageAndFlags(t, f.store, f.source.ID, 5, 2)
 	assert.JSONEq(`["\\Seen"]`, gotSteadyFlags)
 }
+
+func TestIMAPFlagAndMembershipChangesAdvanceCacheRevision(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("imap", "flags@example.com")
+	require.NoError(t, err)
+	conv, err := st.EnsureConversation(source.ID, "flags-thread", "[QA] flags")
+	require.NoError(t, err)
+	f := imapMembershipFixture{store: st, source: source, convID: conv}
+	id := f.createMessage(t, "INBOX|1", "<flags@example.com>")
+	delta := store.IMAPMailboxDelta{Mailbox: "INBOX", Reset: true, State: store.IMAPFolderState{Mailbox: "INBOX", UIDValidity: 1, UIDNext: 2}, Memberships: []store.IMAPMembershipObservation{{UID: 1, SourceMessageID: "INBOX|1", Flags: []string{"\\Seen"}}}}
+	require.NoError(t, st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	before, err := st.DerivedDataRevision()
+	require.NoError(t, err)
+	delta.Memberships[0].Flags = []string{}
+	require.NoError(t, st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	after, err := st.DerivedDataRevision()
+	require.NoError(t, err)
+	assert.Greater(t, after, before, "a flag-only change must invalidate already exported message facts")
+	got, _ := membershipMessageAndFlags(t, st, source.ID, 1, 1)
+	assert.Equal(t, id, got)
+	require.NoError(t, st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	repeated, err := st.DerivedDataRevision()
+	require.NoError(t, err)
+	assert.Equal(t, after, repeated, "unchanged authoritative membership must not invalidate the cache")
+	delta.Memberships = nil
+	require.NoError(t, st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	retired, err := st.DerivedDataRevision()
+	require.NoError(t, err)
+	assert.Greater(t, retired, after, "removing the last membership must invalidate cached mailbox state")
+	assert.True(t, messageTombstoned(t, st, id))
+}

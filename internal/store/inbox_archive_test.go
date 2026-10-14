@@ -226,3 +226,21 @@ func TestSourceMessageIDsMissingRFC822IDEdgeCases(t *testing.T) {
 	_, err = st.SourceMessageIDsMissingRFC822ID(0, []string{"INBOX|1"})
 	require.Error(err, "an unscoped check could consult another account's rows")
 }
+
+func TestRemoveInboxLabelAdvancesCacheRevisionOnlyForChangedRows(t *testing.T) {
+	f := newLabelFixture(t)
+	before, err := f.store.DerivedDataRevision()
+	require.NoError(t, err)
+	removed, err := f.store.RemoveLabelBySourceMessageIDs(f.source.ID, "INBOX", []string{"msg-1"})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), removed)
+	after, err := f.store.DerivedDataRevision()
+	require.NoError(t, err)
+	assert.Greater(t, after, before, "a committed analytics cache must become stale after inbox membership changes")
+	removed, err = f.store.RemoveLabelBySourceMessageIDs(f.source.ID, "INBOX", []string{"msg-1"})
+	require.NoError(t, err)
+	assert.Zero(t, removed)
+	unchanged, err := f.store.DerivedDataRevision()
+	require.NoError(t, err)
+	assert.Equal(t, after, unchanged, "an already archived item must not force another rebuild")
+}

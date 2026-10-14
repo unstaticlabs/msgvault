@@ -370,6 +370,11 @@ func (s *Store) applyIMAPMailboxDeltas(
 				return fmt.Errorf("upsert IMAP folder state for %q: %w", normalized.mailbox, err)
 			}
 		}
+		// These facts may arrive after sync completion and do not allocate a
+		// message ID. Publish the same revision used by native cache freshness.
+		if len(affected) > 0 {
+			return s.bumpDerivedDataRevision(tx)
+		}
 		return nil
 	})
 }

@@ -415,10 +415,11 @@ A run that stopped part-way or archived nothing logs at `WARN` with the reason.
 
 ### What a fresh selection reads
 
-Search tools read an analytics cache, which is rebuilt when messages arrive or
-are deleted — not when their labels change. An archive removes a label, so a
-selection resolved from that cache still offers messages a previous call
-already archived, and a loop over it never converges.
+Search tools may read a committed analytics cache. Inbox label removals and
+IMAP membership/flag changes invalidate it even when no new message arrives.
+The next ordinary cache build republishes changed existing rows; unchanged
+membership does not force another rebuild. Until that publication finishes, a
+cached selection can still offer an item that a previous call archived.
 
 When the call names one Gmail account with `account`, the selection is resolved
 against the archive of record instead, and reflects what the previous call
