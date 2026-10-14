@@ -14,7 +14,7 @@ import (
 
 func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, raw []byte, format string) error {
 	var messageType string
-	if err := tx.QueryRowContext(ctx, `SELECT message_type FROM messages WHERE id = ?`, messageID).Scan(&messageType); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(message_type, '') FROM messages WHERE id = ?`, messageID).Scan(&messageType); err != nil {
 		return err
 	}
 	if format != "mime" || (messageType != MessageTypeEmail && messageType != "") {
