@@ -1,0 +1,70 @@
+{
+  "context": "Historical illustrative captures of unchanged related-email UI, synthetic three-account QA; not final PostgreSQL repair or functional evidence.",
+  "captures": [
+    {
+      "file": "work-items-root-overview-682.jpg",
+      "source": "682661d31d7308f39215731a85833884f8fdcc63",
+      "date": "2026-10-14",
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "ee5898d4f85bd3b58bf8fa07f662d677ef76271395f831603bd5b5270b41c330",
+      "metadata": [
+        "JFIF only"
+      ]
+    },
+    {
+      "file": "work-items-root-exact-copy-review-682.jpg",
+      "source": "682661d31d7308f39215731a85833884f8fdcc63",
+      "date": "2026-10-14",
+      "dimensions": [
+        1280,
+        720
+      ],
+      "sha256": "4339b1d393130493c0b6bd7f4c4d8f3b1f323904e0f4a5baa3b2ec17a30de01c",
+      "metadata": [
+        "JFIF only"
+      ]
+    },
+    {
+      "file": "work-items-root-mobile-overview-682.jpg",
+      "source": "682661d31d7308f39215731a85833884f8fdcc63",
+      "date": "2026-10-14",
+      "dimensions": [
+        390,
+        844
+      ],
+      "sha256": "ee2508f494abc2eafa718b2324f11a3f69620f33773efb1d630dda14b4583dac",
+      "metadata": [
+        "JFIF only"
+      ]
+    },
+    {
+      "file": "work-items-root-mobile-members-682.jpg",
+      "source": "682661d31d7308f39215731a85833884f8fdcc63",
+      "date": "2026-10-14",
+      "dimensions": [
+        390,
+        844
+      ],
+      "sha256": "3d7396392298e0f0a050120cd9057a06ce9430143602668278bf747d4a00830b",
+      "metadata": [
+        "JFIF only"
+      ]
+    },
+    {
+      "file": "work-items-root-mobile-viewer-notice-682.jpg",
+      "source": "682661d31d7308f39215731a85833884f8fdcc63",
+      "date": "2026-10-14",
+      "dimensions": [
+        390,
+        844
+      ],
+      "sha256": "6471f0ba6d4e4ddd14c51cab3b8f4a09d8b42b7a6702a2b75d2bc35819b43832",
+      "metadata": [
+        "JFIF only"
+      ]
+    }
+  ]
+}
