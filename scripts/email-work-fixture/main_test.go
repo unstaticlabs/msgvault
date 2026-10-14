@@ -32,7 +32,7 @@ func TestSeedCreatesOnlyNewSyntheticNativeArchive(t *testing.T) {
 	st, err := store.Open(filepath.Join(destination, "msgvault.db"))
 	requirements.NoError(err)
 	t.Cleanup(func() { requirements.NoError(st.Close()) })
-	for table, count := range map[string]int{"sources": 3, "messages": 10, "message_raw": 9, "email_work_seeds": 10, "messages_fts": 10} {
+	for table, count := range map[string]int{"sources": 3, "messages": 10, "message_raw": 9, "email_work_seeds": 10, "messages_fts": 10, "saved_views": 1} {
 		var actual int
 		requirements.NoError(st.DB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&actual))
 		requirements.Equal(count, actual, table)

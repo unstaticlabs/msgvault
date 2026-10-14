@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,6 +148,14 @@ func seed(destination string) error {
 		if err = st.SetUserSources(ctx, user.ID, sources); err != nil {
 			return err
 		}
+	}
+
+	state, err := json.Marshal(store.SavedViewStateEnvelope{Filters: []store.SavedViewFilter{{Field: "source", Operator: "in", Values: []string{strconv.FormatInt(sources[0], 10), strconv.FormatInt(sources[1], 10), strconv.FormatInt(sources[2], 10)}}, {Field: "row_unit", Operator: "eq", Values: []string{"email_work_item"}}}, Presentation: "table"})
+	if err != nil {
+		return err
+	}
+	if _, err = st.CreateSavedView(ctx, store.SavedViewInput{Name: "[QA] Related email across accounts", SchemaVersion: store.CurrentSavedViewSchemaVersion, CanonicalState: state}); err != nil {
+		return err
 	}
 	encoded, err := json.MarshalIndent(records, "", "  ")
 	if err != nil {
