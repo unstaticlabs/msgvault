@@ -2316,6 +2316,9 @@ type Label struct {
 // represents sent mail. It is deliberately independent of the display name.
 const LabelSystemRoleSent = "sent"
 
+// LabelSystemRoleDraft identifies provider-confirmed draft membership.
+const LabelSystemRoleDraft = "draft"
+
 // EnsureLabel gets or creates a label, handling renames and ID changes.
 // For batch operations prefer EnsureLabelsBatch which runs in a single
 // transaction.
@@ -2349,7 +2352,13 @@ func ensureLabelWith(
 	sourceID int64,
 	sourceLabelID, name, labelType string,
 	systemRole *string,
-) (int64, error) {
+) (resolvedID int64, resultErr error) {
+	roleChanged := false
+	defer func() {
+		if resultErr == nil && roleChanged {
+			resultErr = bumpDerivedDataRevisionWith(q)
+		}
+	}()
 	// Look up by canonical identifier (Gmail label ID).
 	var id int64
 	var existingName string
@@ -2359,6 +2368,20 @@ func ensureLabelWith(
 		SELECT id, name, label_type, system_role FROM labels
 		WHERE source_id = ? AND source_label_id = ?
 	`, sourceID, sourceLabelID).Scan(&id, &existingName, &existingType, &existingRole)
+
+	if systemRole != nil {
+		switch {
+		case err == nil:
+			roleChanged = !labelSystemRoleMatches(existingRole, *systemRole)
+		case errors.Is(err, sql.ErrNoRows):
+			var priorRole sql.NullString
+			priorErr := q.QueryRow(`SELECT system_role FROM labels WHERE source_id = ? AND name = ?`, sourceID, name).Scan(&priorRole)
+			if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
+				return 0, priorErr
+			}
+			roleChanged = !labelSystemRoleMatches(priorRole, *systemRole)
+		}
+	}
 
 	if err == nil {
 		if existingName == name {

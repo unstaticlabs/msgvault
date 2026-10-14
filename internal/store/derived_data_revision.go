@@ -33,12 +33,14 @@ func (s *Store) DerivedDataRevision() (int64, error) {
 }
 
 func (s *Store) bumpDerivedDataRevision(tx *loggedTx) error {
-	if _, err := tx.Exec(s.dialect.InsertOrIgnore(
-		`INSERT OR IGNORE INTO archive_metadata (key, value) VALUES (?, '0')`),
-		derivedDataRevisionKey); err != nil {
+	return bumpDerivedDataRevisionWith(tx)
+}
+
+func bumpDerivedDataRevisionWith(q querier) error {
+	if _, err := q.Exec(`INSERT INTO archive_metadata (key,value) VALUES (?, '0') ON CONFLICT(key) DO NOTHING`, derivedDataRevisionKey); err != nil {
 		return fmt.Errorf("seed derived-data revision: %w", err)
 	}
-	if _, err := tx.Exec(`
+	if _, err := q.Exec(`
 		UPDATE archive_metadata
 		SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
 		WHERE key = ?

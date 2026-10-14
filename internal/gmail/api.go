@@ -107,6 +107,9 @@ type Label struct {
 // SystemRoleForLabelID returns roles Gmail identifies canonically, never by
 // the localized label name returned to users.
 func SystemRoleForLabelID(sourceLabelID string) string {
+	if sourceLabelID == "DRAFT" {
+		return store.LabelSystemRoleDraft
+	}
 	if sourceLabelID == "SENT" {
 		return store.LabelSystemRoleSent
 	}
