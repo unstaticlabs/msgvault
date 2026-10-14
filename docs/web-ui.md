@@ -279,7 +279,9 @@ fresh review.
 once, using opaque identity filenames. `manifest.json` lists every permitted
 copy and its provenance. A partial download explicitly marks missing raw;
 replacement identities or changed revisions stop the download before bytes are
-published. Consolidated provider archive/deletion is unavailable: open an
+published. Raw body and attachment changes use a separate native revision, so
+a concurrent raw update stops export even when the linking headers stay the
+same. Identical raw retries do not advance that revision or rebuild analytics. Consolidated provider archive/deletion is unavailable: open an
 individual item for its existing source actions.
 
 ### Prepare an existing email archive

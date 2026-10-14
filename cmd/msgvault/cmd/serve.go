@@ -3777,6 +3777,10 @@ func (a *storeAPIAdapter) EmailWorkSeedForMessage(ctx context.Context, id int64)
 	return a.store.EmailWorkSeedForMessage(ctx, id)
 }
 
+func (a *storeAPIAdapter) MessageRawRevision(ctx context.Context) (int64, error) {
+	return a.store.MessageRawRevision(ctx)
+}
+
 func (a *storeAPIAdapter) EmailWorkRecoverySnapshot(ctx context.Context) (string, error) {
 	return a.store.EmailWorkRecoverySnapshot(ctx)
 }

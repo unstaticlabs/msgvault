@@ -227,6 +227,27 @@ func TestEmailWorkRecoveryThroughAuthenticatedNativeHTTP(t *testing.T) {
 	firstCopy := exported.Copies[0]
 	originalRaw, err := st.GetMessageRaw(firstCopy.Member.MessageID)
 	requirements.NoError(err)
+	// Replace an already-read copy with identical linkage headers while the
+	// second copy is read. Analytical publication remains unchanged.
+	beforeDerived, err := st.DerivedDataRevision()
+	requirements.NoError(err)
+	rawReads := 0
+	native.beforeRaw = func(int64) {
+		rawReads++
+		if rawReads == 2 {
+			requirements.NoError(st.UpsertMessageRaw(firstCopy.Member.MessageID, append(bytes.Clone(originalRaw), []byte("\r\n[QA] Concurrent body replacement")...)))
+		}
+	}
+	changedRaw := post("/api/v1/explore/email-work/export", "synthetic-viewer", exportRequest)
+	assertions.Equal(http.StatusConflict, changedRaw.Code, "raw-only mutation must stop ZIP publication")
+	assertions.NotEqual("application/zip", changedRaw.Header().Get("Content-Type"))
+	native.beforeRaw = nil
+	afterDerived, err := st.DerivedDataRevision()
+	requirements.NoError(err)
+	assertions.Equal(beforeDerived, afterDerived, "body replacement does not invalidate analytical linkage")
+	requirements.NoError(st.UpsertMessageRaw(firstCopy.Member.MessageID, originalRaw))
+	retryManifest, _ := readExport(exportRequest)
+	assertions.Equal("complete", retryManifest.State, "unchanged raw retries remain exportable")
 	_, err = st.DB().Exec("DELETE FROM message_raw WHERE message_id=?", firstCopy.Member.MessageID)
 	requirements.NoError(err)
 	partial, partialFiles := readExport(exportRequest)

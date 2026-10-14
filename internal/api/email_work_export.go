@@ -18,6 +18,7 @@ import (
 
 type emailWorkExportSnapshotReader interface {
 	EmailWorkRecoverySnapshot(ctx context.Context) (string, error)
+	MessageRawRevision(ctx context.Context) (int64, error)
 }
 
 type EmailWorkExportRequest struct {
@@ -80,6 +81,11 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 	snapshotReader, ok := s.store.(emailWorkExportSnapshotReader)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "message_identity_unavailable", "The native archive revision cannot be checked yet")
+		return
+	}
+	rawRevision, err := snapshotReader.MessageRawRevision(r.Context())
+	if err != nil {
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	var expectedSnapshot string
@@ -168,6 +174,15 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 			s.writeEmailWorkExportError(w, r, query.ErrEmailWorkRevisionChanged)
 			return
 		}
+	}
+	currentRawRevision, err := snapshotReader.MessageRawRevision(r.Context())
+	if err != nil {
+		s.writeEmailWorkExportError(w, r, err)
+		return
+	}
+	if currentRawRevision != rawRevision {
+		s.writeEmailWorkExportError(w, r, query.ErrEmailWorkRevisionChanged)
+		return
 	}
 	// Re-probe both the native archive and immutable publication after the last raw read.
 	nativeSnapshot, snapshotErr := snapshotReader.EmailWorkRecoverySnapshot(r.Context())

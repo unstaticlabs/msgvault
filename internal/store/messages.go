@@ -1501,15 +1501,25 @@ func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, form
 		return fmt.Errorf("close compressor: %w", err)
 	}
 
-	_, err := q.Exec(`
+	result, err := q.Exec(`
 		INSERT INTO message_raw (message_id, raw_data, raw_format, compression)
 		VALUES (?, ?, ?, 'zlib')
 		ON CONFLICT(message_id) DO UPDATE SET
 			raw_data = excluded.raw_data,
 			raw_format = excluded.raw_format,
 			compression = excluded.compression
+		WHERE message_raw.raw_data IS DISTINCT FROM excluded.raw_data
+		   OR message_raw.raw_format IS DISTINCT FROM excluded.raw_format
+		   OR message_raw.compression IS DISTINCT FROM excluded.compression
 	`, messageID, compressed.Bytes(), format)
-	return err
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	return bumpMessageRawRevisionWith(q)
 }
 
 // ErrInvalidMessageRaw marks raw message data that cannot be decompressed.
