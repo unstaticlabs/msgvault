@@ -197,7 +197,7 @@ single-user archive. A view records its query, explicit search mode, filters,
 grouping, presentation, sort, visible columns, and inspector preference.
 Selection is intentionally not saved.
 
-Each record carries a schema version. An incompatible record remains visible,
+Each record carries a schema version. A schema-incompatible record remains visible,
 but cannot be opened or edited: automatic migration is not attempted. Remove it
 after confirmation and save the current context again. Updates and deletion use
 the record revision as an optimistic-concurrency guard. If another browser
@@ -222,7 +222,14 @@ The API exposes `inbox_state` and `read_state` on email results. Saved View
 filters use those same fields, `eq` or `in`, and the values above. For example,
 combine a `source` filter containing the selected account IDs with
 `inbox_state = inbox` and `read_state = unread`. Participant filters require
-numeric participant IDs, not email addresses. Invalid definitions are rejected
+numeric participant IDs, not email addresses. Older invalid filter definitions remain
+visible with a reason. To repair one, select the desired filters in Explore,
+return to Saved Views and choose **Repair filters**. Review the replacement
+filters, then select **Save repaired filters**. The original definition and
+revision stay unchanged until that explicit save; other view settings are
+preserved. You can also save a new view and retain the old definition.
+
+Invalid definitions are rejected
 before saving; a failed update leaves the previous view and revision intact.
 
 Existing valid Saved Views retain their definitions. Cache schema 28 rebuilds

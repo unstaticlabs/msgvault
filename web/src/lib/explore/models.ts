@@ -223,6 +223,14 @@ export function isValidSourceID(value: string | undefined): value is string {
   return Number.isSafeInteger(parsed) && parsed > 0;
 }
 
+// Native filter IDs travel as strings and use the store's positive int64
+// contract. Keep isValidSourceID for JSON-number metadata endpoints.
+export function isValidFilterID(value: string | undefined): value is string {
+  if (value === undefined || !/^\+?\d+$/.test(value)) return false;
+  const id = BigInt(value);
+  return id > 0n && id <= 9223372036854775807n;
+}
+
 export interface ExploreResult {
   rows: EntryRow[];
   totalCount?: number;

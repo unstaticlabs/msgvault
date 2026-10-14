@@ -46,3 +46,57 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: '
     await expect(grid.locator('[data-row-key]').first()).toContainText('Read · In inbox');
   });
 }
+
+test('repairs a persisted legacy people filter only after explicit Save', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const filters = [{ dimension: 'source', values: ['1', '2', '3'] }, { dimension: 'inbox_state', values: ['inbox'] }, { dimension: 'read_state', values: ['unread'] }];
+  await page.goto('/?explore=' + encodeURIComponent(JSON.stringify({ workspace: 'saved_views', filters })));
+  const name = '[QA] Older people view';
+  const before = (await (await page.request.get('/api/v1/saved-views')).json()).saved_views.find((view: { name: string }) => view.name === name);
+  expect(before).toBeDefined();
+  await expect(page.getByRole('button', { name: `Open ${name}`, exact: true })).toBeDisabled();
+  await expect(page.getByRole('alert')).toContainText('Select the people again in Explore and save a new view');
+  const notice = page.getByRole('alert');
+  expect((await notice.boundingBox())!.width).toBeGreaterThan(500);
+  await captureScreenshot(page, path.join(output!, 'saved-view-legacy-desktop.png'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  const mobileNotice = await notice.boundingBox();
+  expect(mobileNotice!.x).toBeGreaterThanOrEqual(0);
+  expect(mobileNotice!.x + mobileNotice!.width).toBeLessThanOrEqual(390);
+  await captureScreenshot(page, path.join(output!, 'saved-view-legacy-mobile.png'));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole('button', { name: `Repair filters for ${name}`, exact: true }).click();
+  await expect(page.getByRole('list', { name: 'Replacement filters' })).toContainText('Unread');
+  const unchanged = await (await page.request.get(`/api/v1/saved-views/${before.id}`)).json();
+  expect(unchanged.revision).toBe(before.revision);
+  expect(unchanged.canonical_state).toEqual(before.canonical_state);
+  await captureScreenshot(page, path.join(output!, 'saved-view-repair-desktop.png'));
+  await page.setViewportSize({ width: 390, height: 844 });
+  const saveButton = page.getByRole('button', { name: 'Save repaired filters', exact: true });
+  const mobileSave = await saveButton.boundingBox();
+  expect(mobileSave!.x + mobileSave!.width).toBeLessThanOrEqual(390);
+  await captureScreenshot(page, path.join(output!, 'saved-view-repair-mobile.png'));
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.getByRole('button', { name: 'Save repaired filters', exact: true }).click();
+  await expect(page.getByRole('button', { name: `Open ${name}`, exact: true })).toBeEnabled();
+  const after = await (await page.request.get(`/api/v1/saved-views/${before.id}`)).json();
+  expect(after.revision).toBe(before.revision + 1);
+  expect(after.canonical_state.filters).toEqual(filters.map((filter) => ({ field: filter.dimension, operator: 'in', values: filter.values })));
+  await page.getByRole('button', { name: `Open ${name}`, exact: true }).click();
+  await expect(page.getByRole('grid', { name: 'Everything results' }).locator('[data-row-key]')).toHaveCount(3);
+});
+
+
+test('keeps native empty identity direction through Open and URL restoration', async ({ page }) => {
+  await page.goto('/?explore=' + encodeURIComponent(JSON.stringify({ workspace: 'saved_views' })));
+  const open = page.getByRole('button', { name: 'Open [QA] Identity default direction', exact: true });
+  await expect(open).toBeEnabled();
+  const response = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/explore');
+  await open.click();
+  const actual = await response;
+  const identity = actual.request().postDataJSON().filters.find((filter: { dimension: string }) => filter.dimension === 'identity');
+  expect(identity.values).toEqual(['1', 'qa-account-1@example.com', '']);
+  expect(actual.status()).toBe(200);
+  const restored = JSON.parse(new URL(page.url()).searchParams.get('explore')!);
+  expect(restored.filters.find((filter: { dimension: string }) => filter.dimension === 'identity').values).toEqual(identity.values);
+});
