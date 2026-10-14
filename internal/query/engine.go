@@ -253,3 +253,9 @@ type TotalStats struct {
 	LabelCount                int64
 	AccountCount              int64
 }
+
+// EmailWorkExplorer reads full permitted family provenance from native analytics.
+// Authoritative PostgreSQL remains supported without an analytical family reader.
+type EmailWorkExplorer interface {
+	EmailWorkMembers(ctx context.Context, request EmailWorkMembersRequest) (*EmailWorkMembersResponse, error)
+}

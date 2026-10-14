@@ -560,11 +560,11 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions, clustersGlo
 		// the aggregated lists did. The IN over memberIDs (never empty here)
 		// matches the cluster whichever alias the caller requested: every
 		// edge bakes the cluster's canonical ID, which is itself one of the
-		// resolved members. memberList binds twice — once per UNION branch.
+		// resolved members. memberList binds three times — once per native message, chat and work branch.
 		memberList := "(" + strings.TrimSuffix(strings.Repeat("?,", len(memberIDs)), ",") + ")"
-		args := make([]any, 0, len(memberIDs)*2+1)
+		args := make([]any, 0, len(memberIDs)*3+1)
 		args = append(args, *exactID)
-		for range 2 {
+		for range 3 {
 			for _, memberID := range memberIDs {
 				args = append(args, memberID)
 			}

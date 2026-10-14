@@ -71,8 +71,18 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 	countArgs := append(append([]any{}, conditionArgs...), candidateRankArgs...)
 	args := append(append([]any{}, countArgs...), limit, request.Page.Offset)
 	var queryText string
-	fastPath := !e.exploreFastPathDisabled && !exploreConditionsTouchParticipantLists(request)
-	if fastPath {
+	fastPath := request.Context.RowUnit == RowUnitDefault && !e.exploreFastPathDisabled && !exploreConditionsTouchParticipantLists(request)
+	var population *emailWorkPopulation
+	var workLogicalSQL string
+	if request.Context.RowUnit != RowUnitDefault {
+		var cleanup func()
+		workLogicalSQL, population, cleanup, err = e.exploreLogicalSQLLocked(ctx, request, conditions, candidateRankExpression, true)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		queryText = buildExplorePageSQL(workLogicalSQL, e.parquetPath(datasetParticipantClusters), e.parquetPath(datasetOwnerParticipants))
+	} else if fastPath {
 		queryText = buildExploreFastListingSQL(conditions, candidateRankExpression,
 			e.parquetPath(datasetParticipantClusters), e.parquetPath(datasetOwnerParticipants))
 		args = append(args, conditionArgs...) // membership rescan
@@ -131,6 +141,7 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 		}
 		row.MatchedSenderIdentities = make([]string, 0)
 		row.MatchedRecipientIdentities = make([]string, 0)
+		row.EmailWork = emailWorkSummary(population, row.Key)
 		response.Rows = append(response.Rows, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -138,6 +149,9 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 	}
 	if len(response.Rows) == 0 && request.Page.Offset > 0 {
 		countSQL := buildExploreCountSQL(conditions, candidateRankExpression)
+		if workLogicalSQL != "" {
+			countSQL = workLogicalSQL + `) SELECT COUNT(*) FROM logical_entries`
+		}
 		if fastPath {
 			countSQL = buildExploreFastCountSQL(conditions, candidateRankExpression)
 		}
@@ -562,7 +576,11 @@ func buildIdentityPredicateCondition(identity *IdentityPredicate, prefix string)
 // global owner nor a message-relative outbound owner is known, the column is
 // NULL — never a guess at "the other side" from participant_ids[0] alone.
 func buildExploreSQL(conditions, candidateRankExpression, clustersGlob, ownersGlob string) string {
-	return buildExploreLogicalSQLWithCandidateRank(conditions, candidateRankExpression) + fmt.Sprintf(`
+	return buildExplorePageSQL(buildExploreLogicalSQLWithCandidateRank(conditions, candidateRankExpression), clustersGlob, ownersGlob)
+}
+
+func buildExplorePageSQL(logicalSQL, clustersGlob, ownersGlob string) string {
+	return logicalSQL + fmt.Sprintf(`
 ), counted AS (
     SELECT *, COUNT(*) OVER () AS total_count
     FROM logical_entries
@@ -827,7 +845,7 @@ WITH filtered AS (
     SELECT *,
 		` + candidateRankExpression + ` AS candidate_rank,
         ` + sqlIsChatPredicate("message_type", "conversation_type") + ` AS is_chat,
-        ` + identityindex.EntryKindSQL("message_type") + ` AS entry_kind
+        ` + identityindex.EntryKindSQL("message_type") + ` AS entry_kind, NULL::VARCHAR AS work_key, true AS is_match_witness
     FROM filtered
 )`
 }
@@ -843,7 +861,7 @@ filtered AS (
 ), classified AS (
 	SELECT *, ` + candidateRankExpression + ` AS candidate_rank,
 		` + sqlIsChatPredicate("message_type", "conversation_type") + ` AS is_chat,
-		` + identityindex.EntryKindSQL("message_type") + ` AS entry_kind
+		` + identityindex.EntryKindSQL("message_type") + ` AS entry_kind, NULL::VARCHAR AS work_key, true AS is_match_witness
 	FROM filtered
 )`
 }
@@ -891,7 +909,7 @@ func exploreLogicalEntriesCTE(withParticipantLists bool) string {
         COALESCE(NULLIF(subject, ''), NULLIF(conversation_title, ''), snippet, '') AS title,
         snippet AS preview,` + messageLists + `
 		CASE WHEN candidate_rank IS NOT NULL THEN message_id ELSE NULL END AS strongest_matched_message_id,
-		1::BIGINT AS message_count,
+		1::BIGINT AS message_count, 1::BIGINT AS matched_message_count, [source_id]::BIGINT[] AS member_source_ids,
 		(size_estimate + attachment_size)::BIGINT AS estimated_bytes,
 		(entry_kind = 'email' AND lower(source_type) = 'gmail' AND NOT internally_deleted AND NOT deleted_from_source
 			AND COALESCE(source_message_id, '') <> '') AS deletable,
@@ -901,7 +919,7 @@ func exploreLogicalEntriesCTE(withParticipantLists bool) string {
         attachment_size::BIGINT AS attachment_size,
         deleted_from_source
     FROM classified
-    WHERE NOT is_chat
+    WHERE NOT is_chat AND work_key IS NULL
 
     UNION ALL
 
@@ -923,7 +941,7 @@ func exploreLogicalEntriesCTE(withParticipantLists bool) string {
         arg_max(snippet, struct_pack(occurred_at := occurred_at, message_id := message_id)) AS preview,` + conversationLists + `
 		arg_min(message_id, struct_pack(candidate_rank := candidate_rank, message_id := message_id))
 			FILTER (WHERE candidate_rank IS NOT NULL) AS strongest_matched_message_id,
-		COUNT(*)::BIGINT AS message_count,
+		COUNT(*)::BIGINT AS message_count, COUNT(*)::BIGINT AS matched_message_count, [source_id]::BIGINT[] AS member_source_ids,
 		SUM(size_estimate + attachment_size)::BIGINT AS estimated_bytes,
 		false AS deletable,
 		bool_or(has_attachments) AS has_attachments,
@@ -933,5 +951,5 @@ func exploreLogicalEntriesCTE(withParticipantLists bool) string {
         bool_or(deleted_from_source) AS deleted_from_source
     FROM classified
     WHERE is_chat
-    GROUP BY source_id, conversation_id`
+    GROUP BY source_id, conversation_id` + exploreEmailWorkEntriesCTE(withParticipantLists)
 }

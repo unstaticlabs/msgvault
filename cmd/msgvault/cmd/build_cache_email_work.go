@@ -62,7 +62,7 @@ func exportEmailWorkDatasets(snapshot *cacheSourceSnapshot, runExport func(strin
  CASE WHEN lower(s.source_type)='gmail' THEN c.source_conversation_id ELSE NULL END AS provider_thread_id,
  %s AS native_sent,%s AS native_draft,%s AS provider_complete FROM sqlite_db.messages m
  JOIN sqlite_db.sources s ON s.id=m.source_id JOIN sqlite_db.conversations c ON c.id=m.conversation_id
- WHERE %s AND m.id<=%d AND lower(m.message_type) IN ('email','')`, sent, draft, complete, exportableMessageWhere("m"), maxID)
+ WHERE %s AND m.id<=%d AND COALESCE(NULLIF(lower(m.message_type),''),'email')='email'`, sent, draft, complete, exportableMessageWhere("m"), maxID)
 	for _, dataset := range []struct{ name, selectSQL string }{
 		{query.DatasetEmailWorkFacts, facts}, {query.DatasetEmailWorkSeeds, seeds},
 		{query.DatasetEmailWorkIdentities, "SELECT source_id,address FROM sqlite_db.account_identities"},
