@@ -1,5 +1,5 @@
 ---
-last_edited: 2026-08-28
+last_edited: 2026-10-14
 title: Web UI
 description: Use and securely deploy msgvault's daemon-served analytical interface.
 ---
@@ -236,6 +236,77 @@ Existing valid Saved Views retain their definitions. Cache schema 28 rebuilds
 older caches to include provider state; no message data is removed. If a view
 contains a filter that this version cannot execute, execution reports an error
 instead of returning an apparently empty result.
+
+### Related email across accounts
+
+Select **Group related email** in Explore to follow one request across its
+permitted source copies. Individual message rows remain the default. The
+**Handling** filter can show items needing attention, handled items, or unknown
+handling. Saving the context preserves this choice for the browser and native
+MCP Saved View tools.
+
+Grouping uses saved RFC message identities, reply references, attached original
+messages, and source-specific native thread identities. Copies from different
+accounts stay separately accessible with their original provider IDs, labels,
+and evidence. Matching subjects, quoted text, and an ordinary inline forward
+cannot establish identity by themselves.
+
+Automatic handling requires a saved sent, non-draft message from a confirmed
+account identity to an external recipient, with a direct reply or attached
+original and a consistent chronology. It closes the addressed inbound request
+and its direct ancestry; unrelated sibling requests stay actionable. A newer
+inbound request needs attention again. Missing evidence stays **Handling
+unknown** with an explanation.
+
+Account selection happens before grouping and handling. An excluded account
+cannot bridge two visible messages or supply hidden reply evidence. Inbox,
+provider read/unread, and the local archive read marker describe each copy;
+none means that the work was handled. Inbox and search predicates select work
+items through matching copies, while the reader retains the entire permitted
+family and its provenance. People and domain inspectors count that same unit.
+
+Open a related-email row to review every permitted copy and its evidence.
+A Member can select fixed copies and **Review local link**, or **Review handled
+confirmation**, when an inline forward or other incomplete evidence needs
+explicit recovery. The preview lists the exact messages and accounts. **Link these copies** or **Mark these copies handled** creates an undoable local assertion; it does not invent
+reply evidence or change a provider. Each active assertion has its own Undo
+button. A later inbound message is not silently included in an earlier handled
+confirmation. Viewer sessions can inspect copies and export them, but cannot
+save or undo assertions. Changed archive or Saved View revisions require a
+fresh review.
+
+**Export all permitted copies** downloads one ZIP with each available raw email
+once, using opaque identity filenames. `manifest.json` lists every permitted
+copy and its provenance. A partial download explicitly marks missing raw;
+replacement identities or changed revisions stop the download before bytes are
+published. Consolidated provider archive/deletion is unavailable: open an
+individual item for its existing source actions.
+
+### Prepare an existing email archive
+
+New email ingestion extracts evidence with message persistence. For existing
+archived mail, run the resumable daemon-owned preparation command as a Member
+who can access the account:
+
+```bash
+msgvault list-accounts
+msgvault prepare-email-work 7 --batch-size 100 --all
+```
+
+Replace `7` with the source ID returned by `list-accounts`. Without `--all`, the
+command prepares one bounded batch; subsequent invocations resume from the
+committed checkpoint. Missing, corrupt, oversized, or unsupported raw messages
+receive an incomplete outcome and do not strand later mail. Preparation never
+contacts a provider. Progress reports whether the native cache is ready or
+still needs a refresh; retry a completed batch if publication was interrupted.
+
+Cache schema 29 rebuilds the derived work datasets without removing archived
+mail or source copies. SQLite supplies the existing DuckDB/native-CSV Explore
+pipeline. PostgreSQL stores the same authoritative facts, aliases, and local
+assertions, but the existing PostgreSQL deployment does not provide that
+SQLite-to-Parquet browser pipeline. Preparing facts does not add a new
+PostgreSQL Explore backend. The cache retains its existing requirement for
+usable message dates; use the native date repair workflow for undated mail.
 
 ## Sources and sync status
 

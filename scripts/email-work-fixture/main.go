@@ -53,7 +53,7 @@ func seed(destination string) error {
 	}
 	ctx := context.Background()
 	sources := make([]int64, 3)
-	addresses := []string{"qa-field@example.test", "qa-office@example.test", "qa-backup@example.test"}
+	addresses := []string{"qa-field-team-with-a-deliberately-long-account-name@example.test", "qa-office@example.test", "qa-backup@example.test"}
 	for i, address := range addresses {
 		source, createErr := st.GetOrCreateSource("gmail", address)
 		if createErr != nil {
@@ -72,9 +72,9 @@ func seed(destination string) error {
 		{source: 0, key: "new-inbound", rfc: "visit-update@example.test", reply: "visit-reply@example.test", subject: "[QA] Field visit confirmation", body: "A new question arrived after the reply. This item needs attention again.", unread: true},
 		{source: 0, key: "closed-request", rfc: "closed@example.test", subject: "[QA] Document review complete", body: "Please review this synthetic document.", unread: true},
 		{source: 1, key: "closed-reply", rfc: "closed-reply@example.test", reply: "closed@example.test", subject: "[QA] Document review complete", body: "Reviewed. Trusted direct-reply evidence closes the addressed request.", sent: true},
-		{source: 0, key: "inline-request", rfc: "inline@example.test", subject: "[QA] Arrange site access", body: "Please arrange synthetic site access.", unread: true},
-		{source: 1, key: "inline-forward", rfc: "forward@example.test", subject: "[QA] Arrange site access", body: "Forwarded request: please arrange synthetic site access. This ordinary inline forward has no trusted reply reference. Link copies explicitly when appropriate.", sent: true},
-		{source: 2, key: "unrelated", rfc: "unrelated@example.test", subject: "[QA] Arrange site access", body: "Same subject, different request. It must stay separate.", unread: true},
+		{source: 0, key: "inline-request", rfc: "inline@example.test", subject: "[QA] Arrange site access for the synthetic field team with a deliberately long subject", body: "Please arrange synthetic site access.", unread: true},
+		{source: 1, key: "inline-forward", rfc: "forward@example.test", subject: "[QA] Arrange site access for the synthetic field team with a deliberately long subject", body: "Forwarded request: please arrange synthetic site access. This ordinary inline forward has no trusted reply reference. Link copies explicitly when appropriate.", sent: true},
+		{source: 2, key: "unrelated", rfc: "unrelated@example.test", subject: "[QA] Arrange site access for the synthetic field team with a deliberately long subject", body: "Same subject, different request. It must stay separate.", unread: true},
 		{source: 2, key: "unknown", subject: "[QA] Incomplete archived evidence", body: "This synthetic legacy copy has no archived raw MIME. It remains visible with an explanation.", missing: true, unread: true},
 	}
 	records := map[string]string{}
