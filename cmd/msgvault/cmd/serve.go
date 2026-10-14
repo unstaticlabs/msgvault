@@ -1497,6 +1497,10 @@ func (a *storeAPIAdapter) GetFileMetadataBatch(ctx context.Context, ids []int64)
 	return a.store.GetFileMetadataBatch(ctx, ids)
 }
 
+func (a *storeAPIAdapter) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit int) (*store.EmailLinkageBackfill, error) {
+	return a.store.BackfillEmailLinkage(ctx, sourceID, limit)
+}
+
 func (a *storeAPIAdapter) GetArchivedMessageRaw(ctx context.Context, id int64) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

@@ -1011,6 +1011,10 @@ func (g *GetEmailWorkMembersErrorResponseJSON503) UnmarshalJSON(data []byte) err
 	return nil
 }
 
+type PrepareEmailWorkResponse = EmailWorkPrepareResponse
+
+type PrepareEmailWorkErrorResponse = ErrorResponse
+
 type PreviewEmailWorkActionResponse = EmailWorkActionPreview
 
 type PreviewEmailWorkActionErrorResponse = ErrorResponse
@@ -3882,6 +3886,13 @@ type GetEmailWorkMembersResp struct {
 	JSON400      *GetEmailWorkMembersErrorResponse
 	JSON409      *GetEmailWorkMembersErrorResponseJSON
 	JSON503      *GetEmailWorkMembersErrorResponseJSON503
+}
+
+type PrepareEmailWorkResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *PrepareEmailWorkResponse
 }
 
 type PreviewEmailWorkActionResp struct {

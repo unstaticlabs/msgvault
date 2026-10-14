@@ -427,6 +427,10 @@ type ClientInterface interface {
 	GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResponse, error)
 	GetEmailWorkMembersWithResponse(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResp, error)
 
+	// PrepareEmailWork Prepare one resumable batch of archived email evidence
+	PrepareEmailWork(ctx context.Context, options *PrepareEmailWorkRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareEmailWorkResponse, error)
+	PrepareEmailWorkWithResponse(ctx context.Context, options *PrepareEmailWorkRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareEmailWorkResp, error)
+
 	// PreviewEmailWorkAction Review a fixed-target local link or handled confirmation
 	PreviewEmailWorkAction(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResponse, error)
 	PreviewEmailWorkActionWithResponse(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResp, error)
@@ -6967,6 +6971,70 @@ func (c *Client) GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkM
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/members")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// PrepareEmailWork Prepare one resumable batch of archived email evidence
+func (c *Client) PrepareEmailWork(ctx context.Context, options *PrepareEmailWorkRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareEmailWorkResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/prepare",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*PrepareEmailWorkResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(PrepareEmailWorkErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "PrepareEmailWorkErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(PrepareEmailWorkResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "PrepareEmailWorkResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/prepare")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}

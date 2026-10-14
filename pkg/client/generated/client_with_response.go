@@ -8402,6 +8402,56 @@ func (c *Client) GetEmailWorkMembersWithResponse(ctx context.Context, options *G
 	}
 }
 
+// PrepareEmailWork Prepare one resumable batch of archived email evidence
+func (c *Client) PrepareEmailWorkWithResponse(ctx context.Context, options *PrepareEmailWorkRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareEmailWorkResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/prepare",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/prepare")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &PrepareEmailWorkResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		out.JSON200 = new(PrepareEmailWorkResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON200); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "PrepareEmailWorkResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, nil
+	case 500:
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
 // PreviewEmailWorkAction Review a fixed-target local link or handled confirmation
 func (c *Client) PreviewEmailWorkActionWithResponse(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResp, error) {
 	var err error

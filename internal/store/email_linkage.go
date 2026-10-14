@@ -91,10 +91,10 @@ func (s *Store) EmailLinkageEvidence(ctx context.Context, messageID int64) (mime
 
 // EmailLinkageBackfill reports one resumable, source-pinned extraction batch.
 type EmailLinkageBackfill struct {
-	Processed     int
-	Changed       int
-	LastMessageID int64
-	Done          bool
+	Processed     int   `json:"processed"`
+	Changed       int   `json:"changed"`
+	LastMessageID int64 `json:"last_message_id"`
+	Done          bool  `json:"done"`
 }
 
 // BackfillEmailLinkage extracts archived MIME without provider access. Facts,

@@ -86,6 +86,8 @@ type ExportEmailWorkItemBody = EmailWorkExportRequest
 
 type GetEmailWorkMembersBody = EmailWorkMembersHTTPRequest
 
+type PrepareEmailWorkBody = EmailWorkPrepareRequest
+
 type PreviewEmailWorkActionBody = EmailWorkActionRequest
 
 type UndoEmailWorkActionBody = EmailWorkUndoRequest

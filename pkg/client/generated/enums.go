@@ -636,6 +636,23 @@ func (e EmailWorkMemberFactLocalReadState) Validate() error {
 	}
 }
 
+type EmailWorkPrepareResponseCacheState string
+
+const (
+	EmailWorkPrepareResponseCacheStateReady EmailWorkPrepareResponseCacheState = "ready"
+	EmailWorkPrepareResponseCacheStateStale EmailWorkPrepareResponseCacheState = "stale"
+)
+
+// Validate checks if the EmailWorkPrepareResponseCacheState value is valid
+func (e EmailWorkPrepareResponseCacheState) Validate() error {
+	switch e {
+	case EmailWorkPrepareResponseCacheStateReady, EmailWorkPrepareResponseCacheStateStale:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkPrepareResponseCacheState value, got: %v", e))
+	}
+}
+
 type EmploymentBodySource string
 
 const (

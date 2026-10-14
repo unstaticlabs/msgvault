@@ -3388,6 +3388,26 @@ components:
         - provider_idempotent
         - detail
       type: object
+    EmailLinkageBackfill:
+      additionalProperties: true
+      properties:
+        changed:
+          format: int64
+          type: integer
+        done:
+          type: boolean
+        last_message_id:
+          format: int64
+          type: integer
+        processed:
+          format: int64
+          type: integer
+      required:
+        - processed
+        - changed
+        - last_message_id
+        - done
+      type: object
     EmailWorkAction:
       additionalProperties: true
       properties:
@@ -3713,6 +3733,36 @@ components:
         - evidence_message_ids
         - local_actions
         - recovery_snapshot
+      type: object
+    EmailWorkPrepareRequest:
+      additionalProperties: false
+      properties:
+        batch_size:
+          format: int64
+          maximum: 1000
+          minimum: 1
+          type: integer
+        source_id:
+          format: int64
+          minimum: 1
+          type: integer
+      required:
+        - source_id
+        - batch_size
+      type: object
+    EmailWorkPrepareResponse:
+      additionalProperties: true
+      properties:
+        cache_state:
+          enum:
+            - ready
+            - stale
+          type: string
+        progress:
+          $ref: "#/components/schemas/EmailLinkageBackfill"
+      required:
+        - progress
+        - cache_state
       type: object
     EmailWorkSummary:
       additionalProperties: true
@@ -17317,6 +17367,33 @@ paths:
       summary: Read every permitted source copy and link evidence in an email work item
       tags:
         - Exploration
+  /api/v1/explore/email-work/prepare:
+    post:
+      operationId: prepareEmailWork
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailWorkPrepareRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailWorkPrepareResponse"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Prepare one resumable batch of archived email evidence
+      tags:
+        - API
   /api/v1/explore/email-work/preview:
     post:
       operationId: previewEmailWorkAction

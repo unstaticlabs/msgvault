@@ -2997,6 +2997,13 @@ func (d DuplicateCostRisk) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(d))
 }
 
+type EmailLinkageBackfill struct {
+	Changed       int64 `json:"changed"`
+	Done          bool  `json:"done"`
+	LastMessageID int64 `json:"last_message_id"`
+	Processed     int64 `json:"processed"`
+}
+
 type EmailWorkAction struct {
 	Active      bool      `json:"active"`
 	ActorKind   string    `json:"actor_kind" validate:"required"`
@@ -3360,6 +3367,38 @@ func (e EmailWorkMembersResponse) Validate() error {
 	}
 	if err := typesValidator.Var(e.UID, "required"); err != nil {
 		errors = errors.Append("UID", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type EmailWorkPrepareRequest struct {
+	BatchSize int64 `json:"batch_size" validate:"gte=1,lte=1000"`
+	SourceID  int64 `json:"source_id" validate:"gte=1"`
+}
+
+func (e EmailWorkPrepareRequest) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
+type EmailWorkPrepareResponse struct {
+	CacheState EmailWorkPrepareResponseCacheState `json:"cache_state" validate:"required"`
+	Progress   EmailLinkageBackfill               `json:"progress"`
+}
+
+func (e EmailWorkPrepareResponse) Validate() error {
+	var errors runtime.ValidationErrors
+	if v, ok := any(e.CacheState).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("CacheState", err)
+		}
+	}
+	if v, ok := any(e.Progress).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Progress", err)
+		}
 	}
 	if len(errors) == 0 {
 		return nil
