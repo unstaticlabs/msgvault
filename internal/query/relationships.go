@@ -192,10 +192,12 @@ func (e *DuckDBEngine) queryRelationshipCandidates(
 	if identityRequestIsUnfiltered(explore) {
 		queryText, queryArgs = e.buildRelationshipRollupSQL(now)
 	} else {
-		queryText, queryArgs, err = e.buildFilteredRelationshipsSQL(ctx, explore, now)
+		var cleanup func()
+		queryText, queryArgs, cleanup, err = e.buildFilteredRelationshipsSQL(ctx, explore, now)
 		if err != nil {
 			return nil, 0, err
 		}
+		defer cleanup()
 	}
 
 	rows, err := e.db.QueryContext(ctx, queryText, queryArgs...)
@@ -313,10 +315,10 @@ func (e *DuckDBEngine) buildFilteredRelationshipsSQL(
 	ctx context.Context,
 	explore ExploreRequest,
 	now time.Time,
-) (string, []any, error) {
-	logicalSQL, args, err := e.buildIdentityLogicalSQL(ctx, explore, "")
+) (string, []any, func(), error) {
+	logicalSQL, args, cleanup, err := e.buildIdentityLogicalSQL(ctx, explore, "")
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	directory := quoteIdentitySQLPath(
 		e.parquetPath(identityindex.DatasetPeople),
@@ -325,11 +327,11 @@ func (e *DuckDBEngine) buildFilteredRelationshipsSQL(
 relationship_interactions AS (
 	SELECT p.*,
 	       CASE WHEN p.is_from_me
-	                 AND p.entry_kind IN ('email','conversation','item')
+	                 AND p.entry_kind IN ('email','email_work_item','conversation','item')
 	            THEN 1::BIGINT ELSE 0::BIGINT END AS sent_units,
 	       CASE WHEN NOT p.is_from_me
 	                 AND (p.entry_kind = 'conversation'
-	                      OR (p.entry_kind IN ('email','item') AND p.is_author))
+	                      OR (p.entry_kind IN ('email','email_work_item','item') AND p.is_author))
 	            THEN 1::BIGINT ELSE 0::BIGINT END AS received_units,
 	       CASE WHEN p.entry_kind IN ('event','meeting') AND p.with_owner
 	            THEN 1::BIGINT ELSE 0::BIGINT END AS meeting_units,
@@ -338,7 +340,7 @@ relationship_interactions AS (
 	               THEN ` + strconv.FormatUint(uint64(identityindex.ModalityMeeting), 10) + `::UTINYINT
 	           WHEN p.entry_kind = 'conversation'
 	               THEN ` + strconv.FormatUint(uint64(identityindex.ModalityChat), 10) + `::UTINYINT
-	           WHEN p.entry_kind IN ('email','item')
+	           WHEN p.entry_kind IN ('email','email_work_item','item')
 	               THEN ` + strconv.FormatUint(uint64(identityindex.ModalityEmail), 10) + `::UTINYINT
 	           ELSE 0::UTINYINT
 	       END AS modality_mask,
@@ -375,7 +377,7 @@ JOIN read_parquet('` + directory + `') d USING (canonical_id)`
 		identityindex.RelationshipDecayRate,
 		duckDBDateParam(now),
 	)
-	return queryText, args, nil
+	return queryText, args, cleanup, nil
 }
 
 func validateRelationshipsRequest(request RelationshipsRequest) error {

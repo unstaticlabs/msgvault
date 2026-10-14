@@ -161,6 +161,43 @@ func TestBuildCacheLocalWorkRecoveryNativeAndCSV(t *testing.T) {
 			grouped, err := engine.Explore(ctx, request)
 			requirements.NoError(err)
 			assertions.Equal(int64(2), grouped.TotalCount)
+			for _, inspectorCase := range []struct {
+				name    string
+				context query.Context
+				count   int64
+			}{
+				{name: "all work", context: request.Context, count: 2},
+				{name: "linked sources", context: query.Context{RowUnit: query.RowUnitEmailWork, WorkAuthorityKey: "synthetic-reader", SourceIDs: sourceIDs[:2]}, count: 1},
+				{name: "excluded bridge", context: query.Context{RowUnit: query.RowUnitEmailWork, WorkAuthorityKey: "synthetic-reader", SourceIDs: []int64{sourceIDs[0], sourceIDs[2]}}, count: 2},
+				{name: "individual default", context: query.Context{}, count: 3},
+			} {
+				people, err := engine.SearchPeople(ctx, query.PersonSearchRequest{Explore: query.ExploreRequest{Context: inspectorCase.context}, Query: "requester@example.test"})
+				requirements.NoError(err, inspectorCase.name)
+				requirements.Len(people.Rows, 1, inspectorCase.name)
+				assertions.Equal(inspectorCase.count, people.Rows[0].ActivityCount, inspectorCase.name+" people search")
+				person, err := engine.GetPerson(ctx, originalFrom, inspectorCase.context, nil)
+				requirements.NoError(err, inspectorCase.name)
+				requirements.NotNil(person)
+				assertions.Equal(inspectorCase.count, person.ActivityCount, inspectorCase.name+" person detail")
+				summary, err := engine.GetPersonSummary(ctx, originalFrom, query.ExploreRequest{Context: inspectorCase.context}, nil)
+				requirements.NoError(err, inspectorCase.name)
+				requirements.Len(summary.Rows, 1)
+				assertions.Equal(inspectorCase.count, summary.Rows[0].ActivityCount, inspectorCase.name+" person summary")
+				domains, err := engine.SearchDomains(ctx, query.DomainSearchRequest{Explore: query.ExploreRequest{Context: inspectorCase.context}, Query: "example.test"})
+				requirements.NoError(err, inspectorCase.name)
+				requirements.Len(domains.Rows, 1)
+				assertions.Equal(inspectorCase.count, domains.Rows[0].ActivityCount, inspectorCase.name+" domain search")
+				relationships, err := engine.Relationships(ctx, query.RelationshipsRequest{Context: inspectorCase.context, ShowAll: true, Now: time.Date(2026, 1, 1, 13, 0, 0, 0, time.UTC)})
+				requirements.NoError(err, inspectorCase.name)
+				requirements.Len(relationships.Rows, 1)
+				assertions.InDelta(float64(inspectorCase.count), relationships.Rows[0].Signals.ReceivedFromThem, 0, inspectorCase.name+" relationship units")
+
+				domain, err := engine.GetDomain(ctx, "example.test", inspectorCase.context)
+				requirements.NoError(err, inspectorCase.name)
+				requirements.NotNil(domain)
+				assertions.Equal(inspectorCase.count, domain.ActivityCount, inspectorCase.name+" domain detail")
+			}
+
 			scoped := request
 			scoped.Context.SourceIDs = []int64{sourceIDs[0], sourceIDs[2]}
 			separate, err := engine.Explore(ctx, scoped)
