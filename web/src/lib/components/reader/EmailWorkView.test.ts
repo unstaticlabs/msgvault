@@ -84,6 +84,15 @@ function fixture(extra?: (request: Request) => Promise<Response | undefined>) {
   return { fetch, client: createAPIClient(fetch) };
 }
 describe("native related email reader", () => {
+  it("explains missing evidence without claiming a verified reply", async () => {
+    const {client} = fixture(async () => Response.json({...detail, summary: {...detail.summary, state:'unknown', evidence_count:0, reasons:['linkage_unavailable']}, members:[{...inbound, linkage_outcome:'missing_raw', unavailable_reasons:['provider_evidence_unavailable']}], total_count:1}));
+    render(EmailWorkView,{client,uid:inboundUID,predicate,cacheRevision:'qa-work-1'});
+    await screen.findByText('Handling unknown in these accounts');
+    expect(screen.getByText('Some archived copies lack reliable message-link evidence.')).toBeTruthy();
+    expect(screen.getByText('Raw email was not archived')).toBeTruthy();
+    expect(screen.getByText('Saved provider metadata is incomplete for this copy.')).toBeTruthy();
+  });
+
   it("retains conflicting mailbox states and full provenance for a handled item", async () => {
     render(EmailWorkView, {
       client: fixture().client,
@@ -182,7 +191,7 @@ describe("native related email reader", () => {
       predicate.filters.slice(0, 2),
     );
     await fireEvent.click(
-      screen.getByRole("button", { name: "Save local confirmation" }),
+      screen.getByRole("button", { name: "Mark these copies handled" }),
     );
     await waitFor(() =>
       expect(calls.some((call) => call.path.endsWith("/actions"))).toBe(true),
@@ -242,6 +251,8 @@ describe("native related email reader", () => {
     render(EmailWorkView, {client, uid: inboundUID, predicate, cacheRevision: 'qa-work-1', canCurate: true});
     await screen.findByText('Handled in these accounts');
     expect(screen.getByText('· Undone')).toBeTruthy();
+    expect(screen.getByText(/API user #7/)).toBeTruthy();
+    expect(screen.queryByText(/api_key/)).toBeNull();
     expect(screen.queryByRole('button', {name: 'Undo local link'})).toBeNull();
   });
 

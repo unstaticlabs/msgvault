@@ -13,6 +13,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 type emailWorkExportSnapshotReader interface {
@@ -84,7 +85,7 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 	var expectedSnapshot string
 	file, err := os.CreateTemp("", "msgvault-work-export-*.zip")
 	if err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	defer func() { _ = file.Close(); _ = os.Remove(file.Name()) }()
@@ -96,18 +97,18 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 	for {
 		page, readErr := reader.EmailWorkMembers(r.Context(), query.EmailWorkMembersRequest{Explore: prepared.query, UID: request.UID, ExpectedCacheRevision: request.CacheRevision, Page: query.PageSpec{Limit: 500, Offset: offset}})
 		if readErr != nil {
-			s.writeEmailWorkActionError(w, r, readErr)
+			s.writeEmailWorkExportError(w, r, readErr)
 			return
 		}
 		manifest.UID = page.UID
 		if page.RecoverySnapshot == "" || (expectedSnapshot != "" && expectedSnapshot != page.RecoverySnapshot) {
-			s.writeEmailWorkActionError(w, r, query.ErrEmailWorkRevisionChanged)
+			s.writeEmailWorkExportError(w, r, query.ErrEmailWorkRevisionChanged)
 			return
 		}
 		expectedSnapshot = page.RecoverySnapshot
 		for _, member := range page.Members {
 			if member.MessageUID == "" || seen[member.MessageUID] {
-				s.writeEmailWorkActionError(w, r, query.ErrEmailWorkRevisionChanged)
+				s.writeEmailWorkExportError(w, r, query.ErrEmailWorkRevisionChanged)
 				return
 			}
 			seen[member.MessageUID] = true
@@ -122,7 +123,7 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 			if err = verify(); err != nil {
-				s.writeEmailWorkActionError(w, r, err)
+				s.writeEmailWorkExportError(w, r, err)
 				return
 			}
 			var raw []byte
@@ -134,7 +135,7 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 			rawErr := err
 			// A physical ID reused while reading must never publish replacement bytes.
 			if err = verify(); err != nil {
-				s.writeEmailWorkActionError(w, r, err)
+				s.writeEmailWorkExportError(w, r, err)
 				return
 			}
 			copyEntry := EmailWorkExportCopy{Member: member, State: "raw_unavailable"}
@@ -143,16 +144,16 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 				copyEntry.Filename = fmt.Sprintf("messages/%s.eml", member.MessageUID)
 				entry, createErr := writer.Create(copyEntry.Filename)
 				if createErr != nil {
-					s.writeEmailWorkActionError(w, r, createErr)
+					s.writeEmailWorkExportError(w, r, createErr)
 					return
 				}
 				if _, err = entry.Write(raw); err != nil {
-					s.writeEmailWorkActionError(w, r, err)
+					s.writeEmailWorkExportError(w, r, err)
 					return
 				}
 			} else {
 				if errors.Is(rawErr, r.Context().Err()) && r.Context().Err() != nil {
-					s.writeEmailWorkActionError(w, r, rawErr)
+					s.writeEmailWorkExportError(w, r, rawErr)
 					return
 				}
 				manifest.State = "partial"
@@ -164,44 +165,44 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if len(page.Members) == 0 {
-			s.writeEmailWorkActionError(w, r, query.ErrEmailWorkRevisionChanged)
+			s.writeEmailWorkExportError(w, r, query.ErrEmailWorkRevisionChanged)
 			return
 		}
 	}
 	// Re-probe both the native archive and immutable publication after the last raw read.
 	nativeSnapshot, snapshotErr := snapshotReader.EmailWorkRecoverySnapshot(r.Context())
 	if snapshotErr != nil {
-		s.writeEmailWorkActionError(w, r, snapshotErr)
+		s.writeEmailWorkExportError(w, r, snapshotErr)
 		return
 	}
 	if nativeSnapshot != expectedSnapshot {
-		s.writeEmailWorkActionError(w, r, query.ErrEmailWorkRevisionChanged)
+		s.writeEmailWorkExportError(w, r, query.ErrEmailWorkRevisionChanged)
 		return
 	}
 	if _, err = reader.EmailWorkMembers(r.Context(), query.EmailWorkMembersRequest{Explore: prepared.query, UID: request.UID, ExpectedCacheRevision: request.CacheRevision, Page: query.PageSpec{Limit: 1}}); err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	entry, err := writer.Create("manifest.json")
 	if err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	if err = json.NewEncoder(entry).Encode(manifest); err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	if err = writer.Close(); err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	size, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	if _, err = file.Seek(0, io.SeekStart); err != nil {
-		s.writeEmailWorkActionError(w, r, err)
+		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -211,5 +212,18 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 	if _, err = io.Copy(w, file); err != nil {
 		s.logger.Warn("email work export interrupted", "error", err)
+	}
+}
+
+func (s *Server) writeEmailWorkExportError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, store.ErrEmailWorkAliasGone), errors.Is(err, store.ErrEmailWorkAliasMissing), errors.Is(err, store.ErrEmailWorkAliasOutOfScope), errors.Is(err, query.ErrEmailWorkRevisionChanged), errors.Is(err, query.ErrCacheUnavailable):
+		s.writeEmailWorkActionError(w, r, err)
+	default:
+		if s.writeIfContextError(w, err) {
+			return
+		}
+		s.logger.Error("email work export failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "export_unavailable", "The export could not be completed. Your archived copies were preserved. Refresh and try again.")
 	}
 }

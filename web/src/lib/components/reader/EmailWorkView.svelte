@@ -5,7 +5,7 @@
   import type { EmailWorkMembersResponse, EmailWorkMemberFact, EmailWorkActionPreview, EmailWorkActionResponse } from '../../api/generated/models';
   import { emailWorkMembers, emailWorkPreview, emailWorkApply, emailWorkUndo, emailWorkExport, emailWorkBody } from '../../explore/email-work-api';
   import type { ExplorePredicate, EntryRow } from '../../explore/models';
-  import { HANDLING_LABELS } from '../../explore/email-work';
+  import { HANDLING_LABELS, emailWorkReasonLabel, emailWorkExtractionLabel, emailWorkActorLabel } from '../../explore/email-work';
   import { mailboxCaption } from '../../explore/mailbox-state';
   import { createExploreAPI } from '../../explore/api';
   import type { ArchiveMessageDetail, MessageViewMode } from '../../archive/types';
@@ -180,10 +180,10 @@
   {#if detail}
     <header class="work-summary">
       <strong>{HANDLING_LABELS[detail.summary.state] ?? 'Handling unknown'} in these accounts</strong>
-      <span>{detail.total_count} archived {detail.total_count === 1 ? 'copy' : 'copies'} · {detail.summary.source_ids.length} {detail.summary.source_ids.length === 1 ? 'account' : 'accounts'} · {detail.summary.outstanding_count} outstanding · {detail.summary.evidence_count} reply evidence</span>
+      <span>{detail.total_count} archived {detail.total_count === 1 ? 'copy' : 'copies'} · {detail.summary.source_ids.length} {detail.summary.source_ids.length === 1 ? 'account' : 'accounts'} · {detail.summary.outstanding_count} outstanding · {detail.summary.evidence_count} outbound evidence</span>
       <p>Read, Inbox and local-read status describe each copy. They do not mean this item was handled.</p>
       {#if detail.requested_uid !== detail.uid}<p role="status">This saved link now resolves to the related item containing its original copy.</p>{/if}
-      {#if detail.summary.reasons?.length}<ul aria-label="Handling uncertainty">{#each detail.summary.reasons as reason}<li>{reason.replaceAll('_', ' ')}</li>{/each}</ul>{/if}
+      {#if detail.summary.reasons?.length}<ul aria-label="Handling uncertainty">{#each detail.summary.reasons as reason}<li>{emailWorkReasonLabel(reason)}</li>{/each}</ul>{/if}
       <div class="recovery-actions"><Button size="sm" surface="outline" label="Refresh related email" onclick={refresh} /><Button size="sm" surface="outline" label="Export all permitted copies" disabled={busy} onclick={() => void download()} /></div>
     </header>
     {#each detail.members as member (member.message_uid ?? member.message_id)}
@@ -196,13 +196,13 @@
         {#if onOpenIndividual}<Button size="sm" surface="outline" label="Open individual item" disabled={busy || !member.message_uid} onclick={() => void openIndividual(member)} />{/if}
         <p>{mailboxCaption(member.inbox_state, member.read_state)} · Local read: {member.local_read_state ?? 'unknown'} · {member.native_draft ? 'Draft' : member.native_sent ? 'Sent' : member.incoming ? 'Received' : 'Direction unknown'}</p>
         <p>{detail.outstanding_message_ids.includes(member.message_id) ? 'Outstanding received event' : detail.evidence_message_ids.includes(member.message_id) ? 'Completed outbound reply evidence' : 'Retained related copy'}</p>
-        <details><summary>Copy provenance and linking evidence</summary>
-          <dl><dt>Source message</dt><dd>{member.source_message_id}</dd><dt>Source thread</dt><dd>{member.provider_thread_id || member.conversation_id}</dd><dt>Saved labels</dt><dd>{member.labels.join(', ') || 'None'}</dd><dt>Extraction</dt><dd>{member.linkage_outcome}</dd><dt>Confirmed sender</dt><dd>{member.confirmed_source_sender ? 'Yes' : 'No'}</dd>
+        <details><summary>Why these copies are linked</summary>
+          <dl><dt>Source message ID</dt><dd>{member.source_message_id}</dd><dt>Source thread ID</dt><dd>{member.provider_thread_id || member.conversation_id}</dd><dt>Saved labels</dt><dd>{member.labels.join(', ') || 'None'}</dd><dt>Archived evidence</dt><dd>{emailWorkExtractionLabel(member.linkage_outcome)}</dd><dt>Sender matches a confirmed account identity</dt><dd>{member.confirmed_source_sender ? 'Yes' : 'No'}</dd>
             {#if member.rfc_message_id}<dt>Message-ID</dt><dd>{member.rfc_message_id}</dd>{/if}
             {#if member.reply_ids?.length}<dt>Direct reply</dt><dd>{member.reply_ids.join(', ')}</dd>{/if}
             {#if member.reference_ids?.length}<dt>References</dt><dd>{member.reference_ids.join(', ')}</dd>{/if}
             {#if member.attached_original_ids?.length}<dt>Attached original</dt><dd>{member.attached_original_ids.join(', ')}</dd>{/if}
-            {#if member.unavailable_reasons?.length}<dt>Uncertainty</dt><dd>{member.unavailable_reasons.map((value) => value.replaceAll('_', ' ')).join(', ')}</dd>{/if}
+            {#if member.unavailable_reasons?.length}<dt>Uncertainty</dt><dd>{member.unavailable_reasons.map(emailWorkReasonLabel).join(', ')}</dd>{/if}
           </dl>
         </details>
         {#if expanded.includes(member.message_uid ?? '')}
@@ -230,8 +230,8 @@
         {/if}
         <p>{selected.length} exact copies selected. New inbound copies are never covered by an earlier confirmation.</p>
         <div class="recovery-actions"><Button size="sm" surface="outline" label="Review local link" disabled={busy || selected.length < 2 || selected.length > 100} onclick={() => void review('link')} /><Button size="sm" surface="outline" label="Review handled confirmation" disabled={busy || selected.length === 0 || selected.length > 100} onclick={() => void review('handled')} /></div>
-        {#if preview}<section class="recovery-preview" aria-label="Review fixed copies"><strong>{preview.kind === 'link' ? 'Link these exact copies locally?' : 'Confirm these exact copies were handled?'}</strong><ul>{#each preview.messages as member (member.message_uid)}<li>{member.title} · {member.source_identifier} · {member.source_message_id}</li>{/each}</ul><p>This assertion is local and undoable. It supplies no automatic reply evidence.</p><Button size="sm" surface="soft" label="Save local confirmation" disabled={busy} onclick={() => void apply()} /><Button size="sm" surface="outline" label="Cancel review" disabled={busy} onclick={() => {preview = undefined;}} /></section>{/if}
-        {#each detail.local_actions ?? [] as action (action.uid)}<p>{action.kind === 'link' ? 'Local link' : 'Local handled confirmation'} · {action.targets.length} fixed {action.targets.length === 1 ? 'copy' : 'copies'} · {new Date(action.created_at).toLocaleString()} · {action.actor_kind}{action.actor_user_id ? ` user ${action.actor_user_id}` : ''}
+        {#if preview}<section class="recovery-preview" aria-label="Review fixed copies"><strong>{preview.kind === 'link' ? 'Link these exact copies locally?' : 'Confirm these exact copies were handled?'}</strong><ul>{#each preview.messages as member (member.message_uid)}<li>{member.title} · {member.source_identifier} · Source message ID: {member.source_message_id}</li>{/each}</ul><p>This assertion is local and undoable. It supplies no automatic reply evidence.</p><Button size="sm" surface="soft" label={preview.kind === 'link' ? 'Link these copies' : 'Mark these copies handled'} disabled={busy} onclick={() => void apply()} /><Button size="sm" surface="outline" label="Cancel review" disabled={busy} onclick={() => {preview = undefined;}} /></section>{/if}
+        {#each detail.local_actions ?? [] as action (action.uid)}<p>{action.kind === 'link' ? 'Local link' : 'Local handled confirmation'} · {action.targets.length} fixed {action.targets.length === 1 ? 'copy' : 'copies'} · {new Date(action.created_at).toLocaleString()} · {emailWorkActorLabel(action.actor_kind, action.actor_user_id)}
           {#if action.active}<Button size="sm" surface="outline" label={action.kind === 'link' ? 'Undo local link' : 'Undo handled confirmation'} disabled={busy} onclick={() => void undo(action)} />{:else}<span> · Undone</span>{/if}</p>{/each}
       </section>
     {:else}<p>Local recovery is available to archive Members. You can inspect every permitted copy.</p>{/if}

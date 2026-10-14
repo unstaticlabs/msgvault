@@ -381,6 +381,34 @@
     gap: var(--space-2);
   }
 
+  @media (max-width: 640px) {
+    .pane-header {
+      flex-wrap: wrap;
+      align-items: flex-start;
+      gap: var(--space-2);
+    }
+
+    .pane-heading {
+      flex: 1 1 100%;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: var(--space-1);
+    }
+
+    .pane-title,
+    .pane-meta {
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .pane-actions {
+      margin-left: auto;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+  }
+
   .tasks-disclosure summary {
     display: inline-flex;
     align-items: center;

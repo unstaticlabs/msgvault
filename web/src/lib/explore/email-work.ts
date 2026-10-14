@@ -64,3 +64,29 @@ export function emailWorkFilterProblem(
   if (handling.length && units.length !== 1)
     return "Handling status requires Group related email. Your saved definition is unchanged.";
 }
+
+const EVIDENCE_LABELS: Record<string, string> = {
+  identity_unavailable: "Account ownership or message direction cannot be confirmed from the archive.",
+  linkage_unavailable: "Some archived copies lack reliable message-link evidence.",
+  provider_evidence_unavailable: "Saved provider metadata is incomplete for this copy.",
+  chronology_unavailable: "Saved message dates do not establish reply order.",
+  no_received_item: "No confirmed received request is present in these accounts.",
+  local_confirmation: "Handling includes an explicit, undoable local confirmation.",
+};
+export function emailWorkReasonLabel(reason: string): string {
+  return EVIDENCE_LABELS[reason] ?? "Some archived evidence is unavailable; inspect the retained copies before deciding.";
+}
+export function emailWorkExtractionLabel(outcome: string): string {
+  if (outcome === "complete") return "Archived headers prepared";
+  if (outcome === "missing_raw") return "Raw email was not archived";
+  if (outcome === "pending_extraction") return "Archived headers have not been prepared yet";
+  if (outcome === "unsupported_raw") return "The archived format does not provide email headers";
+  if (outcome.endsWith("_limit")) return "This email exceeds the evidence processing limit; its copy remains available";
+  return "Archived message-link evidence could not be read";
+}
+export function emailWorkActorLabel(kind: string, userID?: number): string {
+  const labels: Record<string, string> = {api_key: "API user", user: "User", browser: "Signed-in user", session: "Signed-in user", service: "Service user"};
+  if (kind === "api_key" && !userID) return "API key";
+  const label = labels[kind] ?? "Recorded actor";
+  return userID ? `${label} #${userID}` : label;
+}
