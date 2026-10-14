@@ -144,11 +144,23 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 		}
 		row.MatchedSenderIdentities = make([]string, 0)
 		row.MatchedRecipientIdentities = make([]string, 0)
-		row.EmailWork = emailWorkSummary(population, row.Key)
 		response.Rows = append(response.Rows, row)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate analytical entries: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range response.Rows {
+		if population == nil || !strings.HasPrefix(response.Rows[i].Key, "email-work:") {
+			continue
+		}
+		summary, err := e.emailWorkSummaryLocked(ctx, population, response.Rows[i].Key)
+		if err != nil {
+			return nil, err
+		}
+		response.Rows[i].EmailWork = summary
 	}
 	if len(response.Rows) == 0 && request.Page.Offset > 0 {
 		countSQL := buildExploreCountSQL(conditions, candidateRankExpression)

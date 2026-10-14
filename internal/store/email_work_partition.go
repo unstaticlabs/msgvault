@@ -11,10 +11,10 @@ import (
 // ProviderThreadID is supplied only for a source-native authoritative email
 // thread, never a subject-based or historical MIME-parser guess.
 type EmailWorkMember struct {
-	MessageID        int64
-	SourceID         int64
-	ProviderThreadID string
-	Linkage          mime.EmailLinkage
+	MessageID        int64             `json:"message_id"`
+	SourceID         int64             `json:"source_id"`
+	ProviderThreadID string            `json:"provider_thread_id"`
+	Linkage          mime.EmailLinkage `json:"linkage"`
 }
 
 // PartitionEmailWorkMembers computes an ephemeral partition from only the

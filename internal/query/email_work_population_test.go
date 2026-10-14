@@ -163,3 +163,70 @@ func emailWorkPopulationFixture(t *testing.T, unavailable ...bool) *DuckDBEngine
 	t.Cleanup(func() { requirements.NoError(engine.Close()) })
 	return engine
 }
+
+func TestEmailWorkNativeProjectionLifecycle(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	e := emailWorkPopulationFixture(t)
+	ctx := context.Background()
+	read := func(authority string) *emailWorkPopulation {
+		release, err := e.acquireQuerySlot(ctx)
+		requirements.NoError(err)
+		defer release()
+		population, err := e.emailWorkPopulationLocked(ctx, EmailWorkScope{AuthorityKey: authority})
+		requirements.NoError(err)
+		return population
+	}
+	oldest := read("synthetic-first")
+	oldNames := oldest.relations.names()
+	for i := range 4 {
+		read(fmt.Sprintf("synthetic-authority-%d", i))
+	}
+	assertions.Len(e.emailWorkMemo, 4)
+	for _, name := range oldNames {
+		var count int
+		err := e.db.QueryRow("SELECT COUNT(*) FROM " + name).Scan(&count)
+		requirements.Error(err, "fifth-scope eviction drops the entire native handle")
+	}
+	var tableCount int
+	requirements.NoError(e.db.QueryRow("SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE '_email_work_projection_%'").Scan(&tableCount))
+	assertions.Equal(16, tableCount)
+	incumbent := e.emailWorkMemo[0]
+	release, err := e.acquireQuerySlot(ctx)
+	requirements.NoError(err)
+	uncommitted, err := e.readEmailWorkPopulation(ctx, nil)
+	requirements.NoError(err)
+	// Native DDL has been created when a real primary-key constraint fails.
+	// An invalid duplicated partition must not become a published handle.
+	uncommitted.components[0] = append(uncommitted.components[0], uncommitted.components[0][0])
+	requirements.Error(e.materializeEmailWorkPopulation(ctx, uncommitted))
+	for _, name := range uncommitted.relations.names() {
+		var count int
+		requirements.Error(e.db.QueryRow("SELECT COUNT(*) FROM " + name).Scan(&count))
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	requirements.ErrorIs(e.materializeEmailWorkPopulation(cancelled, uncommitted), context.Canceled)
+	release()
+	assertions.Same(incumbent, read("synthetic-authority-3"), "a failed build retains prior usable projections")
+	state, err := ReadCacheSyncState(e.analyticsDir)
+	requirements.NoError(err)
+	state.PublishedAt = state.PublishedAt.Add(time.Second)
+	data, err := json.Marshal(state)
+	requirements.NoError(err)
+	requirements.NoError(os.WriteFile(CacheStatePath(e.analyticsDir), data, 0o600))
+	replacement := read("synthetic-authority-3")
+	assertions.NotSame(incumbent, replacement)
+	assertions.Len(e.emailWorkMemo, 1, "a new publication retires old native handles")
+	requirements.NoError(e.db.QueryRow("SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE '_email_work_projection_%'").Scan(&tableCount))
+	assertions.Equal(4, tableCount)
+	ownedTemp := e.tempDirectory
+	requirements.NoError(e.Close())
+	assertions.Nil(e.emailWorkMemo)
+	if e.ownTempDirectory {
+		_, err := os.Stat(ownedTemp)
+		assertions.True(os.IsNotExist(err))
+	}
+	_, err = os.Stat(CacheStatePath(e.analyticsDir))
+	assertions.NoError(err, "Close preserves the committed archive publication")
+}

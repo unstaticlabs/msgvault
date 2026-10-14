@@ -284,6 +284,14 @@ a concurrent raw update stops export even when the linking headers stay the
 same. Identical raw retries do not advance that revision or rebuild analytics. Consolidated provider archive/deletion is unavailable: open an
 individual item for its existing source actions.
 
+Related-email reads retain up to four native DuckDB projections for the current
+publication, selected accounts and effective access scope. Oversized populations
+release their Go graph and read selected copies from those native relations;
+page, count and inspector requests reuse the partition. Retained Go evidence is
+charged against a shared 64 MiB budget. This is not a total process-memory limit:
+the existing DuckDB 512 MB memory and 2 GB temporary-spill policy applies
+separately, and initial graph construction and response arrays are transient.
+
 ### Prepare an existing email archive
 
 New email ingestion extracts evidence with message persistence. For existing

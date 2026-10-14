@@ -34,42 +34,8 @@ func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request Expl
 	if err != nil {
 		return "", nil, nil, err
 	}
-	table := fmt.Sprintf("_email_work_members_%d", e.tempTableSeq.Add(1))
-	if _, err := e.db.ExecContext(ctx, "CREATE TEMP TABLE "+table+" (message_id BIGINT,work_key VARCHAR,handling_state VARCHAR)"); err != nil {
-		return "", nil, nil, err
-	}
-	cleanup := func() { _, _ = e.db.Exec("DROP TABLE IF EXISTS " + table) }
-	var values []string
-	var args []any
-	flush := func() error {
-		if len(values) == 0 {
-			return nil
-		}
-		_, err := e.db.ExecContext(ctx, "INSERT INTO "+table+" VALUES "+strings.Join(values, ","), args...)
-		values = nil
-		args = nil
-		return err
-	}
-	for i, members := range population.components {
-		seed := population.canonicalSeeds[i]
-		if seed.UID == "" {
-			continue
-		} // Unprocessed legacy mail stays readable as ordinary rows.
-		for _, id := range members {
-			values = append(values, "(?,?,?)")
-			args = append(args, id, "email-work:"+seed.UID, population.handling[i].State)
-			if len(values) == 1000 {
-				if err := flush(); err != nil {
-					cleanup()
-					return "", nil, nil, err
-				}
-			}
-		}
-	}
-	if err := flush(); err != nil {
-		cleanup()
-		return "", nil, nil, err
-	}
+	table := population.relations.members
+	cleanup := func() {}
 	// Conditions and ranking are evaluated once on witnesses. Complete permitted
 	// work families, including completed outbound copies outside Inbox, are then
 	// projected from the same scoped map. No account outside it enters the row.
@@ -165,18 +131,4 @@ func emailWorkSummary(population *emailWorkPopulation, key string) *EmailWorkSum
 	slices.Sort(sources)
 	sources = slices.Compact(sources)
 	return &EmailWorkSummary{UID: uid, State: handling.State, SourceIDs: sources, OutstandingCount: len(handling.OutstandingEventIDs), EvidenceCount: len(handling.OutboundEvidenceIDs), Reasons: slices.Clone(handling.Reasons)}
-}
-
-func validateEmailWorkSelection(population *emailWorkPopulation, keys []string) error {
-	for _, key := range keys {
-		if !strings.HasPrefix(key, "email-work:") {
-			continue
-		}
-		uid := strings.TrimPrefix(key, "email-work:")
-		component, err := population.resolveAlias(uid)
-		if err != nil || population.canonicalSeeds[component].UID != uid {
-			return ErrEmailWorkRevisionChanged
-		}
-	}
-	return nil
 }

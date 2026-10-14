@@ -33,11 +33,10 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 	if request.Page.Offset > 0 && request.ExpectedCacheRevision == "" {
 		return nil, fmt.Errorf("%w: paginated members require a cache revision", ErrInvalidExploreRequest)
 	}
-	component, err := population.resolveAlias(request.UID)
+	alias, err := e.emailWorkAliasLocked(ctx, population, request.UID)
 	if err != nil {
 		return nil, err
 	}
-	alias := population.seeds[request.UID]
 	if e.sqliteDB != nil {
 		var live sql.NullInt64
 		var source sql.NullInt64
@@ -51,70 +50,90 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 		if !live.Valid {
 			return nil, store.ErrEmailWorkAliasGone
 		}
-		if live.Int64 != alias.LiveMessageID.Int64 || !source.Valid || source.Int64 != population.activities[live.Int64].SourceID {
+		if live.Int64 != alias.seed.LiveMessageID.Int64 || !source.Valid || source.Int64 != alias.sourceID {
 			return nil, ErrEmailWorkRevisionChanged
 		}
 	}
-	canonical := population.canonicalSeeds[component].UID
-	ids := population.components[component]
+	var canonical, summaryJSON, handlingJSON string
+	var total int
+	if err := e.db.QueryRowContext(ctx, "SELECT uid,member_count,summary,handling FROM "+population.relations.components+" WHERE component=?", alias.component).Scan(&canonical, &total, &summaryJSON, &handlingJSON); err != nil {
+		return nil, err
+	}
+	var summary EmailWorkSummary
+	if err := json.Unmarshal([]byte(summaryJSON), &summary); err != nil {
+		return nil, err
+	}
+	var handling store.EmailWorkHandling
+	if err := json.Unmarshal([]byte(handlingJSON), &handling); err != nil {
+		return nil, err
+	}
 	limit := request.Page.Limit
 	if limit == 0 {
 		limit = defaultExploreLimit
 	}
-	page := ids[min(request.Page.Offset, len(ids)):min(request.Page.Offset+limit, len(ids))]
-	handling := population.handling[component]
-	summary := emailWorkSummary(population, "email-work:"+canonical)
-	response := &EmailWorkMembersResponse{RecoverySnapshot: population.recoverySnapshot, LocalActions: []store.EmailWorkAction{}, UID: canonical, RequestedUID: request.UID, CacheRevision: population.revision, Members: []EmailWorkMemberFact{}, TotalCount: len(ids), Summary: *summary, OutstandingMessageIDs: slices.Clone(handling.OutstandingEventIDs), EvidenceMessageIDs: slices.Clone(handling.OutboundEvidenceIDs)}
-	for _, action := range population.localActions {
-		for _, target := range action.Targets {
-			seed := population.seeds[target]
-			if seed.LiveMessageID.Valid && slices.Contains(ids, seed.LiveMessageID.Int64) {
-				response.LocalActions = append(response.LocalActions, action)
-				break
-			}
+	page := []int64{}
+	if err := scanEmailWorkRows(ctx, e.db, "SELECT message_id FROM "+population.relations.members+" WHERE component=? ORDER BY member_ordinal LIMIT ? OFFSET ?", []any{alias.component, limit, request.Page.Offset}, func(rows *sql.Rows) error {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
 		}
+		page = append(page, id)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	response := &EmailWorkMembersResponse{RecoverySnapshot: population.recoverySnapshot, LocalActions: []store.EmailWorkAction{}, UID: canonical, RequestedUID: request.UID, CacheRevision: population.revision, Members: []EmailWorkMemberFact{}, TotalCount: total, Summary: summary, OutstandingMessageIDs: slices.Clone(handling.OutstandingEventIDs), EvidenceMessageIDs: slices.Clone(handling.OutboundEvidenceIDs)}
+	if err := scanEmailWorkRows(ctx, e.db, "SELECT payload FROM "+population.relations.actions+" WHERE component=? ORDER BY uid", []any{alias.component}, func(rows *sql.Rows) error {
+		var payload string
+		if err := rows.Scan(&payload); err != nil {
+			return err
+		}
+		var action store.EmailWorkAction
+		if err := json.Unmarshal([]byte(payload), &action); err != nil {
+			return err
+		}
+		response.LocalActions = append(response.LocalActions, action)
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	if len(page) == 0 {
 		return response, nil
 	}
 	scanIDs := slices.Clone(page)
-	if !slices.Contains(scanIDs, alias.LiveMessageID.Int64) {
-		scanIDs = append(scanIDs, alias.LiveMessageID.Int64)
+	if !slices.Contains(scanIDs, alias.seed.LiveMessageID.Int64) {
+		scanIDs = append(scanIDs, alias.seed.LiveMessageID.Int64)
 	}
 	args := make([]any, len(scanIDs))
 	for i, id := range scanIDs {
 		args[i] = id
 	}
-	rows, err := e.db.QueryContext(ctx, `SELECT message_id,source_id,source_type,source_identifier,source_message_id,conversation_id,occurred_at,
+	rows, err := e.db.QueryContext(ctx, `SELECT message_id,analytical_entries.source_id,source_type,source_identifier,source_message_id,conversation_id,occurred_at,
  COALESCE(NULLIF(subject,''),snippet,''),snippet,inbox_state,read_state,
- COALESCE((SELECT CAST(to_json(list_sort(list_distinct(list(l.name)))) AS VARCHAR) FROM message_labels ml JOIN labels l ON l.id=ml.label_id WHERE ml.message_id=analytical_entries.message_id),'[]')
- FROM analytical_entries WHERE message_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(scanIDs)), ",")+`) ORDER BY message_id`, args...)
+ COALESCE((SELECT CAST(to_json(list_sort(list_distinct(list(l.name)))) AS VARCHAR) FROM message_labels ml JOIN labels l ON l.id=ml.label_id WHERE ml.message_id=analytical_entries.message_id),'[]'),w.uid,w.activity
+ FROM analytical_entries JOIN `+population.relations.members+` w USING(message_id) WHERE message_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(scanIDs)), ",")+`) ORDER BY message_id`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	liveSeeds := map[int64]string{}
-	for _, seed := range population.seeds {
-		if seed.LiveMessageID.Valid {
-			liveSeeds[seed.LiveMessageID.Int64] = seed.UID
-		}
-	}
 	for rows.Next() {
 		member := EmailWorkMemberFact{LocalReadState: store.EmailWorkUnknown}
-		var labelsJSON string
-		if err := rows.Scan(&member.MessageID, &member.SourceID, &member.SourceType, &member.SourceIdentifier, &member.SourceMessageID, &member.ConversationID, &member.OccurredAt, &member.Title, &member.Preview, &member.InboxState, &member.ReadState, &labelsJSON); err != nil {
+		var labelsJSON, activityJSON string
+		if err := rows.Scan(&member.MessageID, &member.SourceID, &member.SourceType, &member.SourceIdentifier, &member.SourceMessageID, &member.ConversationID, &member.OccurredAt, &member.Title, &member.Preview, &member.InboxState, &member.ReadState, &labelsJSON, &member.MessageUID, &activityJSON); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(labelsJSON), &member.Labels); err != nil {
 			return nil, err
 		}
-		activity := population.activities[member.MessageID]
+		var activity store.EmailWorkActivity
+		if err := json.Unmarshal([]byte(activityJSON), &activity); err != nil {
+			return nil, err
+		}
 		member.RFCMessageID = activity.Linkage.MessageID
 		member.ReplyIDs = slices.Clone(activity.Linkage.Replies)
 		member.ReferenceIDs = slices.Clone(activity.Linkage.References)
 		member.AttachedOriginalIDs = slices.Clone(activity.Linkage.AttachedOriginals)
 		member.UnavailableReasons = slices.Clone(activity.UnavailableReasons)
-		member.MessageUID = liveSeeds[member.MessageID]
 		member.ProviderThreadID = activity.ProviderThreadID
 		member.LinkageOutcome = activity.Linkage.Outcome
 		member.NativeSent = activity.PositiveSent
@@ -123,7 +142,7 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 		member.AttributionComplete = activity.AttributionComplete
 		member.ConfirmedSourceSender = activity.ConfirmedSourceSender
 		member.Preview = FlattenSnippet(member.Preview)
-		if member.MessageID == alias.LiveMessageID.Int64 {
+		if member.MessageID == alias.seed.LiveMessageID.Int64 {
 			response.RequestedAnchor = &member
 		}
 		if slices.Contains(page, member.MessageID) {

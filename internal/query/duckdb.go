@@ -69,7 +69,8 @@ type DuckDBEngine struct {
 	// duckDBQueryConcurrency). Acquired at the top of each expensive public
 	// method via acquireQuerySlot; cheap PK/detail lookups are not gated so
 	// they are never starved behind a slow aggregate.
-	querySem *semaphore.Weighted
+	querySem     *semaphore.Weighted
+	querySemInit sync.Once
 
 	// optionalCols tracks which columns exist in each Parquet table's schema.
 	// Used to gracefully handle stale cache files that lack newer columns
@@ -268,6 +269,22 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 
 // Close releases DuckDB resources, including any cached search temp table.
 func (e *DuckDBEngine) Close() error {
+	e.querySemInit.Do(func() {
+		if e.querySem == nil {
+			e.querySem = semaphore.NewWeighted(duckDBQueryConcurrency)
+		}
+	})
+	if err := e.querySem.Acquire(context.Background(), 1); err != nil {
+		return fmt.Errorf("close work-item projections: %w", err)
+	}
+	defer e.querySem.Release(1)
+	e.emailWorkMu.Lock()
+	var workCleanupErr error
+	for _, p := range e.emailWorkMemo {
+		workCleanupErr = errors.Join(workCleanupErr, e.dropEmailWorkRelations(p))
+	}
+	e.emailWorkMemo = nil
+	e.emailWorkMu.Unlock()
 	e.searchCacheMu.Lock()
 	e.dropSearchCache()
 	e.searchCacheMu.Unlock()
@@ -276,7 +293,7 @@ func (e *DuckDBEngine) Close() error {
 	if e.ownTempDirectory && e.tempDirectory != "" {
 		cleanupErr = os.RemoveAll(e.tempDirectory)
 	}
-	return errors.Join(closeErr, cleanupErr)
+	return errors.Join(closeErr, cleanupErr, workCleanupErr)
 }
 
 // QuerySQL executes an arbitrary SQL query against the DuckDB engine
@@ -341,9 +358,11 @@ func (e *DuckDBEngine) QuerySQL(
 // entry point that does not call another gated method, so the slots cannot
 // deadlock (the shared cache lock itself nests freely).
 func (e *DuckDBEngine) acquireQuerySlot(ctx context.Context) (func(), error) {
-	if e.querySem == nil {
-		return e.acquireCacheRead(ctx)
-	}
+	e.querySemInit.Do(func() {
+		if e.querySem == nil {
+			e.querySem = semaphore.NewWeighted(duckDBQueryConcurrency)
+		}
+	})
 	if err := e.querySem.Acquire(ctx, 1); err != nil {
 		return nil, fmt.Errorf("acquire query slot: %w", err)
 	}

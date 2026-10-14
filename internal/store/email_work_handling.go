@@ -14,26 +14,26 @@ const EmailWorkUnknown = "unknown"
 // comes from native Sent membership, never messages.is_sent. Incoming is
 // resolved separately from confirmed owner identities in the selected scope.
 type EmailWorkActivity struct {
-	EmailWorkMember
+	EmailWorkMember `json:"member"`
 
-	OccurredAt            time.Time
-	Incoming              bool
-	AttributionComplete   bool
-	UnavailableReasons    []string
-	ConfirmedSourceSender bool
-	PositiveSent          bool
-	Draft                 bool
-	ExternalRecipient     bool
-	LocalHandled          bool
+	OccurredAt            time.Time `json:"occurred_at"`
+	Incoming              bool      `json:"incoming"`
+	AttributionComplete   bool      `json:"attribution_complete"`
+	UnavailableReasons    []string  `json:"unavailable_reasons"`
+	ConfirmedSourceSender bool      `json:"confirmed_source_sender"`
+	PositiveSent          bool      `json:"positive_sent"`
+	Draft                 bool      `json:"draft"`
+	ExternalRecipient     bool      `json:"external_recipient"`
+	LocalHandled          bool      `json:"local_handled"`
 }
 
 // EmailWorkHandling explains outstanding received events and actual outbound
 // evidence. Provider read/unread and Inbox flags do not enter this calculation.
 type EmailWorkHandling struct {
-	State               string
-	OutstandingEventIDs []int64
-	OutboundEvidenceIDs []int64
-	Reasons             []string
+	State               string   `json:"state"`
+	OutstandingEventIDs []int64  `json:"outstanding_event_ids"`
+	OutboundEvidenceIDs []int64  `json:"outbound_evidence_ids"`
+	Reasons             []string `json:"reasons"`
 }
 
 type emailReceivedEvent struct {

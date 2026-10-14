@@ -21,6 +21,8 @@ type EmailWorkScope struct {
 }
 
 type emailWorkPopulation struct {
+	relations           emailWorkRelations
+	builtCost           int64
 	revision            string
 	recoverySnapshot    string
 	key                 string
@@ -71,6 +73,16 @@ func (e *DuckDBEngine) emailWorkPopulationLocked(ctx context.Context, scope Emai
 			return population, nil
 		}
 	}
+	// Query serialization means no other request can still borrow an evicted
+	// handle. Drop transactionally before replacement to bound native resources.
+	for i, item := range slices.Backward(e.emailWorkMemo) {
+		if item.revision != state.Revision() || len(e.emailWorkMemo) >= emailWorkMemoEntries {
+			if err := e.dropEmailWorkRelations(item); err != nil {
+				return nil, err
+			}
+			e.emailWorkMemo = append(e.emailWorkMemo[:i], e.emailWorkMemo[i+1:]...)
+		}
+	}
 	population, err := e.readEmailWorkPopulation(ctx, sources)
 	if err != nil {
 		return nil, err
@@ -78,19 +90,24 @@ func (e *DuckDBEngine) emailWorkPopulationLocked(ctx context.Context, scope Emai
 	population.key = key
 	population.revision = state.Revision()
 	population.recoverySnapshot = state.RecoverySnapshot
-	if population.cost <= emailWorkMemoBudget {
-		e.emailWorkMemo = append([]*emailWorkPopulation{population}, e.emailWorkMemo...)
-		var cost int64
-		keep := 0
-		for _, item := range e.emailWorkMemo {
-			if keep >= emailWorkMemoEntries || cost+item.cost > emailWorkMemoBudget {
-				break
-			}
-			keep++
-			cost += item.cost
-		}
-		e.emailWorkMemo = e.emailWorkMemo[:keep]
+	population.builtCost = population.cost
+	if err := e.materializeEmailWorkPopulation(ctx, population); err != nil {
+		return nil, err
 	}
+	// Native relations survive large Go populations; aggregate retained Go facts
+	// remain bounded independently of the existing native memory/spill policy.
+	if population.cost > emailWorkMemoBudget {
+		population.releaseGoFacts()
+	}
+	e.emailWorkMemo = append([]*emailWorkPopulation{population}, e.emailWorkMemo...)
+	var retained int64
+	for _, item := range e.emailWorkMemo {
+		if retained+item.cost > emailWorkMemoBudget {
+			item.releaseGoFacts()
+		}
+		retained += item.cost
+	}
+
 	return population, nil
 }
 

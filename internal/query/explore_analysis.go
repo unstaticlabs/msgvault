@@ -469,10 +469,10 @@ func (e *DuckDBEngine) ExploreSelectionStats(ctx context.Context, request Explor
 	}
 	defer cleanup()
 	if population != nil {
-		if err := validateEmailWorkSelection(population, request.IncludedKeys); err != nil {
+		if err := e.validateEmailWorkSelectionLocked(ctx, population, request.IncludedKeys); err != nil {
 			return nil, err
 		}
-		if err := validateEmailWorkSelection(population, request.ExcludedKeys); err != nil {
+		if err := e.validateEmailWorkSelectionLocked(ctx, population, request.ExcludedKeys); err != nil {
 			return nil, err
 		}
 	}
