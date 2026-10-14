@@ -35,6 +35,8 @@ export * from "./bodySearchContext";
 export * from "./buildCLICacheParams";
 export * from "./buildingSummary";
 export * from "./cacheStats";
+export * from "./calendarCoverage";
+export * from "./calendarEventState";
 export * from "./cancelDeletionPathParameters";
 export * from "./cancelDeletionResponse";
 export * from "./candidate";

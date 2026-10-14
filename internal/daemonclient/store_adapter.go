@@ -187,6 +187,7 @@ func generatedDetailToAPIMessage(m *generated.MessageDetail) *store.APIMessage {
 		}
 	}
 	msg := &store.APIMessage{
+		CalendarState:   calendarStateFromGenerated(m.CalendarState),
 		ID:              m.ID,
 		SourceID:        int64Value(m.SourceID),
 		SourceMessageID: stringValue(m.SourceMessageID),

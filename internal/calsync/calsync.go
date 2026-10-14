@@ -255,12 +255,20 @@ func (s *Syncer) syncCalendarFull(
 	}
 	pageToken := resumePageToken
 	finalToken := ""
+	var deferredInstances []gcal.Event
 	ingested := 0
 	limitHit := false
 
 	fail := func(e error) error {
+		if coverageErr := s.markCalendarIncomplete(src.ID); coverageErr != nil {
+			e = errors.Join(e, coverageErr)
+		}
 		_ = s.store.FailSync(syncID, e.Error())
 		return e
+	}
+
+	if err := s.markCalendarIncomplete(src.ID); err != nil {
+		return fail(err)
 	}
 
 	for {
@@ -285,6 +293,21 @@ func (s *Syncer) syncCalendarFull(
 				break
 			}
 			ev := page.Items[i]
+			if ev.RecurringEventID != "" {
+				deferredInstances = append(deferredInstances, ev)
+				ingested++
+				// The pending instances are in memory. A crash must replay the full feed,
+				// including exceptions outside the expansion window, not resume after them.
+				if resumeEligible {
+					checkpoint := cp
+					checkpoint.PageToken = ""
+					if err := s.store.UpdateSyncCheckpoint(syncID, &checkpoint); err != nil {
+						return fail(err)
+					}
+					resumeEligible = false
+				}
+				continue
+			}
 			added, cancelled, err := s.persistOne(src.ID, cal, ev, result)
 			if err != nil {
 				return fail(fmt.Errorf("persist event %s: %w", ev.ID, err))
@@ -325,6 +348,15 @@ func (s *Syncer) syncCalendarFull(
 	// complete, unbounded traversal advances the cursor.
 	if limitHit || s.opts.TimeMin != "" || s.opts.TimeMax != "" {
 		finalToken = ""
+	}
+	if !limitHit {
+		fresh, err := s.store.GetSourceByID(src.ID)
+		if err != nil {
+			return fail(err)
+		}
+		if err := s.refreshOccurrences(ctx, fresh, cal, result, deferredInstances); err != nil {
+			return fail(err)
+		}
 	}
 	if err := s.store.RecomputeConversationStats(src.ID); err != nil {
 		s.logger.Warn("recompute conversation stats failed", "calendar", cal.ID, "error", err)
@@ -577,7 +609,12 @@ func normalizeAccountEmail(email string) string {
 // sourceConfigJSON builds the sync_config payload. account_email is the token
 // key; the rest is descriptive.
 func (s *Syncer) sourceConfigJSON(cal gcal.Calendar) string {
+	var coverage *store.CalendarCoverage
+	if src, err := s.store.GetSourceByIdentifier(s.opts.AccountEmail + "/" + cal.ID); err == nil && src != nil {
+		coverage = store.ParseCalendarCoverage(src.SyncConfig)
+	}
 	return buildSourceConfigJSON(sourceConfig{
+		Coverage:        coverage,
 		AccountEmail:    s.opts.AccountEmail,
 		CalendarID:      cal.ID,
 		CalendarSummary: cal.Summary,

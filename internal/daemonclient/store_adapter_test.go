@@ -2517,3 +2517,37 @@ type readCloserImpl struct {
 func (rc *readCloserImpl) Close() error {
 	return nil
 }
+
+func TestGetCLIAccountsPreservesCalendarCoverage(t *testing.T) {
+	check := assert.New(t)
+	must := require.New(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accounts":[{"id":8,"email":"calendar@example.com/primary","type":"gcal","display_name":"[QA] calendar","message_count":2,"source_deleted_count":0,"last_sync":null,"calendar_coverage":{"start":"2026-01-01T00:00:00Z","end":"2027-01-01T00:00:00Z","refreshed_at":"2026-10-13T00:00:00Z","attempted_at":"2026-10-13T00:00:00Z","complete":true,"status":"complete"}}]}`))
+	}))
+	defer srv.Close()
+	accounts, err := newTestStore(srv, "key").GetCLIAccounts(t.Context())
+	must.NoError(err)
+	must.Len(accounts, 1)
+	must.NotNil(accounts[0].CalendarCoverage)
+	check.True(accounts[0].CalendarCoverage.Complete)
+	check.Equal("2026-01-01T00:00:00Z", accounts[0].CalendarCoverage.Start)
+}
+
+func TestDaemonMessageDetailsPreserveCalendarHistoryState(t *testing.T) {
+	check := assert.New(t)
+	must := require.New(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":41,"subject":"[QA] old occurrence","message_type":"calendar_event","from":"","to":[],"cc":[],"bcc":[],"sent_at":"2030-03-01T09:00:00Z","snippet":"","labels":[],"has_attach":false,"size_bytes":0,"body":"[QA] historical body","attachments":[],"calendar_state":{"status":"superseded","source_status_before_superseded":"confirmed","recurring_event_id":"series","original_start_time":"2030-03-01T09:00:00Z","all_day":false}}`))
+	}))
+	defer srv.Close()
+	message, err := newTestStore(srv, "key").GetMessageContext(t.Context(), 41)
+	must.NoError(err)
+	must.NotNil(message.CalendarState)
+	check.Equal("superseded", message.CalendarState.Status)
+	detail := queryDetailFromAPIMessage(message)
+	must.NotNil(detail.CalendarState)
+	check.Equal("confirmed", detail.CalendarState.SourceStatusBeforeSuperseded)
+	check.Equal("series", detail.CalendarState.RecurringEventID)
+}

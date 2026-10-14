@@ -7,6 +7,8 @@ package query
 import (
 	"maps"
 	"time"
+
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // AggregateRow represents a single row in an aggregate view.
@@ -61,20 +63,21 @@ type DeletionTarget struct {
 
 // MessageDetail represents a full message with body and attachments.
 type MessageDetail struct {
-	ID                   int64      `json:"id"`
-	SourceID             int64      `json:"source_id,omitempty"`
-	SourceMessageID      string     `json:"source_message_id"`
-	ConversationID       int64      `json:"conversation_id"`
-	SourceConversationID string     `json:"source_conversation_id"` // Gmail Thread ID
-	Subject              string     `json:"subject"`
-	MessageType          string     `json:"message_type,omitempty"`
-	Snippet              string     `json:"snippet"`
-	SentAt               time.Time  `json:"sent_at"`
-	ReceivedAt           *time.Time `json:"received_at,omitempty"`
-	DeletedAt            *time.Time `json:"deleted_at,omitempty"` // When message was deleted from source (nil if not deleted)
-	SizeEstimate         int64      `json:"size_estimate"`
-	HasAttachments       bool       `json:"has_attachments"`
-	IsFromMe             bool       `json:"is_from_me"`
+	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
+	ID                   int64                     `json:"id"`
+	SourceID             int64                     `json:"source_id,omitempty"`
+	SourceMessageID      string                    `json:"source_message_id"`
+	ConversationID       int64                     `json:"conversation_id"`
+	SourceConversationID string                    `json:"source_conversation_id"` // Gmail Thread ID
+	Subject              string                    `json:"subject"`
+	MessageType          string                    `json:"message_type,omitempty"`
+	Snippet              string                    `json:"snippet"`
+	SentAt               time.Time                 `json:"sent_at"`
+	ReceivedAt           *time.Time                `json:"received_at,omitempty"`
+	DeletedAt            *time.Time                `json:"deleted_at,omitempty"` // When message was deleted from source (nil if not deleted)
+	SizeEstimate         int64                     `json:"size_estimate"`
+	HasAttachments       bool                      `json:"has_attachments"`
+	IsFromMe             bool                      `json:"is_from_me"`
 
 	// Participants
 	From []Address `json:"from"`
@@ -357,10 +360,11 @@ func DefaultAggregateOptions() AggregateOptions {
 
 // AccountInfo represents a source account.
 type AccountInfo struct {
-	ID          int64
-	SourceType  string
-	Identifier  string // email address
-	DisplayName string
+	CalendarCoverage *store.CalendarCoverage `json:"calendar_coverage,omitempty"`
+	ID               int64
+	SourceType       string
+	Identifier       string // email address
+	DisplayName      string
 }
 
 // StatsOptions configures a stats query.

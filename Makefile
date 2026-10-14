@@ -37,7 +37,7 @@ PG_TEST_PARALLEL ?= 4
 # `make test` and `make test-pg-shipped` still run every package.
 SHARDED_TEST_PKGS := ./cmd/msgvault/cmd ./internal/store ./internal/api
 TEST_SHARDS ?= 4
-GOLANGCI_LINT_VERSION ?= v2.13.1
+GOLANGCI_LINT_VERSION ?= v2.14.0
 GOVULNCHECK_VERSION ?= v1.7.0
 GO_INSTALL_BIN := $(shell go env GOBIN)
 ifeq ($(strip $(GO_INSTALL_BIN)),)

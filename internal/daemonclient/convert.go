@@ -401,6 +401,7 @@ func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query
 		return &query.MessageDetail{}
 	}
 	return &query.MessageDetail{
+		CalendarState:        calendarStateFromGenerated(resp.CalendarState),
 		ID:                   resp.ID,
 		SourceMessageID:      resp.SourceMessageID,
 		ConversationID:       resp.ConversationID,
@@ -465,6 +466,7 @@ func cliAccountsFromGenerated(resp *generated.ListCLIAccountsResponse) []CLIAcco
 	out := make([]CLIAccount, len(resp.Accounts))
 	for i, account := range resp.Accounts {
 		out[i] = CLIAccount{
+			CalendarCoverage:   calendarCoverageFromGenerated(account.CalendarCoverage),
 			ID:                 account.ID,
 			Email:              account.Email,
 			Type:               account.Type,
@@ -884,4 +886,24 @@ func intValue(value *int64) int {
 		return 0
 	}
 	return int(*value)
+}
+
+func calendarCoverageFromGenerated(c *generated.CalendarCoverage) *store.CalendarCoverage {
+	if c == nil {
+		return nil
+	}
+	return &store.CalendarCoverage{Start: stringValue(c.Start), End: stringValue(c.End), Complete: c.Complete, Status: c.Status, RefreshedAt: stringValue(c.RefreshedAt), AttemptedAt: stringValue(c.AttemptedAt)}
+}
+
+func calendarStateFromGenerated(state *generated.CalendarEventState) *store.CalendarEventState {
+	if state == nil {
+		return nil
+	}
+	return &store.CalendarEventState{
+		Status: stringValue(state.Status), Start: stringValue(state.Start), End: stringValue(state.End),
+		TimeZone: stringValue(state.TimeZone), AllDay: state.AllDay, Recurrence: state.Recurrence,
+		RecurringEventID: stringValue(state.RecurringEventID), OriginalStartTime: stringValue(state.OriginalStartTime),
+		SourceStatusBeforeSuperseded: stringValue(state.SourceStatusBeforeSuperseded),
+		SupersededReason:             stringValue(state.SupersededReason), SupersededAt: stringValue(state.SupersededAt),
+	}
 }

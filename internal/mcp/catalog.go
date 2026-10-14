@@ -836,7 +836,11 @@ func searchPersonFilesDefinition(_ *handlers) toolDefinition {
 
 // The following named response types make every catalog output schema visible
 // without changing existing JSON field names.
-type searchMetadataResponse paginatedResponse[query.MessageSummary]
+type searchMetadataResponse struct {
+	paginatedResponse[query.MessageSummary]
+
+	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
+}
 type searchInMessageResponse paginatedResponse[messageMatch]
 type listMessagesResponse paginatedResponse[query.MessageSummary]
 type aggregateResponse struct {

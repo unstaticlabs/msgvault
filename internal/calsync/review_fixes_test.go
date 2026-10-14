@@ -40,6 +40,8 @@ func TestFull_LimitDoesNotAdvanceCursor(t *testing.T) {
 	src := primarySource(t, st)
 	assert.Equal(2, countMessages(t, st, src.ID), "only --limit events ingested")
 	assert.Empty(src.SyncCursor.String, "a --limit run must NOT advance the incremental cursor")
+	require.NotNil(store.ParseCalendarCoverage(src.SyncConfig))
+	assert.False(store.ParseCalendarCoverage(src.SyncConfig).Complete, "limited master traversal cannot claim calendar coverage")
 
 	// A later unlimited full sync re-traverses everything and DOES advance.
 	s2 := New(m, st, Options{AccountEmail: testAccount}).WithLogger(quietLogger())

@@ -47,6 +47,7 @@ const participantSummarySenderSQL = participantDisplaySQL + ` as from_display,
 
 // APIMessage represents a message for API responses.
 type APIMessage struct {
+	CalendarState        *CalendarEventState
 	ID                   int64
 	SourceID             int64
 	SourceMessageID      string
@@ -200,7 +201,8 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 			m.has_attachments,
 			m.size_estimate,
 			m.is_from_me,
-			m.deleted_from_source_at
+			m.deleted_from_source_at,
+ m.metadata
 		FROM messages m
 		LEFT JOIN message_recipients mr ON mr.id = (
 			SELECT mr2.id FROM message_recipients mr2
@@ -213,6 +215,7 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 	`, participantSummarySenderSQL)
 
 	var m APIMessage
+	var metadata sql.NullString
 	// sentAt is a COALESCE expression; use nullableTimestamp so
 	// SQLite TEXT results parse correctly. deletedAt is a real
 	// TIMESTAMP column but routing it through the same scanner
@@ -237,6 +240,7 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 		&m.SizeEstimate,
 		&isFromMe,
 		&deletedAt,
+		&metadata,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("message %d: %w", id, ErrMessageNotFound)
@@ -244,6 +248,7 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 	if err != nil {
 		return nil, err
 	}
+	m.CalendarState = ParseCalendarEventState(m.MessageType, metadata)
 	m.IsFromMe = isFromMe.Bool
 	if sentAt.Valid {
 		m.SentAt = sentAt.Time

@@ -66,7 +66,8 @@ msgvault sync-calendar you@gmail.com --full --after 2020-01-01 --before 2024-12-
 
 The first run (or `--full`) enumerates and registers calendars and downloads
 events. Subsequent runs are incremental, using the Calendar `syncToken` to fetch
-only what changed. Interrupted full syncs resume from a checkpoint; pass
+only what changed in the series/one-off feed. Each successful run also refreshes
+expanded recurring occurrences over a bounded window. Interrupted full syncs resume from a checkpoint; pass
 `--noresume` to start over.
 
 | Flag | Description |
@@ -91,11 +92,74 @@ Each event is stored as a searchable record with `message_type = calendar_event`
   participants, so they dedupe with your email contacts.
 - The **subject** is the event summary; the searchable body includes the title,
   time range, location, description, and attendee names.
-- **Recurring events** are grouped into one conversation titled by the series;
-  individually edited occurrences keep their own details.
+- **Recurring events** retain their series master and archive individual
+  occurrences, grouped into the same conversation. Moved occurrences keep their
+  original-start identity while their stored start time and details change.
+  Timed occurrences retain timezone offsets; all-day occurrences retain their
+  date-only start and exclusive end.
 - **Cancelled events are kept**, marked cancelled rather than deleted, so your
   archive preserves that a meeting once existed.
 - The full original event record is retained for fidelity.
+
+## Recurring occurrence coverage
+
+Series rules are an archive record, not a list of appointments. In addition to
+that master feed, every full or incremental sync asks Google to expand recurring
+instances (`singleEvents=true`) for the past year through the next year. The
+expanded request never reuses the master feed's sync token.
+
+`--after` and `--before` override the occurrence window as well as bounding a
+full master traversal. With only one boundary, expansion covers two years from
+that boundary (or the two years ending at it). For a different historical or
+future window, run an explicitly bounded full sync:
+
+```bash
+msgvault sync-calendar you@gmail.com --full --after 2026-01-01 --before 2027-01-01
+```
+
+Date boundaries are UTC instants. An event that crosses a boundary may be
+included because Google's `timeMin` tests its end and `timeMax` tests its start.
+All-day date values remain date-only in stored event metadata and occurrence
+identities. Reconciliation converts their interval boundaries using the event's
+timezone, falling back to the calendar timezone; it never treats a local day as
+a UTC day. Missing timezone information makes coverage incomplete instead of
+retiring an event whose relationship to the window is unknown.
+
+The occurrence refresh fetches every page before publishing occurrences,
+including moved and cancelled exception records delivered by the master feed. A
+failed page leaves the previous occurrence data in place and reports incomplete
+coverage; the master token does not advance. Full traversals containing deferred exceptions restart
+from the beginning after interruption so exceptions cannot be skipped. Retry the same command after the
+provider is available. Moved events and cancelled instances upsert by series ID
+and original start, so retries do not create a second copy. One-off events are
+not re-ingested by the expansion phase.
+
+Source status (`GET /api/v1/sources/status`) and account enumeration expose
+`calendar_coverage`: the last successful start/end and refresh time, the latest
+attempt time, and whether the latest refresh completed. A first failed or
+limited run can have no successful range. Existing sources acquire this metadata
+on their next sync; no database migration or destructive reimport is needed.
+
+MCP `get_stats` and explicit `message_type:calendar_event` metadata/body searches
+include `calendar_cache`. It identifies registered sources with `covered`,
+`incomplete`, `stale` (older than 24 hours), `outside_coverage`, `mixed`, or
+`unavailable` status. Requests without both date boundaries cannot claim complete
+window coverage. This metadata travels through local and daemon-backed clients.
+
+**An empty archive result does not establish a free schedule.** Registration may
+exclude read-only calendars unless `--all-calendars` or an explicit calendar
+selection was used. Provider failures, an incomplete refresh, stale data, and
+searches outside the expanded window all limit the answer. Use live Google
+Calendar for authoritative availability. Series masters and cancelled events
+remain searchable history; inspect event metadata before counting appointments. `get_message` and API message details expose
+`calendar_state`, including recurrence identity, interval and archive status.
+When a completed window no longer contains a previously active occurrence (for
+example after changing a weekly rule to monthly), that occurrence is retained
+with `status=superseded`, its prior provider status and a timestamp. Its body and
+original provider JSON remain history. Entries outside the refreshed window are
+not retired. Superseded records are history, not current appointments.
+The default occurrence window bounds expansion of infinite recurrence rules;
+it does not cap the archival master history.
 
 ## Find events
 

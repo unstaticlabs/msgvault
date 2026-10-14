@@ -688,7 +688,7 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 		return nil, newInternalError("count metadata search", err)
 	}
 
-	return jsonResult(searchMetadataResponse(newPaginatedResponse(results, totalMatched, offset)))
+	return jsonResult(searchMetadataResponse{paginatedResponse: newPaginatedResponse(results, totalMatched, offset), CalendarCache: h.calendarQueryCache(ctx, q)})
 }
 
 func (h *handlers) searchDocuments(ctx context.Context, req toolRequest) (*toolResult, error) {
@@ -894,6 +894,7 @@ func (h *handlers) searchMessageBodies(ctx context.Context, req toolRequest) (*t
 
 	return jsonResult(searchMessageBodiesResponse{
 		paginatedResponse: newPaginatedResponseNoTotal(data, offset, hasMore),
+		CalendarCache:     h.calendarQueryCache(ctx, q),
 		Mode:              searchModeKeyword,
 	})
 }
@@ -960,6 +961,8 @@ type hybridGenerationSummary = HybridGeneration
 // are only meaningful for vector/hybrid.
 type searchMessageBodiesResponse struct {
 	paginatedResponse[searchMessageItem]
+
+	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
 
 	Mode          string                  `json:"mode"`
 	PoolSaturated bool                    `json:"pool_saturated"`
@@ -1500,31 +1503,32 @@ func lineNumberAt(body string, byteOffset int) int {
 }
 
 type getMessageResponse struct {
-	ID                   int64                  `json:"id"`
-	SourceMessageID      string                 `json:"source_message_id"`
-	ConversationID       int64                  `json:"conversation_id"`
-	SourceConversationID string                 `json:"source_conversation_id"`
-	Subject              string                 `json:"subject"`
-	MessageType          string                 `json:"message_type,omitempty"`
-	Snippet              string                 `json:"snippet"`
-	SentAt               time.Time              `json:"sent_at"`
-	ReceivedAt           *time.Time             `json:"received_at,omitempty"`
-	DeletedAt            *time.Time             `json:"deleted_at,omitempty"`
-	SizeEstimate         int64                  `json:"size_estimate"`
-	HasAttachments       bool                   `json:"has_attachments"`
-	From                 []query.Address        `json:"from"`
-	To                   []query.Address        `json:"to"`
-	Cc                   []query.Address        `json:"cc"`
-	Bcc                  []query.Address        `json:"bcc"`
-	BodyText             string                 `json:"body_text"`
-	BodyHTML             string                 `json:"body_html"`
-	BodyFormat           string                 `json:"body_format,omitempty"`
-	BodyLength           int                    `json:"body_length"`
-	BodyReturned         int                    `json:"body_returned"`
-	Offset               int                    `json:"offset"`
-	HasMore              bool                   `json:"has_more"`
-	Labels               []string               `json:"labels"`
-	Attachments          []query.AttachmentInfo `json:"attachments"`
+	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
+	ID                   int64                     `json:"id"`
+	SourceMessageID      string                    `json:"source_message_id"`
+	ConversationID       int64                     `json:"conversation_id"`
+	SourceConversationID string                    `json:"source_conversation_id"`
+	Subject              string                    `json:"subject"`
+	MessageType          string                    `json:"message_type,omitempty"`
+	Snippet              string                    `json:"snippet"`
+	SentAt               time.Time                 `json:"sent_at"`
+	ReceivedAt           *time.Time                `json:"received_at,omitempty"`
+	DeletedAt            *time.Time                `json:"deleted_at,omitempty"`
+	SizeEstimate         int64                     `json:"size_estimate"`
+	HasAttachments       bool                      `json:"has_attachments"`
+	From                 []query.Address           `json:"from"`
+	To                   []query.Address           `json:"to"`
+	Cc                   []query.Address           `json:"cc"`
+	Bcc                  []query.Address           `json:"bcc"`
+	BodyText             string                    `json:"body_text"`
+	BodyHTML             string                    `json:"body_html"`
+	BodyFormat           string                    `json:"body_format,omitempty"`
+	BodyLength           int                       `json:"body_length"`
+	BodyReturned         int                       `json:"body_returned"`
+	Offset               int                       `json:"offset"`
+	HasMore              bool                      `json:"has_more"`
+	Labels               []string                  `json:"labels"`
+	Attachments          []query.AttachmentInfo    `json:"attachments"`
 }
 
 func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult, error) {
@@ -1594,6 +1598,7 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 	}
 
 	return jsonResult(getMessageResponse{
+		CalendarState:        msg.CalendarState,
 		ID:                   msg.ID,
 		SourceMessageID:      msg.SourceMessageID,
 		ConversationID:       msg.ConversationID,
@@ -1967,9 +1972,10 @@ func (h *handlers) listMessages(ctx context.Context, req toolRequest) (*toolResu
 // VectorSearch is omitempty so archives without vector search do not
 // surface an empty sub-object to callers.
 type getStatsResponse struct {
-	Stats        *query.TotalStats   `json:"stats"`
-	Accounts     []query.AccountInfo `json:"accounts"`
-	VectorSearch *vector.StatsView   `json:"vector_search,omitempty"`
+	CalendarCache *CalendarCache      `json:"calendar_cache,omitempty"`
+	Stats         *query.TotalStats   `json:"stats"`
+	Accounts      []query.AccountInfo `json:"accounts"`
+	VectorSearch  *vector.StatsView   `json:"vector_search,omitempty"`
 }
 
 func (h *handlers) getStats(ctx context.Context, _ toolRequest) (*toolResult, error) {
@@ -1989,9 +1995,10 @@ func (h *handlers) getStats(ctx context.Context, _ toolRequest) (*toolResult, er
 	}
 
 	return jsonResult(getStatsResponse{
-		Stats:        stats,
-		Accounts:     accounts,
-		VectorSearch: vs,
+		CalendarCache: calendarCache(accounts, nil),
+		Stats:         stats,
+		Accounts:      accounts,
+		VectorSearch:  vs,
 	})
 }
 

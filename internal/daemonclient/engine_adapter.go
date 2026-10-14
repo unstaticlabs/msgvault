@@ -778,6 +778,7 @@ func queryDetailFromAPIMessage(msg *store.APIMessage) *query.MessageDetail {
 		return nil
 	}
 	detail := &query.MessageDetail{
+		CalendarState:        msg.CalendarState,
 		ID:                   msg.ID,
 		SourceID:             msg.SourceID,
 		SourceMessageID:      msg.SourceMessageID,
@@ -1321,10 +1322,11 @@ func (e *Engine) ListAccounts(ctx context.Context) ([]query.AccountInfo, error) 
 	result := make([]query.AccountInfo, len(accounts))
 	for i, acc := range accounts {
 		result[i] = query.AccountInfo{
-			ID:          acc.ID,
-			SourceType:  acc.Type,
-			Identifier:  acc.Email,
-			DisplayName: acc.DisplayName,
+			CalendarCoverage: acc.CalendarCoverage,
+			ID:               acc.ID,
+			SourceType:       acc.Type,
+			Identifier:       acc.Email,
+			DisplayName:      acc.DisplayName,
 		}
 	}
 	return result, nil
