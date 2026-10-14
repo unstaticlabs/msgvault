@@ -135,6 +135,9 @@ func seed(destination string) error {
 			}
 		}
 	}
+	if _, err = st.BackfillFTS(nil); err != nil {
+		return err
+	}
 	for _, role := range []authz.Role{authz.RoleMember, authz.RoleViewer} {
 		address := fmt.Sprintf("qa-%s@example.test", role)
 		user, userErr := st.RecordUserLogin(ctx, store.UserLogin{Issuer: "https://synthetic-idp.example.test", Subject: string(role), Email: address, DisplayName: "[QA] " + string(role), Role: string(role)})

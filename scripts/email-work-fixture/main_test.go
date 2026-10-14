@@ -32,11 +32,14 @@ func TestSeedCreatesOnlyNewSyntheticNativeArchive(t *testing.T) {
 	st, err := store.Open(filepath.Join(destination, "msgvault.db"))
 	requirements.NoError(err)
 	t.Cleanup(func() { requirements.NoError(st.Close()) })
-	for table, count := range map[string]int{"sources": 3, "messages": 10, "message_raw": 9, "email_work_seeds": 10} {
+	for table, count := range map[string]int{"sources": 3, "messages": 10, "message_raw": 9, "email_work_seeds": 10, "messages_fts": 10} {
 		var actual int
 		requirements.NoError(st.DB().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&actual))
 		requirements.Equal(count, actual, table)
 	}
+	var searchable int
+	requirements.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH '"Arrange site access"'`).Scan(&searchable))
+	requirements.Equal(3, searchable, "candidate picker must see all three real subject matches")
 	body, err := os.ReadFile(filepath.Join(destination, "qa-work-items.json"))
 	requirements.NoError(err)
 	var aliases map[string]string
