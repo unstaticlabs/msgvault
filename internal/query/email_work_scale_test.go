@@ -50,58 +50,60 @@ func emailWorkScaleFixture(t *testing.T) *DuckDBEngine {
 }
 
 func TestEmailWorkLargeScopeReusesPublication(t *testing.T) {
+	checks := assert.New(t)
+	must := require.New(t)
 	e := emailWorkScaleFixture(t)
 	ctx := context.Background()
 	read := func() *emailWorkPopulation {
 		release, err := e.acquireQuerySlot(ctx)
-		require.NoError(t, err)
+		must.NoError(err)
 		defer release()
 		p, err := e.emailWorkPopulationLocked(ctx, EmailWorkScope{AuthorityKey: "synthetic-scale"})
-		require.NoError(t, err)
+		must.NoError(err)
 		return p
 	}
 	cold := time.Now()
 	first := read()
 	t.Logf("cold native projection elapsed=%s charged bytes=%d", time.Since(cold), first.builtCost)
-	assert.Greater(t, first.builtCost, int64(emailWorkMemoBudget))
-	assert.Empty(t, first.activities)
+	checks.Greater(first.builtCost, int64(emailWorkMemoBudget))
+	checks.Empty(first.activities)
 	warm := time.Now()
 	second := read()
 	t.Logf("warm native projection elapsed=%s", time.Since(warm))
-	require.Same(t, first, second, "oversized scoped publication must not repartition for another request")
+	must.Same(first, second, "oversized scoped publication must not repartition for another request")
 	request := ExploreRequest{Context: Context{RowUnit: RowUnitEmailWork, WorkAuthorityKey: "synthetic-scale"}, Page: PageSpec{Limit: 5}}
 	result, err := e.Explore(ctx, request)
-	require.NoError(t, err)
-	assert.Equal(t, int64(98802), result.TotalCount)
-	require.Len(t, result.Rows, 5)
+	must.NoError(err)
+	checks.Equal(int64(98802), result.TotalCount)
+	must.Len(result.Rows, 5)
 	sequence := e.tempTableSeq.Load()
 	targetStarted := time.Now()
 	for id := int64(2200); id < 2300; id++ {
 		response, err := e.EmailWorkMembers(ctx, EmailWorkMembersRequest{Explore: request, UID: fmt.Sprintf("%032x", id), ExpectedCacheRevision: first.revision, Page: PageSpec{Limit: 1}})
-		require.NoError(t, err)
-		require.Len(t, response.Members, 1)
-		assert.Equal(t, id, response.Members[0].MessageID)
+		must.NoError(err)
+		must.Len(response.Members, 1)
+		checks.Equal(id, response.Members[0].MessageID)
 	}
 	t.Logf("100 fixed native target reads elapsed=%s", time.Since(targetStarted))
 	for offset := 0; offset < 1200; offset += 500 {
 		response, err := e.EmailWorkMembers(ctx, EmailWorkMembersRequest{Explore: request, UID: fmt.Sprintf("%032x", 1000), ExpectedCacheRevision: first.revision, Page: PageSpec{Limit: 500, Offset: offset}})
-		require.NoError(t, err)
-		assert.Equal(t, 1200, response.TotalCount)
-		require.Len(t, response.Members, min(500, 1200-offset))
-		assert.Equal(t, int64(1000+offset), response.Members[0].MessageID)
+		must.NoError(err)
+		checks.Equal(1200, response.TotalCount)
+		must.Len(response.Members, min(500, 1200-offset))
+		checks.Equal(int64(1000+offset), response.Members[0].MessageID)
 	}
-	assert.Equal(t, sequence, e.tempTableSeq.Load(), "repeated page/target reads create no new native projection tables")
+	checks.Equal(sequence, e.tempTableSeq.Load(), "repeated page/target reads create no new native projection tables")
 	var planKey, plan string
 	err = e.db.QueryRowContext(ctx, "EXPLAIN ANALYZE SELECT component FROM "+first.relations.aliases+" WHERE uid=?", fmt.Sprintf("%032x", 2200)).Scan(&planKey, &plan)
-	require.NoError(t, err)
-	assert.Contains(t, plan, "Index Scan", "fixed opaque targets use the native UID index rather than scanning the whole projection")
+	must.NoError(err)
+	checks.Contains(plan, "Index Scan", "fixed opaque targets use the native UID index rather than scanning the whole projection")
 	t.Logf("native alias lookup profile: %s", plan)
 	var nativeMemory, nativeSpill int64
-	require.NoError(t, e.db.QueryRowContext(ctx, "SELECT SUM(memory_usage_bytes),SUM(temporary_storage_bytes) FROM duckdb_memory()").Scan(&nativeMemory, &nativeSpill))
+	must.NoError(e.db.QueryRowContext(ctx, "SELECT SUM(memory_usage_bytes),SUM(temporary_storage_bytes) FROM duckdb_memory()").Scan(&nativeMemory, &nativeSpill))
 	t.Logf("native memory bytes=%d; observed temporary spill bytes=%d (separate from retained Go charge)", nativeMemory, nativeSpill)
 	var retained int64
 	for _, handle := range e.emailWorkMemo {
 		retained += handle.cost
 	}
-	assert.LessOrEqual(t, retained, int64(emailWorkMemoBudget))
+	checks.LessOrEqual(retained, int64(emailWorkMemoBudget))
 }
