@@ -69,6 +69,7 @@ var operationMinimumRole = map[string]authz.Role{
 	"previewEmailWorkAction":        authz.RoleMember,
 	"applyEmailWorkAction":          authz.RoleMember,
 	"undoEmailWorkAction":           authz.RoleMember,
+	"exportEmailWorkItem":           authz.RoleViewer,
 	"getEmailWorkMembers":           authz.RoleViewer,
 	"explore":                       authz.RoleViewer,
 	"exploreGroups":                 authz.RoleViewer,

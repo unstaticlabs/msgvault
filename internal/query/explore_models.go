@@ -321,6 +321,7 @@ type EmailWorkMemberFact struct {
 	Preview               string    `json:"preview"`
 	InboxState            string    `json:"inbox_state"`
 	ReadState             string    `json:"read_state"`
+	LocalReadState        string    `json:"local_read_state" enum:"read,unread,unknown"`
 	LinkageOutcome        string    `json:"linkage_outcome"`
 	RFCMessageID          string    `json:"rfc_message_id,omitempty"`
 	ReplyIDs              []string  `json:"reply_ids,omitempty"`

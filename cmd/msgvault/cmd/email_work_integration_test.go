@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -87,8 +89,16 @@ func TestEmailWorkMemberBodyRejectsReusedNativeID(t *testing.T) {
 type emailWorkHTTPNativeStore struct {
 	*storeAPIAdapter
 
-	dbPath string
-	cache  string
+	dbPath    string
+	cache     string
+	beforeRaw func(int64)
+}
+
+func (s *emailWorkHTTPNativeStore) GetArchivedMessageRaw(ctx context.Context, id int64) ([]byte, error) {
+	if s.beforeRaw != nil {
+		s.beforeRaw(id)
+	}
+	return s.storeAPIAdapter.GetArchivedMessageRaw(ctx, id)
 }
 
 func (s *emailWorkHTTPNativeStore) RefreshIdentityDatasets(context.Context) (int64, error) {
@@ -181,6 +191,67 @@ func TestEmailWorkRecoveryThroughAuthenticatedNativeHTTP(t *testing.T) {
 	grouped, err := engine.Explore(ctx, work)
 	requirements.NoError(err)
 	assertions.Equal(int64(1), grouped.TotalCount)
+	exportRequest := api.EmailWorkExportRequest{UID: targets[0].UID, CacheRevision: grouped.CacheRevision}
+	readExport := func(input api.EmailWorkExportRequest) (api.EmailWorkExportManifest, map[string][]byte) {
+		response := post("/api/v1/explore/email-work/export", "synthetic-viewer", input)
+		requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+		assertions.Equal("application/zip", response.Header().Get("Content-Type"))
+		archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+		requirements.NoError(err)
+		contents := map[string][]byte{}
+		for _, entry := range archive.File {
+			stream, err := entry.Open()
+			requirements.NoError(err)
+			content, err := io.ReadAll(stream)
+			requirements.NoError(err)
+			requirements.NoError(stream.Close())
+			assertions.NotContains(entry.Name, "@", "filenames use opaque identity")
+			requirements.NotContains(contents, entry.Name, "each copy is exported once")
+			contents[entry.Name] = content
+		}
+		var manifest api.EmailWorkExportManifest
+		requirements.NoError(json.Unmarshal(contents["manifest.json"], &manifest))
+		assertions.Equal(manifest.State, response.Header().Get("X-Email-Work-Export-State"))
+		return manifest, contents
+	}
+	exported, files := readExport(exportRequest)
+	assertions.Equal("complete", exported.State)
+	requirements.Len(exported.Copies, 2)
+	assertions.Len(files, 3, "two distinct source copies and one manifest")
+	for _, copyEntry := range exported.Copies {
+		assertions.Equal("available", copyEntry.State)
+		expected, err := st.GetMessageRaw(copyEntry.Member.MessageID)
+		requirements.NoError(err)
+		assertions.Equal(expected, files[copyEntry.Filename], "raw MIME bytes and provenance remain paired")
+	}
+	firstCopy := exported.Copies[0]
+	originalRaw, err := st.GetMessageRaw(firstCopy.Member.MessageID)
+	requirements.NoError(err)
+	_, err = st.DB().Exec("DELETE FROM message_raw WHERE message_id=?", firstCopy.Member.MessageID)
+	requirements.NoError(err)
+	partial, partialFiles := readExport(exportRequest)
+	assertions.Equal("partial", partial.State)
+	requirements.Len(partial.Copies, 2, "missing raw never removes provenance")
+	assertions.Len(partialFiles, 2, "missing raw is not fabricated")
+	assertions.Equal("raw_unavailable", partial.Copies[0].State)
+	requirements.NoError(st.UpsertMessageRaw(firstCopy.Member.MessageID, originalRaw))
+	scopedExport := exportRequest
+	scopedExport.Predicate.Filters = []api.ExploreFilter{{Dimension: "source", Values: []string{strconv.FormatInt(sourceIDs[0], 10)}}}
+	scopedManifest, _ := readExport(scopedExport)
+	requirements.Len(scopedManifest.Copies, 1)
+	assertions.Equal(sourceIDs[0], scopedManifest.Copies[0].Member.SourceID)
+	scopedExport.UID = targets[1].UID
+	outside := post("/api/v1/explore/email-work/export", "synthetic-viewer", scopedExport)
+	assertions.Equal(http.StatusNotFound, outside.Code, outside.Body.String())
+	staleExport := exportRequest
+	staleExport.CacheRevision = "old"
+	staleDownload := post("/api/v1/explore/email-work/export", "synthetic-viewer", staleExport)
+	assertions.Equal(http.StatusConflict, staleDownload.Code, staleDownload.Body.String())
+	missingRevision := exportRequest
+	missingRevision.CacheRevision = ""
+	invalidDownload := post("/api/v1/explore/email-work/export", "synthetic-viewer", missingRevision)
+	assertions.Equal(http.StatusBadRequest, invalidDownload.Code, invalidDownload.Body.String())
+
 	retry := post("/api/v1/explore/email-work/actions", "synthetic-member", preview.EmailWorkActionRequest)
 	requirements.Equal(http.StatusOK, retry.Code, retry.Body.String())
 	var retried api.EmailWorkActionResponse
@@ -286,6 +357,32 @@ func TestEmailWorkRecoveryThroughAuthenticatedNativeHTTP(t *testing.T) {
 	reopenedSummary, ok := reopenedRow["email_work"].(map[string]any)
 	requirements.True(ok, reopenedRow)
 	assertions.Equal("unknown", reopenedSummary["state"], "undo preserves the underlying uncertainty instead of inventing a reply")
+	var lastID int64
+	requirements.NoError(st.DB().QueryRow("SELECT MAX(id) FROM messages").Scan(&lastID))
+	oldSeed, err := st.EmailWorkSeedForMessage(ctx, lastID)
+	requirements.NoError(err)
+	var replacementConversation int64
+	requirements.NoError(st.DB().QueryRow("SELECT conversation_id FROM messages WHERE id=?", lastID).Scan(&replacementConversation))
+	native.beforeRaw = func(id int64) {
+		if id != lastID {
+			return
+		}
+		native.beforeRaw = nil
+		_, err := st.DB().Exec("DELETE FROM messages WHERE id=?", id)
+		requirements.NoError(err)
+		replacement, err := st.PersistMessage(&store.MessagePersistData{Message: &store.Message{SourceID: sourceIDs[1], SourceMessageID: "replacement-export", ConversationID: replacementConversation, MessageType: "email"}, RawMIME: []byte("Message-ID: <unrelated-export@example.test>\r\n\r\n[QA] Replacement must not leak")})
+		requirements.NoError(err)
+		requirements.Equal(id, replacement, "real maximum physical ID reuse")
+		fresh, err := st.EmailWorkSeedForMessage(ctx, replacement)
+		requirements.NoError(err)
+		requirements.NotEqual(oldSeed.UID, fresh.UID)
+	}
+	currentExportRevision, ok := reopenedPage["cache_revision"].(string)
+	requirements.True(ok)
+	replacedExport := post("/api/v1/explore/email-work/export", "synthetic-viewer", api.EmailWorkExportRequest{UID: targets[0].UID, CacheRevision: currentExportRevision})
+	assertions.Equal(http.StatusConflict, replacedExport.Code, replacedExport.Body.String())
+	assertions.NotContains(replacedExport.Body.String(), "Replacement must not leak")
+	assertions.NotEqual("application/zip", replacedExport.Header().Get("Content-Type"), "no bytes published before identity verification")
 }
 
 func nativeEmailWorkMCPCaller(t *testing.T, daemon *api.Server) func(string, string, map[string]any) map[string]any {

@@ -144,7 +144,7 @@ func TestBuildCacheLocalWorkRecoveryNativeAndCSV(t *testing.T) {
 			}
 			_, err = buildCache(dbPath, cache, true)
 			requirements.NoError(err)
-			engine, err := query.NewDuckDBEngine(cache, dbPath, nil)
+			engine, err := query.NewDuckDBEngine(cache, dbPath, st.DB())
 			requirements.NoError(err)
 			defer func() { requirements.NoError(engine.Close()) }()
 			request := query.ExploreRequest{Context: query.Context{RowUnit: query.RowUnitEmailWork, WorkAuthorityKey: "synthetic-reader"}}
@@ -185,6 +185,15 @@ func TestBuildCacheLocalWorkRecoveryNativeAndCSV(t *testing.T) {
 			assertions.Contains(members.Summary.Reasons, "local_confirmation")
 			assertions.Len(members.LocalActions, 2)
 			assertions.Len(members.Members, 2)
+			_, err = st.DB().Exec("UPDATE messages SET is_read=FALSE WHERE id=?", ids[0])
+			requirements.NoError(err)
+			preference, err := engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: request, UID: targets[0].UID})
+			requirements.NoError(err)
+			requirements.NotNil(preference.RequestedAnchor)
+			assertions.Equal("unread", preference.RequestedAnchor.LocalReadState)
+			assertions.Equal("handled", preference.Summary.State, "local read marker must not change local handling")
+			assertions.Equal(members.RequestedAnchor.ReadState, preference.RequestedAnchor.ReadState, "local read marker must not replace published mailbox read state")
+
 			// A later real incoming message is outside the fixed local confirmation.
 			incoming, err := st.PersistMessage(&store.MessagePersistData{Message: &store.Message{SourceID: sourceIDs[0], ConversationID: members.Members[0].ConversationID, SourceMessageID: "later-inbound", MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC), Valid: true}}, RawMIME: []byte("Message-ID: <later@example.test>\r\nIn-Reply-To: <message-0@example.test>\r\n\r\n[QA] new request"), Recipients: []store.RecipientSet{{Type: "from", ParticipantIDs: []int64{originalFrom}, EmailAddresses: []string{"requester@example.test"}}, {Type: "to", ParticipantIDs: []int64{originalTo}, EmailAddresses: []string{"account-0@example.test"}}}})
 			requirements.NoError(err)

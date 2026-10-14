@@ -961,6 +961,12 @@ type ApplyEmailWorkActionResponse = EmailWorkActionResponse
 
 type ApplyEmailWorkActionErrorResponse = ErrorResponse
 
+type ExportEmailWorkItemResponse = []byte
+
+type ExportEmailWorkItemErrorResponse = ErrorResponse
+
+type ExportEmailWorkItemErrorResponseJSON = ErrorResponse
+
 type GetEmailWorkMembersResponse = EmailWorkMembersResponse
 
 type GetEmailWorkMembersErrorResponse = ErrorResponse
@@ -3858,6 +3864,14 @@ type ApplyEmailWorkActionResp struct {
 	Body         []byte
 	StatusCode   int
 	JSON200      *ApplyEmailWorkActionResponse
+}
+
+type ExportEmailWorkItemResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON409      *ExportEmailWorkItemErrorResponse
+	JSON503      *ExportEmailWorkItemErrorResponseJSON
 }
 
 type GetEmailWorkMembersResp struct {

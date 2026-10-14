@@ -618,6 +618,24 @@ func (e EmailWorkActionResponseCacheState) Validate() error {
 	}
 }
 
+type EmailWorkMemberFactLocalReadState string
+
+const (
+	EmailWorkMemberFactLocalReadStateRead    EmailWorkMemberFactLocalReadState = "read"
+	EmailWorkMemberFactLocalReadStateUnknown EmailWorkMemberFactLocalReadState = "unknown"
+	EmailWorkMemberFactLocalReadStateUnread  EmailWorkMemberFactLocalReadState = "unread"
+)
+
+// Validate checks if the EmailWorkMemberFactLocalReadState value is valid
+func (e EmailWorkMemberFactLocalReadState) Validate() error {
+	switch e {
+	case EmailWorkMemberFactLocalReadStateRead, EmailWorkMemberFactLocalReadStateUnknown, EmailWorkMemberFactLocalReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkMemberFactLocalReadState value, got: %v", e))
+	}
+}
+
 type EmploymentBodySource string
 
 const (

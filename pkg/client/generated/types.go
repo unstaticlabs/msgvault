@@ -3170,36 +3170,101 @@ func (e EmailWorkActionTarget) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(e))
 }
 
+type EmailWorkExportRequest struct {
+	CacheRevision string             `json:"cache_revision" validate:"required,min=1"`
+	Predicate     ExploreHTTPRequest `json:"predicate"`
+	UID           string             `json:"uid" validate:"required,max=128,min=1"`
+}
+
+func (e EmailWorkExportRequest) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.CacheRevision, "required,min=1"); err != nil {
+		errors = errors.Append("CacheRevision", err)
+	}
+	if v, ok := any(e.Predicate).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Predicate", err)
+		}
+	}
+	if err := typesValidator.Var(e.UID, "required,max=128,min=1"); err != nil {
+		errors = errors.Append("UID", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
 type EmailWorkMemberFact struct {
-	AttachedOriginalIds   []string  `json:"attached_original_ids,omitempty"`
-	AttributionComplete   bool      `json:"attribution_complete"`
-	ConfirmedSourceSender bool      `json:"confirmed_source_sender"`
-	ConversationID        int64     `json:"conversation_id"`
-	InboxState            string    `json:"inbox_state" validate:"required"`
-	Incoming              bool      `json:"incoming"`
-	Labels                []string  `json:"labels" validate:"required"`
-	LinkageOutcome        string    `json:"linkage_outcome" validate:"required"`
-	MessageID             int64     `json:"message_id"`
-	MessageUID            *string   `json:"message_uid,omitempty"`
-	NativeDraft           bool      `json:"native_draft"`
-	NativeSent            bool      `json:"native_sent"`
-	OccurredAt            time.Time `json:"occurred_at" validate:"required"`
-	Preview               string    `json:"preview" validate:"required"`
-	ProviderThreadID      *string   `json:"provider_thread_id,omitempty"`
-	ReadState             string    `json:"read_state" validate:"required"`
-	ReferenceIds          []string  `json:"reference_ids,omitempty"`
-	ReplyIds              []string  `json:"reply_ids,omitempty"`
-	RfcMessageID          *string   `json:"rfc_message_id,omitempty"`
-	SourceID              int64     `json:"source_id"`
-	SourceIdentifier      string    `json:"source_identifier" validate:"required"`
-	SourceMessageID       string    `json:"source_message_id" validate:"required"`
-	SourceType            string    `json:"source_type" validate:"required"`
-	Title                 string    `json:"title" validate:"required"`
-	UnavailableReasons    []string  `json:"unavailable_reasons,omitempty"`
+	AttachedOriginalIds   []string                          `json:"attached_original_ids,omitempty"`
+	AttributionComplete   bool                              `json:"attribution_complete"`
+	ConfirmedSourceSender bool                              `json:"confirmed_source_sender"`
+	ConversationID        int64                             `json:"conversation_id"`
+	InboxState            string                            `json:"inbox_state" validate:"required"`
+	Incoming              bool                              `json:"incoming"`
+	Labels                []string                          `json:"labels" validate:"required"`
+	LinkageOutcome        string                            `json:"linkage_outcome" validate:"required"`
+	LocalReadState        EmailWorkMemberFactLocalReadState `json:"local_read_state" validate:"required"`
+	MessageID             int64                             `json:"message_id"`
+	MessageUID            *string                           `json:"message_uid,omitempty"`
+	NativeDraft           bool                              `json:"native_draft"`
+	NativeSent            bool                              `json:"native_sent"`
+	OccurredAt            time.Time                         `json:"occurred_at" validate:"required"`
+	Preview               string                            `json:"preview" validate:"required"`
+	ProviderThreadID      *string                           `json:"provider_thread_id,omitempty"`
+	ReadState             string                            `json:"read_state" validate:"required"`
+	ReferenceIds          []string                          `json:"reference_ids,omitempty"`
+	ReplyIds              []string                          `json:"reply_ids,omitempty"`
+	RfcMessageID          *string                           `json:"rfc_message_id,omitempty"`
+	SourceID              int64                             `json:"source_id"`
+	SourceIdentifier      string                            `json:"source_identifier" validate:"required"`
+	SourceMessageID       string                            `json:"source_message_id" validate:"required"`
+	SourceType            string                            `json:"source_type" validate:"required"`
+	Title                 string                            `json:"title" validate:"required"`
+	UnavailableReasons    []string                          `json:"unavailable_reasons,omitempty"`
 }
 
 func (e EmailWorkMemberFact) Validate() error {
-	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.InboxState, "required"); err != nil {
+		errors = errors.Append("InboxState", err)
+	}
+	if err := typesValidator.Var(e.Labels, "required"); err != nil {
+		errors = errors.Append("Labels", err)
+	}
+	if err := typesValidator.Var(e.LinkageOutcome, "required"); err != nil {
+		errors = errors.Append("LinkageOutcome", err)
+	}
+	if v, ok := any(e.LocalReadState).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("LocalReadState", err)
+		}
+	}
+	if err := typesValidator.Var(e.OccurredAt, "required"); err != nil {
+		errors = errors.Append("OccurredAt", err)
+	}
+	if err := typesValidator.Var(e.Preview, "required"); err != nil {
+		errors = errors.Append("Preview", err)
+	}
+	if err := typesValidator.Var(e.ReadState, "required"); err != nil {
+		errors = errors.Append("ReadState", err)
+	}
+	if err := typesValidator.Var(e.SourceIdentifier, "required"); err != nil {
+		errors = errors.Append("SourceIdentifier", err)
+	}
+	if err := typesValidator.Var(e.SourceMessageID, "required"); err != nil {
+		errors = errors.Append("SourceMessageID", err)
+	}
+	if err := typesValidator.Var(e.SourceType, "required"); err != nil {
+		errors = errors.Append("SourceType", err)
+	}
+	if err := typesValidator.Var(e.Title, "required"); err != nil {
+		errors = errors.Append("Title", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type EmailWorkMembersHTTPRequest struct {

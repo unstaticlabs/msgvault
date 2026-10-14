@@ -82,6 +82,8 @@ type ExploreBody = ExploreHTTPRequest
 
 type ApplyEmailWorkActionBody = EmailWorkActionRequest
 
+type ExportEmailWorkItemBody = EmailWorkExportRequest
+
 type GetEmailWorkMembersBody = EmailWorkMembersHTTPRequest
 
 type PreviewEmailWorkActionBody = EmailWorkActionRequest

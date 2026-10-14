@@ -3531,6 +3531,23 @@ components:
         - uid
         - source_id
       type: object
+    EmailWorkExportRequest:
+      additionalProperties: false
+      properties:
+        cache_revision:
+          minLength: 1
+          type: string
+        predicate:
+          $ref: "#/components/schemas/ExploreHTTPRequest"
+        uid:
+          maxLength: 128
+          minLength: 1
+          type: string
+      required:
+        - uid
+        - predicate
+        - cache_revision
+      type: object
     EmailWorkMemberFact:
       additionalProperties: true
       properties:
@@ -3554,6 +3571,12 @@ components:
             type: string
           type: array
         linkage_outcome:
+          type: string
+        local_read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         message_id:
           format: int64
@@ -3610,6 +3633,7 @@ components:
         - preview
         - inbox_state
         - read_state
+        - local_read_state
         - linkage_outcome
         - labels
         - native_sent
@@ -17205,6 +17229,47 @@ paths:
       summary: Save an undoable local email work assertion
       tags:
         - API
+  /api/v1/explore/email-work/export:
+    post:
+      operationId: exportEmailWorkItem
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailWorkExportRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/zip:
+              schema:
+                contentMediaType: application/octet-stream
+                format: binary
+                type: string
+          description: OK
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Export every permitted archived copy and its provenance
+      tags:
+        - Exploration
   /api/v1/explore/email-work/members:
     post:
       operationId: getEmailWorkMembers

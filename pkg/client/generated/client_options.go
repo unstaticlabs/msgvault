@@ -3715,6 +3715,50 @@ func (o *ApplyEmailWorkActionRequestOptions) GetHeader() (map[string]string, err
 	return nil, nil
 }
 
+// ExportEmailWorkItemRequestOptions is the options needed to make a request to ExportEmailWorkItem.
+type ExportEmailWorkItemRequestOptions struct {
+	Body *ExportEmailWorkItemBody
+}
+
+// Validate validates all the fields in the options.
+// Use it if fields validation was not run.
+func (o *ExportEmailWorkItemRequestOptions) Validate() error {
+	var errors runtime.ValidationErrors
+
+	if o.Body != nil {
+		if v, ok := any(o.Body).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("Body", err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+
+	return errors
+}
+
+// GetPathParams returns the path params as a map.
+func (o *ExportEmailWorkItemRequestOptions) GetPathParams() (map[string]any, error) {
+	return nil, nil
+}
+
+// GetQuery returns the query params as a map.
+func (o *ExportEmailWorkItemRequestOptions) GetQuery() (map[string]any, error) {
+	return nil, nil
+}
+
+// GetBody returns the payload in any type that can be marshalled to JSON by the client.
+func (o *ExportEmailWorkItemRequestOptions) GetBody() any {
+	return o.Body
+}
+
+// GetHeader returns the headers as a map.
+func (o *ExportEmailWorkItemRequestOptions) GetHeader() (map[string]string, error) {
+	return nil, nil
+}
+
 // GetEmailWorkMembersRequestOptions is the options needed to make a request to GetEmailWorkMembers.
 type GetEmailWorkMembersRequestOptions struct {
 	Body *GetEmailWorkMembersBody

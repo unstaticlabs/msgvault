@@ -100,7 +100,7 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 		}
 	}
 	for rows.Next() {
-		var member EmailWorkMemberFact
+		member := EmailWorkMemberFact{LocalReadState: store.EmailWorkUnknown}
 		var labelsJSON string
 		if err := rows.Scan(&member.MessageID, &member.SourceID, &member.SourceType, &member.SourceIdentifier, &member.SourceMessageID, &member.ConversationID, &member.OccurredAt, &member.Title, &member.Preview, &member.InboxState, &member.ReadState, &labelsJSON); err != nil {
 			return nil, err
@@ -134,6 +134,7 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 		return nil, err
 	}
 	if e.sqliteDB != nil {
+		localReadStates := map[int64]string{}
 		verifiedMembers := slices.Clone(response.Members)
 		if response.RequestedAnchor != nil && !slices.Contains(page, response.RequestedAnchor.MessageID) {
 			verifiedMembers = append(verifiedMembers, *response.RequestedAnchor)
@@ -142,7 +143,8 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 			var sourceID int64
 			var providerID string
 			var uid sql.NullString
-			err := e.sqliteDB.QueryRowContext(ctx, `SELECT m.source_id,m.source_message_id,seed.uid FROM messages m LEFT JOIN email_work_seeds seed ON seed.live_message_id=m.id WHERE m.id=?`, member.MessageID).Scan(&sourceID, &providerID, &uid)
+			var localRead sql.NullBool
+			err := e.sqliteDB.QueryRowContext(ctx, `SELECT m.source_id,m.source_message_id,seed.uid,m.is_read FROM messages m LEFT JOIN email_work_seeds seed ON seed.live_message_id=m.id WHERE m.id=?`, member.MessageID).Scan(&sourceID, &providerID, &uid, &localRead)
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, ErrEmailWorkRevisionChanged
 			}
@@ -152,6 +154,21 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 			if sourceID != member.SourceID || providerID != member.SourceMessageID || (member.MessageUID != "" && uid.String != member.MessageUID) {
 				return nil, ErrEmailWorkRevisionChanged
 			}
+			state := store.EmailWorkUnknown
+			if localRead.Valid {
+				if localRead.Bool {
+					state = "read"
+				} else {
+					state = "unread"
+				}
+			}
+			localReadStates[member.MessageID] = state
+		}
+		for i := range response.Members {
+			response.Members[i].LocalReadState = localReadStates[response.Members[i].MessageID]
+		}
+		if response.RequestedAnchor != nil {
+			response.RequestedAnchor.LocalReadState = localReadStates[response.RequestedAnchor.MessageID]
 		}
 	}
 	return response, nil
