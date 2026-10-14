@@ -305,7 +305,9 @@ import (
 // the class of failure where a plan could not be confirmed because its
 // selection could not be reproduced. Ids remain accepted and, when present,
 // must still match the token.
-const APISchemaVersion = "2.23.0"
+// 2.24.0 adds calendar occurrence coverage and freshness state to source and
+// message responses, so clients can distinguish unavailable coverage from an empty calendar.
+const APISchemaVersion = "2.24.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
