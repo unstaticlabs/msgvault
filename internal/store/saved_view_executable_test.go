@@ -12,6 +12,8 @@ import (
 )
 
 func TestSavedViewRejectsUnexecutableFiltersBeforeWrite(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
 	ctx := context.Background()
 	good := store.SavedViewInput{Name: "[QA] Inbox", SchemaVersion: 1, CanonicalState: json.RawMessage(`{"filters":[{"field":"participant_id","operator":"eq","values":["1"]}]}`)}
 	for _, state := range []string{
@@ -31,20 +33,20 @@ func TestSavedViewRejectsUnexecutableFiltersBeforeWrite(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			st := testutil.NewTestStore(t)
 			existing, err := st.CreateSavedView(ctx, good)
-			require.NoError(t, err)
+			requirements.NoError(err)
 			bad := good
 			bad.Name = "[QA] Invalid"
 			bad.CanonicalState = json.RawMessage(state)
 			_, err = st.CreateSavedView(ctx, bad)
-			require.ErrorIs(t, err, store.ErrSavedViewInvalidState)
+			requirements.ErrorIs(err, store.ErrSavedViewInvalidState)
 			_, err = st.UpdateSavedView(ctx, existing.ID, existing.Revision, bad)
-			require.ErrorIs(t, err, store.ErrSavedViewInvalidState)
+			requirements.ErrorIs(err, store.ErrSavedViewInvalidState)
 			got, err := st.GetSavedView(ctx, existing.ID)
-			require.NoError(t, err)
-			assert.Equal(t, existing, got)
+			requirements.NoError(err)
+			assertions.Equal(existing, got)
 			views, err := st.ListSavedViews(ctx)
-			require.NoError(t, err)
-			require.Len(t, views, 1)
+			requirements.NoError(err)
+			requirements.Len(views, 1)
 		})
 	}
 }

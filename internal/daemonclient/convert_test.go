@@ -33,9 +33,11 @@ func TestCLIDeleteDedupedExecuteBodyKeepsEmptyExpectedBatches(t *testing.T) {
 }
 
 func TestCLIMessageNilAndMissingProviderStateStayUnknown(t *testing.T) {
-	assert.Nil(t, cliMessageDetailFromGenerated(nil))
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	assertions.Nil(cliMessageDetailFromGenerated(nil))
 	message := cliMessageDetailFromGenerated(&generated.GetCLIMessageResponse{ID: 1})
-	require.NotNil(t, message)
-	assert.Equal(t, "unknown", message.InboxState)
-	assert.Equal(t, "unknown", message.ReadState)
+	requirements.NotNil(message)
+	assertions.Equal("unknown", message.InboxState)
+	assertions.Equal("unknown", message.ReadState)
 }
