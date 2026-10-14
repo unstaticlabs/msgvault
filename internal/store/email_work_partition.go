@@ -23,6 +23,13 @@ type EmailWorkMember struct {
 // Callers publish/memoize this once per immutable publication and access scope;
 // no bodies are read and every source copy remains in exactly one component.
 func PartitionEmailWorkMembers(members []EmailWorkMember) ([][]int64, error) {
+	return PartitionEmailWorkMembersWithLocalLinks(members, nil)
+}
+
+// PartitionEmailWorkMembersWithLocalLinks adds separate local assertions.
+// An edge is inactive when any
+// endpoint is absent from the permitted population; excluded anchors never bridge it.
+func PartitionEmailWorkMembersWithLocalLinks(members []EmailWorkMember, links [][]int64) ([][]int64, error) {
 	parents := make(map[int64]int64, len(members))
 	var ids []int64
 	for _, member := range members {
@@ -80,6 +87,18 @@ func PartitionEmailWorkMembers(members []EmailWorkMember) ([][]int64, error) {
 				union(member.MessageID, other)
 			} else {
 				identityOwner[identity] = member.MessageID
+			}
+		}
+	}
+	for _, link := range links {
+		complete := len(link) > 1
+		for _, id := range link {
+			_, present := parents[id]
+			complete = complete && present
+		}
+		if complete {
+			for _, id := range link[1:] {
+				union(link[0], id)
 			}
 		}
 	}

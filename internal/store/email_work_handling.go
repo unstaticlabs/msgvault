@@ -24,6 +24,7 @@ type EmailWorkActivity struct {
 	PositiveSent          bool
 	Draft                 bool
 	ExternalRecipient     bool
+	LocalHandled          bool
 }
 
 // EmailWorkHandling explains outstanding received events and actual outbound
@@ -69,13 +70,13 @@ func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
 			events[key] = event
 		}
 		event.anchor = min(event.anchor, member.MessageID)
-		event.incoming = event.incoming || member.Incoming
+		event.incoming = event.incoming || member.Incoming || member.LocalHandled
 		if member.OccurredAt.IsZero() {
 			event.hasTime = false
 		} else if member.OccurredAt.After(event.occurredAt) {
 			event.occurredAt = member.OccurredAt
 		}
-		if !member.AttributionComplete {
+		if !member.AttributionComplete && !member.LocalHandled {
 			incomplete = true
 			if len(member.UnavailableReasons) == 0 {
 				reason("identity_unavailable")
@@ -85,7 +86,7 @@ func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
 				}
 			}
 		}
-		if member.Linkage.Version != mime.EmailLinkageVersion || member.Linkage.Outcome != "complete" {
+		if (member.Linkage.Version != mime.EmailLinkageVersion || member.Linkage.Outcome != "complete") && !member.LocalHandled {
 			incomplete = true
 			reason("linkage_unavailable")
 		}
@@ -100,6 +101,12 @@ func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
 		}
 	}
 	closed := map[string]bool{}
+	for _, member := range members {
+		if member.LocalHandled {
+			closed[memberEvent[member.MessageID]] = true
+			reason("local_confirmation")
+		}
+	}
 	// Process completed activity chronologically. A valid direct ancestry is
 	// walked once; later replies cannot create quadratic rescans of long threads.
 	walked := map[string]bool{}

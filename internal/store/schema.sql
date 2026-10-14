@@ -4069,3 +4069,19 @@ CREATE TABLE IF NOT EXISTS email_work_seeds (
  anchor_message_id BIGINT NOT NULL,
  live_message_id BIGINT UNIQUE REFERENCES messages(id) ON DELETE SET NULL
 );
+
+-- Undoable local assertions retain opaque identities, never copied mail content.
+CREATE TABLE IF NOT EXISTS email_work_actions (
+ uid TEXT PRIMARY KEY,
+ kind TEXT NOT NULL CHECK(kind IN ('link','handled')),
+ revision BIGINT NOT NULL DEFAULT 1,
+ active BOOLEAN NOT NULL DEFAULT TRUE,
+ actor_kind TEXT NOT NULL,
+ actor_user_id BIGINT NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS email_work_action_targets (
+ action_uid TEXT NOT NULL REFERENCES email_work_actions(uid) ON DELETE CASCADE,
+ seed_uid TEXT NOT NULL REFERENCES email_work_seeds(uid) ON DELETE CASCADE,
+ PRIMARY KEY(action_uid,seed_uid)
+);

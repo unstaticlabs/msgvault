@@ -47,7 +47,7 @@ func TestEmailWorkMemberBodyRejectsReusedNativeID(t *testing.T) {
 			t.Cleanup(func() { requirements.NoError(daemon.Shutdown(context.Background())) })
 			fetch := func(uid string) *httptest.ResponseRecorder {
 				request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/v1/messages/%d?expected_message_uid=%s", id, uid), nil)
-				request.Header.Set("X-API-Key", "synthetic-work-key")
+				request.Header.Set("X-Api-Key", "synthetic-work-key")
 				response := httptest.NewRecorder()
 				daemon.Router().ServeHTTP(response, request)
 				return response
