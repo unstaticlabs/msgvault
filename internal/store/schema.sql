@@ -4060,3 +4060,12 @@ CREATE TABLE IF NOT EXISTS email_linkage_checkpoints (
     last_message_id BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (source_id, extraction_version)
 );
+
+-- Durable opaque alias anchors. Deleted messages leave only identity metadata;
+-- nullable live references prevent physical message ID reuse from rebinding links.
+CREATE TABLE IF NOT EXISTS email_work_seeds (
+ ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+ uid TEXT NOT NULL UNIQUE,
+ anchor_message_id BIGINT NOT NULL,
+ live_message_id BIGINT UNIQUE REFERENCES messages(id) ON DELETE SET NULL
+);

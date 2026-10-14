@@ -1955,6 +1955,10 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 		func(context.Context) error { return nil }); err != nil {
 		return err
 	}
+	if err := s.runOnceMigration(ctx, "email_work_identity_schema", 1, false,
+		func(context.Context) error { return nil }); err != nil {
+		return err
+	}
 	if err := s.ensureArchiveUIDContext(ctx); err != nil {
 		return err
 	}

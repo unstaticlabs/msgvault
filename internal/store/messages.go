@@ -1170,16 +1170,13 @@ func (s *Store) UpsertMessage(msg *Message) (int64, error) {
 		return 0, err
 	}
 	if !isBodylessMessageJournalCandidate(msg) {
-		if s.syncGeneration != nil {
-			var id int64
-			err := s.withTx(func(tx *loggedTx) error {
-				var err error
-				id, err = upsertMessageWith(tx, s.dialect, msg)
-				return err
-			})
-			return id, err
-		}
-		return upsertMessageWith(s.db, s.dialect, msg)
+		var id int64
+		err := s.withTx(func(tx *loggedTx) error {
+			var err error
+			id, err = upsertMessageWith(tx, s.dialect, msg)
+			return err
+		})
+		return id, err
 	}
 	var id int64
 	err := s.withTx(func(tx *loggedTx) error {
@@ -1296,6 +1293,11 @@ func upsertMessageWith(q querier, d Dialect, msg *Message) (int64, error) {
 	}
 	if journalCandidate && !prior.found && d.DriverName() != postgresDriverName {
 		if err := appendPersonSweepMessageInsert(q, d, id); err != nil {
+			return 0, err
+		}
+	}
+	if msg.MessageType == MessageTypeEmail || msg.MessageType == "" {
+		if err := ensureEmailWorkSeed(q, id); err != nil {
 			return 0, err
 		}
 	}
