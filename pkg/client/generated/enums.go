@@ -567,6 +567,57 @@ func (d DiscoverEventType) Validate() error {
 	}
 }
 
+type EmailWorkActionPreviewKind string
+
+const (
+	Handled EmailWorkActionPreviewKind = "handled"
+	Link    EmailWorkActionPreviewKind = "link"
+)
+
+// Validate checks if the EmailWorkActionPreviewKind value is valid
+func (e EmailWorkActionPreviewKind) Validate() error {
+	switch e {
+	case Handled, Link:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionPreviewKind value, got: %v", e))
+	}
+}
+
+type EmailWorkActionRequestKind string
+
+const (
+	EmailWorkActionRequestKindHandled EmailWorkActionRequestKind = "handled"
+	EmailWorkActionRequestKindLink    EmailWorkActionRequestKind = "link"
+)
+
+// Validate checks if the EmailWorkActionRequestKind value is valid
+func (e EmailWorkActionRequestKind) Validate() error {
+	switch e {
+	case EmailWorkActionRequestKindHandled, EmailWorkActionRequestKindLink:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionRequestKind value, got: %v", e))
+	}
+}
+
+type EmailWorkActionResponseCacheState string
+
+const (
+	EmailWorkActionResponseCacheStateReady EmailWorkActionResponseCacheState = "ready"
+	EmailWorkActionResponseCacheStateStale EmailWorkActionResponseCacheState = "stale"
+)
+
+// Validate checks if the EmailWorkActionResponseCacheState value is valid
+func (e EmailWorkActionResponseCacheState) Validate() error {
+	switch e {
+	case EmailWorkActionResponseCacheStateReady, EmailWorkActionResponseCacheStateStale:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionResponseCacheState value, got: %v", e))
+	}
+}
+
 type EmploymentBodySource string
 
 const (

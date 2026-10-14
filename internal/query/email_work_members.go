@@ -77,14 +77,18 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 	if len(page) == 0 {
 		return response, nil
 	}
-	args := make([]any, len(page))
-	for i, id := range page {
+	scanIDs := slices.Clone(page)
+	if !slices.Contains(scanIDs, alias.LiveMessageID.Int64) {
+		scanIDs = append(scanIDs, alias.LiveMessageID.Int64)
+	}
+	args := make([]any, len(scanIDs))
+	for i, id := range scanIDs {
 		args[i] = id
 	}
 	rows, err := e.db.QueryContext(ctx, `SELECT message_id,source_id,source_type,source_identifier,source_message_id,conversation_id,occurred_at,
  COALESCE(NULLIF(subject,''),snippet,''),snippet,inbox_state,read_state,
  COALESCE((SELECT CAST(to_json(list_sort(list_distinct(list(l.name)))) AS VARCHAR) FROM message_labels ml JOIN labels l ON l.id=ml.label_id WHERE ml.message_id=analytical_entries.message_id),'[]')
- FROM analytical_entries WHERE message_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(page)), ",")+`) ORDER BY message_id`, args...)
+ FROM analytical_entries WHERE message_id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(scanIDs)), ",")+`) ORDER BY message_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -119,13 +123,22 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 		member.AttributionComplete = activity.AttributionComplete
 		member.ConfirmedSourceSender = activity.ConfirmedSourceSender
 		member.Preview = FlattenSnippet(member.Preview)
-		response.Members = append(response.Members, member)
+		if member.MessageID == alias.LiveMessageID.Int64 {
+			response.RequestedAnchor = &member
+		}
+		if slices.Contains(page, member.MessageID) {
+			response.Members = append(response.Members, member)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if e.sqliteDB != nil {
-		for _, member := range response.Members {
+		verifiedMembers := slices.Clone(response.Members)
+		if response.RequestedAnchor != nil && !slices.Contains(page, response.RequestedAnchor.MessageID) {
+			verifiedMembers = append(verifiedMembers, *response.RequestedAnchor)
+		}
+		for _, member := range verifiedMembers {
 			var sourceID int64
 			var providerID string
 			var uid sql.NullString

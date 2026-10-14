@@ -3772,3 +3772,16 @@ func (a *storeAPIAdapter) inboxArchiveYieldCheck() func() bool {
 func (a *storeAPIAdapter) EmailWorkSeedForMessage(ctx context.Context, id int64) (*store.EmailWorkSeed, error) {
 	return a.store.EmailWorkSeedForMessage(ctx, id)
 }
+
+func (a *storeAPIAdapter) EmailWorkRecoverySnapshot(ctx context.Context) (string, error) {
+	return a.store.EmailWorkRecoverySnapshot(ctx)
+}
+func (a *storeAPIAdapter) EmailWorkAction(ctx context.Context, uid string) (*store.EmailWorkAction, error) {
+	return a.store.EmailWorkAction(ctx, uid)
+}
+func (a *storeAPIAdapter) CreateEmailWorkAction(ctx context.Context, input store.EmailWorkActionInput) (*store.EmailWorkAction, error) {
+	return a.store.CreateEmailWorkAction(ctx, input)
+}
+func (a *storeAPIAdapter) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, revision int64, view ...int64) (*store.EmailWorkAction, error) {
+	return a.store.UndoEmailWorkAction(ctx, uid, snapshot, revision, view...)
+}

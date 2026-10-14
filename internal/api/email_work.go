@@ -33,6 +33,7 @@ func emailWorkAuthorityKey(ctx context.Context) string {
 }
 
 func (s *Server) registerEmailWorkRoutes(api huma.API) {
+	s.registerEmailWorkActionRoutes(api)
 	registerExploreRoute[EmailWorkMembersHTTPRequest, query.EmailWorkMembersResponse](api, "getEmailWorkMembers", "/explore/email-work/members", "Read every permitted source copy and link evidence in an email work item", s.handleEmailWorkMembers)
 }
 

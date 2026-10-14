@@ -76,8 +76,10 @@ func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
 		} else if member.OccurredAt.After(event.occurredAt) {
 			event.occurredAt = member.OccurredAt
 		}
-		if !member.AttributionComplete && !member.LocalHandled {
-			incomplete = true
+		if !member.AttributionComplete {
+			if !member.LocalHandled {
+				incomplete = true
+			}
 			if len(member.UnavailableReasons) == 0 {
 				reason("identity_unavailable")
 			} else {
@@ -86,8 +88,10 @@ func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
 				}
 			}
 		}
-		if (member.Linkage.Version != mime.EmailLinkageVersion || member.Linkage.Outcome != "complete") && !member.LocalHandled {
-			incomplete = true
+		if member.Linkage.Version != mime.EmailLinkageVersion || member.Linkage.Outcome != "complete" {
+			if !member.LocalHandled {
+				incomplete = true
+			}
 			reason("linkage_unavailable")
 		}
 		// Only direct verified replies establish handling ancestry. References may

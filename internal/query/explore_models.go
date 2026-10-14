@@ -346,6 +346,7 @@ type EmailWorkMembersResponse struct {
 	EvidenceMessageIDs    []int64                 `json:"evidence_message_ids"`
 	LocalActions          []store.EmailWorkAction `json:"local_actions"`
 	RecoverySnapshot      string                  `json:"recovery_snapshot"`
+	RequestedAnchor       *EmailWorkMemberFact    `json:"requested_anchor,omitempty"`
 }
 
 type ExploreFilesRequest struct {

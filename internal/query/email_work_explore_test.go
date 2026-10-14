@@ -196,3 +196,17 @@ func TestEmailWorkMembersRejectsLiveDeletedOrReusedAnchors(t *testing.T) {
 	_, err = engine.EmailWorkMembers(context.Background(), request)
 	requirements.ErrorIs(err, ErrEmailWorkRevisionChanged, "an old family must not drill into a reused member either")
 }
+
+func TestEmailWorkMemberPageRetainsRequestedImmutableAnchor(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	engine := emailWorkPopulationFixture(t)
+	response, err := engine.EmailWorkMembers(context.Background(), EmailWorkMembersRequest{Explore: ExploreRequest{Context: Context{RowUnit: RowUnitEmailWork, WorkAuthorityKey: "synthetic-reader"}}, UID: fmt.Sprintf("%032x", 3), Page: PageSpec{Limit: 1}})
+	requirements.NoError(err)
+	requirements.Len(response.Members, 1)
+	assertions.Equal(int64(1), response.Members[0].MessageID)
+	requirements.NotNil(response.RequestedAnchor)
+	assertions.Equal(int64(3), response.RequestedAnchor.MessageID)
+	assertions.Equal(fmt.Sprintf("%032x", 3), response.RequestedAnchor.MessageUID)
+	assertions.Equal(int64(3), response.RequestedAnchor.SourceID)
+}

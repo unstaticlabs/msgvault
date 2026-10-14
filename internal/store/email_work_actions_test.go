@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -213,4 +214,33 @@ func TestEmailWorkLocalActionStorageFailureRollsBackJournalAndRevision(t *testin
 	snapshot, err := st.EmailWorkRecoverySnapshot(ctx)
 	requirements.NoError(err)
 	assertions.Equal(input.Snapshot, snapshot, "a failed transaction must not consume the optimistic preview")
+}
+
+func TestEmailWorkLocalRecoveryRejectsChangedSavedDefinitionInsideTransaction(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	st, input, _ := localWorkActionFixture(t)
+	ctx := context.Background()
+	definition := store.SavedViewInput{Name: "[QA] Related email", SchemaVersion: 1, CanonicalState: json.RawMessage(`{"filters":[{"field":"row_unit","operator":"eq","values":["email_work_item"]}]}`)}
+	view, err := st.CreateSavedView(ctx, definition)
+	requirements.NoError(err)
+	input.ExpectedViewID = view.ID
+	input.ExpectedViewRevision = view.Revision
+	definition.Name = "[QA] Reviewed definition changed"
+	updated, err := st.UpdateSavedView(ctx, view.ID, view.Revision, definition)
+	requirements.NoError(err)
+	snapshot, err := st.EmailWorkRecoverySnapshot(ctx)
+	requirements.NoError(err)
+	assertions.Equal(input.Snapshot, snapshot, "a saved-definition edit is a separate optimistic contract")
+	_, err = st.CreateEmailWorkAction(ctx, input)
+	requirements.ErrorIs(err, store.ErrSavedViewRevisionConflict)
+	input.ExpectedViewRevision = updated.Revision
+	action, err := st.CreateEmailWorkAction(ctx, input)
+	requirements.NoError(err)
+	snapshot, err = st.EmailWorkRecoverySnapshot(ctx)
+	requirements.NoError(err)
+	_, err = st.UndoEmailWorkAction(ctx, action.UID, snapshot, action.Revision, view.ID, view.Revision)
+	requirements.ErrorIs(err, store.ErrSavedViewRevisionConflict)
+	_, err = st.UndoEmailWorkAction(ctx, action.UID, snapshot, action.Revision, updated.ID, updated.Revision)
+	requirements.NoError(err)
 }

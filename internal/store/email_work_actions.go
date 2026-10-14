@@ -41,12 +41,14 @@ type EmailWorkActionTarget struct {
 // EmailWorkActionInput supplies authorized, previewed fixed targets and its actor.
 // Source IDs are identity checks, not assertions of permission by a client.
 type EmailWorkActionInput struct {
-	UID         string
-	Kind        string
-	Targets     []EmailWorkActionTarget
-	Snapshot    string
-	ActorKind   string
-	ActorUserID int64
+	UID                  string
+	Kind                 string
+	Targets              []EmailWorkActionTarget
+	Snapshot             string
+	ActorKind            string
+	ActorUserID          int64
+	ExpectedViewID       int64
+	ExpectedViewRevision int64
 }
 
 func validEmailWorkOpaqueID(uid string) bool {
@@ -185,6 +187,9 @@ func (s *Store) CreateEmailWorkAction(ctx context.Context, input EmailWorkAction
 		if snapshot != input.Snapshot {
 			return ErrEmailWorkActionChanged
 		}
+		if err := s.verifyEmailWorkSavedView(ctx, tx, input.ExpectedViewID, input.ExpectedViewRevision); err != nil {
+			return err
+		}
 		for _, target := range targets {
 			var source int64
 			var messageType string
@@ -218,7 +223,7 @@ func (s *Store) CreateEmailWorkAction(ctx context.Context, input EmailWorkAction
 
 // UndoEmailWorkAction changes exactly one reviewed assertion. Other actions
 // remain intact. Repeated undo is a no-op; retrying creation cannot resurrect it.
-func (s *Store) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, expectedRevision int64) (*EmailWorkAction, error) {
+func (s *Store) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, expectedRevision int64, view ...int64) (*EmailWorkAction, error) {
 	if !validEmailWorkOpaqueID(uid) || len(snapshot) != 64 || expectedRevision < 1 {
 		return nil, ErrEmailWorkActionInvalid
 	}
@@ -226,6 +231,14 @@ func (s *Store) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, e
 	err := s.withTxOptionsContext(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable}, func(tx *loggedTx) error {
 		if err := s.lockEmailWorkCuration(ctx, tx); err != nil {
 			return err
+		}
+		if len(view) != 0 && len(view) != 2 {
+			return ErrEmailWorkActionInvalid
+		}
+		if len(view) == 2 {
+			if err := s.verifyEmailWorkSavedView(ctx, tx, view[0], view[1]); err != nil {
+				return err
+			}
 		}
 		action, err := readEmailWorkAction(ctx, tx, uid)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -258,4 +271,25 @@ func (s *Store) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, e
 		return err
 	})
 	return result, err
+}
+
+func (s *Store) verifyEmailWorkSavedView(ctx context.Context, tx *loggedTx, id, revision int64) error {
+	if id == 0 && revision == 0 {
+		return nil
+	}
+	if id < 1 || revision < 1 {
+		return ErrSavedViewRevisionConflict
+	}
+	var current int64
+	err := tx.QueryRowContext(ctx, `SELECT revision FROM saved_views WHERE id=?`+s.dialect.SelectForUpdate(), id).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrSavedViewRevisionConflict
+	}
+	if err != nil {
+		return err
+	}
+	if current != revision {
+		return ErrSavedViewRevisionConflict
+	}
+	return nil
 }

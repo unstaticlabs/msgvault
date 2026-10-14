@@ -380,6 +380,24 @@ func (g *GetEmailWorkMembers_ErrorResponse_503_AnyOf) Validate() error {
 	return nil
 }
 
+type PreviewEmailWorkAction_ErrorResponse_503_AnyOf struct {
+	runtime.Either[ExploreCacheUnavailableResponse, ErrorResponse]
+}
+
+func (p *PreviewEmailWorkAction_ErrorResponse_503_AnyOf) Validate() error {
+	if p.IsA() {
+		if v, ok := any(p.A).(runtime.Validator); ok {
+			return v.Validate()
+		}
+	}
+	if p.IsB() {
+		if v, ok := any(p.B).(runtime.Validator); ok {
+			return v.Validate()
+		}
+	}
+	return nil
+}
+
 type ListExploreFiles_ErrorResponse_503_AnyOf struct {
 	runtime.Either[ExploreCacheUnavailableResponse, ErrorResponse]
 }

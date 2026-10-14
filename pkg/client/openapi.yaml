@@ -3366,6 +3366,113 @@ components:
         - created_at
         - targets
       type: object
+    EmailWorkActionPreview:
+      properties:
+        cache_revision:
+          minLength: 1
+          type: string
+        kind:
+          enum:
+            - link
+            - handled
+          type: string
+        messages:
+          items:
+            $ref: "#/components/schemas/EmailWorkMemberFact"
+          type: array
+        predicate:
+          $ref: "#/components/schemas/ExploreHTTPRequest"
+        saved_view_id:
+          format: int64
+          minimum: 0
+          type: integer
+        saved_view_revision:
+          format: int64
+          minimum: 0
+          type: integer
+        snapshot:
+          maxLength: 64
+          type: string
+        targets:
+          items:
+            $ref: "#/components/schemas/EmailWorkActionTarget"
+          maxItems: 100
+          minItems: 1
+          type: array
+        uid:
+          maxLength: 32
+          type: string
+      required:
+        - messages
+        - kind
+        - targets
+        - predicate
+        - cache_revision
+      type: object
+    EmailWorkActionRequest:
+      additionalProperties: false
+      properties:
+        cache_revision:
+          minLength: 1
+          type: string
+        kind:
+          enum:
+            - link
+            - handled
+          type: string
+        predicate:
+          $ref: "#/components/schemas/ExploreHTTPRequest"
+        saved_view_id:
+          format: int64
+          minimum: 0
+          type: integer
+        saved_view_revision:
+          format: int64
+          minimum: 0
+          type: integer
+        snapshot:
+          maxLength: 64
+          type: string
+        targets:
+          items:
+            $ref: "#/components/schemas/EmailWorkActionTarget"
+          maxItems: 100
+          minItems: 1
+          type: array
+        uid:
+          maxLength: 32
+          type: string
+      required:
+        - kind
+        - targets
+        - predicate
+        - cache_revision
+      type: object
+    EmailWorkActionResponse:
+      properties:
+        action:
+          $ref: "#/components/schemas/EmailWorkAction"
+        cache_state:
+          enum:
+            - ready
+            - stale
+          type: string
+      required:
+        - action
+        - cache_state
+      type: object
+    EmailWorkActionTarget:
+      additionalProperties: false
+      properties:
+        source_id:
+          format: int64
+          type: integer
+        uid:
+          type: string
+      required:
+        - uid
+        - source_id
+      type: object
     EmailWorkMemberFact:
       properties:
         attached_original_ids:
@@ -3500,6 +3607,8 @@ components:
           type: array
         recovery_snapshot:
           type: string
+        requested_anchor:
+          $ref: "#/components/schemas/EmailWorkMemberFact"
         requested_uid:
           type: string
         summary:
@@ -3549,6 +3658,41 @@ components:
         - outstanding_count
         - evidence_count
         - reasons
+      type: object
+    EmailWorkUndoRequest:
+      additionalProperties: false
+      properties:
+        cache_revision:
+          minLength: 1
+          type: string
+        expected_revision:
+          format: int64
+          minimum: 1
+          type: integer
+        predicate:
+          $ref: "#/components/schemas/ExploreHTTPRequest"
+        saved_view_id:
+          format: int64
+          minimum: 0
+          type: integer
+        saved_view_revision:
+          format: int64
+          minimum: 0
+          type: integer
+        snapshot:
+          maxLength: 64
+          minLength: 64
+          type: string
+        uid:
+          maxLength: 32
+          minLength: 32
+          type: string
+      required:
+        - uid
+        - expected_revision
+        - snapshot
+        - predicate
+        - cache_revision
       type: object
     Employment:
       properties:
@@ -16705,6 +16849,33 @@ paths:
       summary: Explore canonical archive entries
       tags:
         - Exploration
+  /api/v1/explore/email-work/actions:
+    post:
+      operationId: applyEmailWorkAction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailWorkActionRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailWorkActionResponse"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Save an undoable local email work assertion
+      tags:
+        - API
   /api/v1/explore/email-work/members:
     post:
       operationId: getEmailWorkMembers
@@ -16752,6 +16923,80 @@ paths:
       summary: Read every permitted source copy and link evidence in an email work item
       tags:
         - Exploration
+  /api/v1/explore/email-work/preview:
+    post:
+      operationId: previewEmailWorkAction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailWorkActionRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailWorkActionPreview"
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+        "503":
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/ExploreCacheUnavailableResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+          description: Service Unavailable
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Review a fixed-target local link or handled confirmation
+      tags:
+        - Exploration
+  /api/v1/explore/email-work/undo:
+    post:
+      operationId: undoEmailWorkAction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailWorkUndoRequest"
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailWorkActionResponse"
+          description: OK
+        default:
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          description: Error
+      security:
+        - apiKey: []
+      summary: Undo one reviewed local email work assertion
+      tags:
+        - API
   /api/v1/explore/files:
     post:
       operationId: listExploreFiles

@@ -3012,6 +3012,164 @@ func (e EmailWorkAction) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(e))
 }
 
+type EmailWorkActionPreview struct {
+	CacheRevision     string                     `json:"cache_revision" validate:"required,min=1"`
+	Kind              EmailWorkActionPreviewKind `json:"kind" validate:"required"`
+	Messages          []EmailWorkMemberFact      `json:"messages" validate:"required"`
+	Predicate         ExploreHTTPRequest         `json:"predicate"`
+	SavedViewID       *int64                     `json:"saved_view_id,omitempty" validate:"omitempty,gte=0"`
+	SavedViewRevision *int64                     `json:"saved_view_revision,omitempty" validate:"omitempty,gte=0"`
+	Snapshot          *string                    `json:"snapshot,omitempty" validate:"omitempty,max=64"`
+	Targets           []EmailWorkActionTarget    `json:"targets" validate:"required"`
+	UID               *string                    `json:"uid,omitempty" validate:"omitempty,max=32"`
+}
+
+func (e EmailWorkActionPreview) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.CacheRevision, "required,min=1"); err != nil {
+		errors = errors.Append("CacheRevision", err)
+	}
+	if v, ok := any(e.Kind).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Kind", err)
+		}
+	}
+	for i, item := range e.Messages {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Messages[%d]", i), err)
+			}
+		}
+	}
+	if v, ok := any(e.Predicate).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Predicate", err)
+		}
+	}
+	if e.SavedViewID != nil {
+		if err := typesValidator.Var(e.SavedViewID, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("SavedViewID", err)
+		}
+	}
+	if e.SavedViewRevision != nil {
+		if err := typesValidator.Var(e.SavedViewRevision, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("SavedViewRevision", err)
+		}
+	}
+	if e.Snapshot != nil {
+		if err := typesValidator.Var(e.Snapshot, "omitempty,max=64"); err != nil {
+			errors = errors.Append("Snapshot", err)
+		}
+	}
+	for i, item := range e.Targets {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Targets[%d]", i), err)
+			}
+		}
+	}
+	if e.UID != nil {
+		if err := typesValidator.Var(e.UID, "omitempty,max=32"); err != nil {
+			errors = errors.Append("UID", err)
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type EmailWorkActionRequest struct {
+	CacheRevision     string                     `json:"cache_revision" validate:"required,min=1"`
+	Kind              EmailWorkActionRequestKind `json:"kind" validate:"required"`
+	Predicate         ExploreHTTPRequest         `json:"predicate"`
+	SavedViewID       *int64                     `json:"saved_view_id,omitempty" validate:"omitempty,gte=0"`
+	SavedViewRevision *int64                     `json:"saved_view_revision,omitempty" validate:"omitempty,gte=0"`
+	Snapshot          *string                    `json:"snapshot,omitempty" validate:"omitempty,max=64"`
+	Targets           []EmailWorkActionTarget    `json:"targets" validate:"required"`
+	UID               *string                    `json:"uid,omitempty" validate:"omitempty,max=32"`
+}
+
+func (e EmailWorkActionRequest) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.CacheRevision, "required,min=1"); err != nil {
+		errors = errors.Append("CacheRevision", err)
+	}
+	if v, ok := any(e.Kind).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Kind", err)
+		}
+	}
+	if v, ok := any(e.Predicate).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Predicate", err)
+		}
+	}
+	if e.SavedViewID != nil {
+		if err := typesValidator.Var(e.SavedViewID, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("SavedViewID", err)
+		}
+	}
+	if e.SavedViewRevision != nil {
+		if err := typesValidator.Var(e.SavedViewRevision, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("SavedViewRevision", err)
+		}
+	}
+	if e.Snapshot != nil {
+		if err := typesValidator.Var(e.Snapshot, "omitempty,max=64"); err != nil {
+			errors = errors.Append("Snapshot", err)
+		}
+	}
+	for i, item := range e.Targets {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Targets[%d]", i), err)
+			}
+		}
+	}
+	if e.UID != nil {
+		if err := typesValidator.Var(e.UID, "omitempty,max=32"); err != nil {
+			errors = errors.Append("UID", err)
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type EmailWorkActionResponse struct {
+	Action     EmailWorkAction                   `json:"action"`
+	CacheState EmailWorkActionResponseCacheState `json:"cache_state" validate:"required"`
+}
+
+func (e EmailWorkActionResponse) Validate() error {
+	var errors runtime.ValidationErrors
+	if v, ok := any(e.Action).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Action", err)
+		}
+	}
+	if v, ok := any(e.CacheState).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("CacheState", err)
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type EmailWorkActionTarget struct {
+	SourceID int64  `json:"source_id"`
+	UID      string `json:"uid" validate:"required"`
+}
+
+func (e EmailWorkActionTarget) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
 type EmailWorkMemberFact struct {
 	AttachedOriginalIds   []string  `json:"attached_original_ids,omitempty"`
 	AttributionComplete   bool      `json:"attribution_complete"`
@@ -3085,6 +3243,7 @@ type EmailWorkMembersResponse struct {
 	Members               []EmailWorkMemberFact `json:"members" validate:"required"`
 	OutstandingMessageIds []int64               `json:"outstanding_message_ids" validate:"required"`
 	RecoverySnapshot      string                `json:"recovery_snapshot" validate:"required"`
+	RequestedAnchor       *EmailWorkMemberFact  `json:"requested_anchor,omitempty"`
 	RequestedUID          string                `json:"requested_uid" validate:"required"`
 	Summary               EmailWorkSummary      `json:"summary"`
 	TotalCount            int64                 `json:"total_count"`
@@ -3119,6 +3278,13 @@ func (e EmailWorkMembersResponse) Validate() error {
 	if err := typesValidator.Var(e.RecoverySnapshot, "required"); err != nil {
 		errors = errors.Append("RecoverySnapshot", err)
 	}
+	if e.RequestedAnchor != nil {
+		if v, ok := any(e.RequestedAnchor).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("RequestedAnchor", err)
+			}
+		}
+	}
 	if err := typesValidator.Var(e.RequestedUID, "required"); err != nil {
 		errors = errors.Append("RequestedUID", err)
 	}
@@ -3147,6 +3313,51 @@ type EmailWorkSummary struct {
 
 func (e EmailWorkSummary) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
+type EmailWorkUndoRequest struct {
+	CacheRevision     string             `json:"cache_revision" validate:"required,min=1"`
+	ExpectedRevision  int64              `json:"expected_revision" validate:"gte=1"`
+	Predicate         ExploreHTTPRequest `json:"predicate"`
+	SavedViewID       *int64             `json:"saved_view_id,omitempty" validate:"omitempty,gte=0"`
+	SavedViewRevision *int64             `json:"saved_view_revision,omitempty" validate:"omitempty,gte=0"`
+	Snapshot          string             `json:"snapshot" validate:"required,max=64,min=64"`
+	UID               string             `json:"uid" validate:"required,max=32,min=32"`
+}
+
+func (e EmailWorkUndoRequest) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.CacheRevision, "required,min=1"); err != nil {
+		errors = errors.Append("CacheRevision", err)
+	}
+	if err := typesValidator.Var(e.ExpectedRevision, "gte=1"); err != nil {
+		errors = errors.Append("ExpectedRevision", err)
+	}
+	if v, ok := any(e.Predicate).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Predicate", err)
+		}
+	}
+	if e.SavedViewID != nil {
+		if err := typesValidator.Var(e.SavedViewID, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("SavedViewID", err)
+		}
+	}
+	if e.SavedViewRevision != nil {
+		if err := typesValidator.Var(e.SavedViewRevision, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("SavedViewRevision", err)
+		}
+	}
+	if err := typesValidator.Var(e.Snapshot, "required,max=64,min=64"); err != nil {
+		errors = errors.Append("Snapshot", err)
+	}
+	if err := typesValidator.Var(e.UID, "required,max=32,min=32"); err != nil {
+		errors = errors.Append("UID", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type Employment struct {

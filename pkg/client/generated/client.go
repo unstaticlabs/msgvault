@@ -415,9 +415,21 @@ type ClientInterface interface {
 	Explore(ctx context.Context, options *ExploreRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ExploreResponse, error)
 	ExploreWithResponse(ctx context.Context, options *ExploreRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ExploreResp, error)
 
+	// ApplyEmailWorkAction Save an undoable local email work assertion
+	ApplyEmailWorkAction(ctx context.Context, options *ApplyEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ApplyEmailWorkActionResponse, error)
+	ApplyEmailWorkActionWithResponse(ctx context.Context, options *ApplyEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ApplyEmailWorkActionResp, error)
+
 	// GetEmailWorkMembers Read every permitted source copy and link evidence in an email work item
 	GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResponse, error)
 	GetEmailWorkMembersWithResponse(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResp, error)
+
+	// PreviewEmailWorkAction Review a fixed-target local link or handled confirmation
+	PreviewEmailWorkAction(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResponse, error)
+	PreviewEmailWorkActionWithResponse(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResp, error)
+
+	// UndoEmailWorkAction Undo one reviewed local email work assertion
+	UndoEmailWorkAction(ctx context.Context, options *UndoEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*UndoEmailWorkActionResponse, error)
+	UndoEmailWorkActionWithResponse(ctx context.Context, options *UndoEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*UndoEmailWorkActionResp, error)
 
 	// ListExploreFiles List bounded chronological attachment facts
 	ListExploreFiles(ctx context.Context, options *ListExploreFilesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListExploreFilesResponse, error)
@@ -6779,6 +6791,70 @@ func (c *Client) Explore(ctx context.Context, options *ExploreRequestOptions, re
 	return responseParser(ctx, resp)
 }
 
+// ApplyEmailWorkAction Save an undoable local email work assertion
+func (c *Client) ApplyEmailWorkAction(ctx context.Context, options *ApplyEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ApplyEmailWorkActionResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/actions",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*ApplyEmailWorkActionResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(ApplyEmailWorkActionErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "ApplyEmailWorkActionErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(ApplyEmailWorkActionResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "ApplyEmailWorkActionResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/actions")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
 // GetEmailWorkMembers Read every permitted source copy and link evidence in an email work item
 func (c *Client) GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResponse, error) {
 	var err error
@@ -6837,6 +6913,134 @@ func (c *Client) GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkM
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/members")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// PreviewEmailWorkAction Review a fixed-target local link or handled confirmation
+func (c *Client) PreviewEmailWorkAction(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/preview",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*PreviewEmailWorkActionResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(PreviewEmailWorkActionErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "PreviewEmailWorkActionErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(PreviewEmailWorkActionResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "PreviewEmailWorkActionResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/preview")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// UndoEmailWorkAction Undo one reviewed local email work assertion
+func (c *Client) UndoEmailWorkAction(ctx context.Context, options *UndoEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*UndoEmailWorkActionResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/undo",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*UndoEmailWorkActionResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(UndoEmailWorkActionErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "UndoEmailWorkActionErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(UndoEmailWorkActionResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "UndoEmailWorkActionResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/undo")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}
