@@ -1297,7 +1297,7 @@ func upsertMessageWith(q querier, d Dialect, msg *Message) (int64, error) {
 		}
 	}
 	if msg.MessageType == MessageTypeEmail || msg.MessageType == "" {
-		if err := ensureEmailWorkSeed(q, id); err != nil {
+		if _, err := ensureEmailWorkSeed(q, id); err != nil {
 			return 0, err
 		}
 	}

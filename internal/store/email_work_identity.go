@@ -26,21 +26,25 @@ type EmailWorkSeed struct {
 	LiveMessageID   sql.NullInt64
 }
 
-func ensureEmailWorkSeed(q querier, messageID int64) error {
+func ensureEmailWorkSeed(q querier, messageID int64) (bool, error) {
 	var exists int
 	err := q.QueryRow(`SELECT 1 FROM email_work_seeds WHERE live_message_id = ?`, messageID).Scan(&exists)
 	if err == nil {
-		return nil
+		return false, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
-		return fmt.Errorf("allocate email work identity: %w", err)
+		return false, fmt.Errorf("allocate email work identity: %w", err)
 	}
-	_, err = q.Exec(`INSERT INTO email_work_seeds (uid, anchor_message_id, live_message_id) VALUES (?, ?, ?) ON CONFLICT(live_message_id) DO NOTHING`, hex.EncodeToString(random), messageID, messageID)
-	return err
+	result, err := q.Exec(`INSERT INTO email_work_seeds (uid,anchor_message_id,live_message_id) VALUES (?,?,?) ON CONFLICT(live_message_id) DO NOTHING`, hex.EncodeToString(random), messageID, messageID)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected > 0, err
 }
 
 // EmailWorkSeedForMessage reads an allocated live seed. It never allocates on

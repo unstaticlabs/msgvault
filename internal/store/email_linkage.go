@@ -32,11 +32,12 @@ func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, message
 	fingerprint := hex.EncodeToString(sum[:])
 	var version int
 	var oldFingerprint string
-	err := tx.QueryRowContext(ctx, `SELECT extraction_version, raw_sha256 FROM email_linkage_facts WHERE message_id = ?`, messageID).Scan(&version, &oldFingerprint)
+	var hasSeed bool
+	err := tx.QueryRowContext(ctx, `SELECT extraction_version, raw_sha256, EXISTS (SELECT 1 FROM email_work_seeds WHERE live_message_id = ?) FROM email_linkage_facts WHERE message_id = ?`, messageID, messageID).Scan(&version, &oldFingerprint, &hasSeed)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if err == nil && version == mime.EmailLinkageVersion && oldFingerprint == fingerprint {
+	if err == nil && version == mime.EmailLinkageVersion && oldFingerprint == fingerprint && hasSeed {
 		return nil
 	}
 	_, err = s.storeEmailLinkageTx(ctx, tx, messageID, mime.ExtractEmailLinkage(raw), fingerprint)
@@ -53,7 +54,12 @@ func (s *Store) storeEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
-	changed := errors.Is(err, sql.ErrNoRows) || oldFacts != string(encoded)
+	factsChanged := errors.Is(err, sql.ErrNoRows) || oldFacts != string(encoded)
+	allocated, err := ensureEmailWorkSeed(boundQuerier{ctx: ctx, q: tx}, messageID)
+	if err != nil {
+		return false, err
+	}
+	changed := allocated || factsChanged
 	if _, err := tx.ExecContext(ctx, `INSERT INTO email_linkage_facts (message_id, extraction_version, outcome, facts, raw_sha256)
  VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET extraction_version = excluded.extraction_version,
  outcome = excluded.outcome, facts = excluded.facts, raw_sha256 = excluded.raw_sha256`, messageID, evidence.Version, evidence.Outcome, string(encoded), fingerprint); err != nil {
@@ -96,7 +102,7 @@ type EmailLinkageBackfill struct {
 // messages get an incomplete outcome and cannot strand later messages.
 func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit int) (*EmailLinkageBackfill, error) {
 	if sourceID < 1 || limit < 1 || limit > 1000 {
-		return nil, errors.New("email linkage backfill requires a positive source and batch size1–1000")
+		return nil, errors.New("email linkage backfill requires a positive source and batch size from 1 to 1000")
 	}
 	result := &EmailLinkageBackfill{}
 	err := s.withTxContext(ctx, func(tx *loggedTx) error {
@@ -114,7 +120,7 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 		if err := tx.QueryRowContext(ctx, checkpointSQL, sourceID, mime.EmailLinkageVersion).Scan(&result.LastMessageID); err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT m.id FROM messages m JOIN message_raw r ON r.message_id = m.id WHERE m.source_id = ? AND m.message_type IN ('email', '') AND r.raw_format = 'mime' AND m.id > ? ORDER BY m.id LIMIT ?`, sourceID, result.LastMessageID, limit+1)
+		rows, err := tx.QueryContext(ctx, `SELECT m.id FROM messages m WHERE m.source_id = ? AND m.message_type IN ('email', '') AND (m.id > ? OR NOT EXISTS (SELECT 1 FROM email_linkage_facts f WHERE f.message_id = m.id AND f.extraction_version = ?) OR NOT EXISTS (SELECT 1 FROM email_work_seeds seed WHERE seed.live_message_id = m.id)) ORDER BY m.id LIMIT ?`, sourceID, result.LastMessageID, mime.EmailLinkageVersion, limit+1)
 		if err != nil {
 			return err
 		}
@@ -135,19 +141,29 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 		result.Done = len(ids) <= limit
 		ids = ids[:min(len(ids), limit)]
 		for _, id := range ids {
-			rawSQL := `SELECT CASE WHEN length(raw_data) <= ? THEN raw_data ELSE NULL END, compression, length(raw_data) FROM message_raw WHERE message_id = ?`
+			rawSQL := `SELECT CASE WHEN length(raw_data) <= ? THEN raw_data ELSE NULL END, compression, length(raw_data), raw_format FROM message_raw WHERE message_id = ?`
 			rawSQL += s.dialect.SelectForUpdate()
 			var compressed []byte
 			var compression sql.NullString
 			var storedSize int64
-			if err := tx.QueryRowContext(ctx, rawSQL, mime.EmailLinkageMaxBytes, id).Scan(&compressed, &compression, &storedSize); err != nil {
-				return err
+			var format sql.NullString
+			rawErr := tx.QueryRowContext(ctx, rawSQL, mime.EmailLinkageMaxBytes, id).Scan(&compressed, &compression, &storedSize, &format)
+			if rawErr != nil && !errors.Is(rawErr, sql.ErrNoRows) {
+				return rawErr
 			}
 			evidence := mime.EmailLinkage{Version: mime.EmailLinkageVersion, Outcome: "size_limit"}
 			fingerprint := ""
-			if storedSize <= mime.EmailLinkageMaxBytes {
-				raw, _, decodeErr := decodeMessageRawBounded(compressed, compression, mime.EmailLinkageMaxBytes, errors.New("email linkage raw size limit"))
-				if decodeErr != nil {
+			switch {
+			case errors.Is(rawErr, sql.ErrNoRows):
+				evidence.Outcome = "missing_raw"
+			case !format.Valid || format.String != "mime":
+				evidence.Outcome = "unsupported_raw"
+			case storedSize <= mime.EmailLinkageMaxBytes:
+				limitErr := errors.New("email linkage raw size limit")
+				raw, _, decodeErr := decodeMessageRawBounded(compressed, compression, mime.EmailLinkageMaxBytes, limitErr)
+				if errors.Is(decodeErr, limitErr) {
+					evidence.Outcome = "size_limit"
+				} else if decodeErr != nil {
 					evidence.Outcome = "invalid_raw"
 				} else {
 					evidence = mime.ExtractEmailLinkage(raw)
@@ -163,7 +179,7 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 			if changed {
 				result.Changed++
 			}
-			result.LastMessageID = id
+			result.LastMessageID = max(result.LastMessageID, id)
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE email_linkage_checkpoints SET last_message_id = ? WHERE source_id = ? AND extraction_version = ?`, result.LastMessageID, sourceID, mime.EmailLinkageVersion)
 		return err
