@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { PrincipalInfo } from '../../api/generated/models';
   import { getCLIMessageRaw as generatedGetCLIMessageRaw } from '../../api/generated/api/api';
   import { preflightExploreSelection as generatedPreflightExploreSelection } from '../../api/generated/exploration/exploration';
   import {
@@ -75,6 +76,7 @@
   import { bufferedCallback } from '../../util/buffered-callback';
   interface Props {
     client: APIClient;
+    principal?: PrincipalInfo;
     state?: ExploreState;
     enabled?: boolean;
     settings?: Snippet<[
@@ -88,6 +90,7 @@
   }
   let {
     client,
+    principal = undefined,
     state: providedState = undefined,
     enabled = true,
     settings = undefined,
@@ -1322,6 +1325,7 @@
   {:else}
     <EverythingWorkspace
       {client}
+      {principal}
       {exploreState}
       {loader}
       session={everythingSession}

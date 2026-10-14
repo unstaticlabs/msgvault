@@ -1,3 +1,4 @@
+import { HANDLING_LABELS } from './email-work';
 import type { ExploreFilter } from './models';
 export type MailboxDimension = 'inbox_state' | 'read_state';
 const labels: Record<MailboxDimension, Record<string, string>> = {
@@ -20,6 +21,8 @@ export function withMailboxFilter(filters: ExploreFilter[], dimension: MailboxDi
   return value ? [...remaining, { dimension, values: [value] }] : remaining;
 }
 export function filterCaption(filter: ExploreFilter): string {
+  if (filter.dimension === 'row_unit') return 'Related email grouped';
+  if (filter.dimension === 'handling_state') return filter.values.map((value) => HANDLING_LABELS[value] ?? value).join(' or ');
   if (filter.dimension === 'inbox_state' || filter.dimension === 'read_state') {
     return filter.values.map((value) => labels[filter.dimension as MailboxDimension][value] ?? value).join(' or ');
   }
