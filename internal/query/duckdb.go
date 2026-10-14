@@ -2013,6 +2013,14 @@ func parseLabelsJSON(s string) []string {
 // fetchLabelsForMessages adds labels to message summaries.
 // Uses DuckDB's sqlite_scanner when available, otherwise direct SQLite.
 func (e *DuckDBEngine) fetchLabelsForMessages(ctx context.Context, messages []MessageSummary) error {
+	for i := range messages {
+		if messages[i].InboxState == "" {
+			messages[i].InboxState = "unknown"
+		}
+		if messages[i].ReadState == "" {
+			messages[i].ReadState = "unknown"
+		}
+	}
 	if len(messages) == 0 {
 		return nil
 	}
@@ -2027,7 +2035,10 @@ func (e *DuckDBEngine) fetchLabelsForMessages(ctx context.Context, messages []Me
 		return nil
 	}
 
-	return fetchLabelsForMessageList(ctx, e.db, noopRebind, "sqlite_db.", messages)
+	if err := fetchLabelsForMessageList(ctx, e.db, noopRebind, "sqlite_db.", messages); err != nil {
+		return err
+	}
+	return fetchProviderStateForMessageList(ctx, e.db, noopRebind, "sqlite_db.", "duckdb", messages)
 }
 
 // GetMessageSummariesByIDs delegates to the SQLite engine — the
@@ -2100,7 +2111,17 @@ func (e *DuckDBEngine) GetMessageRaw(ctx context.Context, id int64) ([]byte, err
 }
 
 func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string, args ...any) (*MessageDetail, error) {
-	return getMessageByQueryShared(ctx, e.db, noopRebind, "sqlite_db.", whereClause, args...)
+	message, err := getMessageByQueryShared(ctx, e.db, noopRebind, "sqlite_db.", whereClause, args...)
+	if err != nil || message == nil {
+		return message, err
+	}
+	rows := []MessageSummary{{ID: message.ID}}
+	if err := fetchProviderStateForMessageList(ctx, e.db, noopRebind, "sqlite_db.", "duckdb", rows); err != nil {
+		return nil, err
+	}
+	message.InboxState = rows[0].InboxState
+	message.ReadState = rows[0].ReadState
+	return message, nil
 }
 
 // Search performs a Gmail-style search query.

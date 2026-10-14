@@ -358,6 +358,8 @@ func queryAddressesFromStrings(addresses []string) []query.Address {
 func queryMessageSummaryFromGenerated(msg generated.CLIQueryMessageSummary) query.MessageSummary {
 	return query.MessageSummary{
 		ID:                   msg.ID,
+		InboxState:           providerStateFromEnum(msg.InboxState),
+		ReadState:            providerStateFromEnum(msg.ReadState),
 		SourceID:             int64Value(msg.SourceID),
 		SourceMessageID:      msg.SourceMessageID,
 		ConversationID:       msg.ConversationID,
@@ -398,10 +400,13 @@ func queryAddressesFromGenerated(addresses []generated.Address) []query.Address 
 
 func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query.MessageDetail {
 	if resp == nil {
-		return &query.MessageDetail{}
+		return nil
 	}
 	return &query.MessageDetail{
 		ID:                   resp.ID,
+		SourceID:             int64Value(resp.SourceID),
+		InboxState:           providerStateFromEnum(resp.InboxState),
+		ReadState:            providerStateFromEnum(resp.ReadState),
 		SourceMessageID:      resp.SourceMessageID,
 		ConversationID:       resp.ConversationID,
 		SourceConversationID: resp.SourceConversationID,
@@ -884,4 +889,17 @@ func intValue(value *int64) int {
 		return 0
 	}
 	return int(*value)
+}
+
+func providerStateFromEnum[T ~string](value *T) string {
+	if value == nil || *value == "" {
+		return "unknown"
+	}
+	return string(*value)
+}
+func providerStateFromString(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }

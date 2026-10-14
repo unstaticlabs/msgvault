@@ -186,6 +186,8 @@ func createBaseViews(db *sql.DB, analyticsDir string, optCols map[string]map[str
 					"COALESCE(TRY_CAST(has_attachments AS BOOLEAN), false) AS has_attachments",
 				},
 				optionalCols: []optionalCol{
+					{name: "inbox_state", replaceExpr: "COALESCE(CAST(inbox_state AS VARCHAR),'unknown') AS inbox_state", defaultExpr: "'unknown' AS inbox_state"},
+					{name: "read_state", replaceExpr: "COALESCE(CAST(read_state AS VARCHAR),'unknown') AS read_state", defaultExpr: "'unknown' AS read_state"},
 					{
 						name:        "attachment_count",
 						replaceExpr: "COALESCE(TRY_CAST(attachment_count AS INTEGER), 0) AS attachment_count",
@@ -487,6 +489,8 @@ func buildScalarAnalyticalEntriesCTE(name string, includeAttachmentSummary bool)
 		COALESCE(m.subject, '') AS subject,
 		COALESCE(m.snippet, '') AS snippet,
 		m.is_from_me,
+ m.inbox_state,
+ m.read_state,
 		m.size_estimate,
 		m.deleted_at IS NOT NULL AS internally_deleted,
 		m.deleted_from_source_at IS NOT NULL AS deleted_from_source,
@@ -549,6 +553,8 @@ SELECT
     COALESCE(m.subject, '') AS subject,
     COALESCE(m.snippet, '') AS snippet,
     m.is_from_me,
+ m.inbox_state,
+ m.read_state,
 	m.size_estimate,
 	m.deleted_at IS NOT NULL AS internally_deleted,
     m.deleted_from_source_at IS NOT NULL AS deleted_from_source,

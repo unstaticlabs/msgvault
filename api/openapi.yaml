@@ -804,11 +804,23 @@ components:
         id:
           format: int64
           type: integer
+        inbox_state:
+          enum:
+            - inbox
+            - outside
+            - unknown
+          type: string
         labels:
           items:
             type: string
           type: array
         message_type:
+          type: string
+        read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         sent_at:
           format: date-time
@@ -1897,11 +1909,23 @@ components:
         id:
           format: int64
           type: integer
+        inbox_state:
+          enum:
+            - inbox
+            - outside
+            - unknown
+          type: string
         labels:
           items:
             type: string
           type: array
         message_type:
+          type: string
+        read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         received_at:
           format: date-time
@@ -1918,6 +1942,9 @@ components:
           type: string
         source_conversation_id:
           type: string
+        source_id:
+          format: int64
+          type: integer
         source_message_id:
           type: string
         subject:
@@ -3576,6 +3603,12 @@ components:
           type: boolean
         has_attachments:
           type: boolean
+        inbox_state:
+          enum:
+            - inbox
+            - outside
+            - unknown
+          type: string
         key:
           type: string
         kind:
@@ -3608,6 +3641,12 @@ components:
             type: string
           type: array
         preview:
+          type: string
+        read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         source_id:
           format: int64
@@ -3821,6 +3860,8 @@ components:
             - before
             - deletion
             - identity
+            - inbox_state
+            - read_state
           type: string
         values:
           items:
@@ -4656,6 +4697,12 @@ components:
         id:
           format: int64
           type: integer
+        inbox_state:
+          enum:
+            - inbox
+            - outside
+            - unknown
+          type: string
         labels:
           items:
             type: string
@@ -4667,6 +4714,12 @@ components:
         matches_truncated:
           type: boolean
         message_type:
+          type: string
+        read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         score:
           $ref: "#/components/schemas/ScoreBreakdown"
@@ -5462,6 +5515,12 @@ components:
         id:
           format: int64
           type: integer
+        inbox_state:
+          enum:
+            - inbox
+            - outside
+            - unknown
+          type: string
         is_from_me:
           type: boolean
         labels:
@@ -5469,6 +5528,12 @@ components:
             type: string
           type: array
         message_type:
+          type: string
+        read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         sent_at:
           type: string
@@ -5552,11 +5617,23 @@ components:
         id:
           format: int64
           type: integer
+        inbox_state:
+          enum:
+            - inbox
+            - outside
+            - unknown
+          type: string
         labels:
           items:
             type: string
           type: array
         message_type:
+          type: string
+        read_state:
+          enum:
+            - read
+            - unread
+            - unknown
           type: string
         sent_at:
           type: string
@@ -12095,7 +12172,7 @@ components:
       type: apiKey
 info:
   title: msgvault API
-  version: 2.23.0
+  version: 2.25.0
 openapi: 3.1.0
 paths:
   /api/ping:

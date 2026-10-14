@@ -1500,6 +1500,9 @@ func lineNumberAt(body string, byteOffset int) int {
 }
 
 type getMessageResponse struct {
+	SourceID             int64                  `json:"source_id,omitempty"`
+	InboxState           string                 `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState            string                 `json:"read_state,omitempty" enum:"read,unread,unknown"`
 	ID                   int64                  `json:"id"`
 	SourceMessageID      string                 `json:"source_message_id"`
 	ConversationID       int64                  `json:"conversation_id"`
@@ -1595,7 +1598,10 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 
 	return jsonResult(getMessageResponse{
 		ID:                   msg.ID,
+		InboxState:           mcpProviderStateValue(msg.InboxState),
+		ReadState:            mcpProviderStateValue(msg.ReadState),
 		SourceMessageID:      msg.SourceMessageID,
+		SourceID:             msg.SourceID,
 		ConversationID:       msg.ConversationID,
 		SourceConversationID: msg.SourceConversationID,
 		Subject:              msg.Subject,
@@ -2674,4 +2680,11 @@ func nonNilSlice[T any](values []T) []T {
 		return []T{}
 	}
 	return values
+}
+
+func mcpProviderStateValue(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }

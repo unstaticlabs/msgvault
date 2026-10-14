@@ -10,6 +10,7 @@
     isGroupingDimension
   } from '../../grouping/catalog';
   import IdentityFilter from './IdentityFilter.svelte';
+ import { filterCaption, mailboxFilterOptions, mailboxFilterValue, withMailboxFilter } from '../../explore/mailbox-state';
 
   let {
     client,
@@ -94,7 +95,7 @@
       <span class="crumb crumb--query">{searchMode}: “{query}”</span>
     {/if}
     {#each filters as filter (`${filter.dimension}:${filter.values.join('\u0000')}`)}
-      <span class="crumb crumb--filter">Filter {filter.dimension}: {filter.values.join(', ')}</span>
+      <span class="crumb crumb--filter">{filterCaption(filter)}</span>
     {/each}
     {#each groupingChain as dimension, index (`${dimension}:${index}`)}
       <span class="crumb crumb--group">
@@ -117,12 +118,21 @@
     <div class="filter-panel">
       <div class="filter-summary">
         {#if filters.length === 0}
-          <span>No active filters. Filtering controls will expand with additional canonical dimensions.</span>
+          <span>No active filters.</span>
         {:else}
           <span>{filters.length} active {filters.length === 1 ? 'filter' : 'filters'}</span>
           <Button size="sm" surface="outline" label="Clear filters" onclick={onClearFilters} />
         {/if}
       </div>
+      <div class="mailbox-filters">
+        <SelectDropdown title="Inbox" value={mailboxFilterValue(filters, 'inbox_state')}
+          options={mailboxFilterOptions(filters, 'inbox_state')}
+          onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'inbox_state', value))} />
+        <SelectDropdown title="Read status" value={mailboxFilterValue(filters, 'read_state')}
+          options={mailboxFilterOptions(filters, 'read_state')}
+          onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'read_state', value))} />
+      </div>
+      <p class="mailbox-note">Mailbox status reflects saved provider data. Sync to refresh it. Unknown status stays separate.</p>
       <IdentityFilter {client} {filters} onChange={onFiltersChange} />
     </div>
   {/if}
@@ -199,7 +209,8 @@
     top: calc(100% + var(--space-2));
     left: 0;
     display: flex;
-    min-width: 320px;
+    min-width: min(320px, calc(100vw - 2 * var(--space-4)));
+    max-width: calc(100vw - 2 * var(--space-4));
     align-items: stretch;
     flex-direction: column;
     gap: var(--space-4);
@@ -210,6 +221,17 @@
     box-shadow: var(--shadow-md);
   }
 
+  .mailbox-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .mailbox-note {
+    max-width: 40ch;
+    margin: 0;
+    color: var(--text-secondary);
+    line-height: 1.5;
+  }
   .filter-summary {
     display: flex;
     align-items: center;

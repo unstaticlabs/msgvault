@@ -99,7 +99,7 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 		var participantIDsJSON, participantLabelsJSON string
 		if err := rows.Scan(
 			&row.Key, &row.Kind, &anchorID, &conversationID, &row.OccurredAt,
-			&row.SourceID, &row.SourceType, &row.SourceIdentifier,
+			&row.SourceID, &row.SourceType, &row.SourceIdentifier, &row.InboxState, &row.ReadState,
 			&row.MessageType, &row.ConversationType, &row.Title, &row.Preview,
 			&participantIDsJSON, &participantLabelsJSON, &strongestMatchedMessageID, &row.MessageCount,
 			&row.HasAttachments, &row.AttachmentCount, &row.AttachmentSize,
@@ -313,6 +313,20 @@ func buildExploreConditions(request ExploreRequest) (string, []any) {
 		conditions = append(conditions, "("+strings.Join(parts, " OR ")+")")
 	}
 	appendIntAnyOf(request.Context.SourceIDs, "source_id = ?")
+	appendState := func(values []string, column string) {
+		if len(values) == 0 {
+			return
+		}
+		placeholders := make([]string, len(values))
+		for i, v := range values {
+			placeholders[i] = "?"
+			args = append(args, v)
+		}
+		conditions = append(conditions, column+" IN ("+strings.Join(placeholders, ",")+")")
+	}
+	appendState(request.Context.InboxStates, "inbox_state")
+	appendState(request.Context.ReadStates, "read_state")
+
 	if identityCondition, identityArgs := buildIdentityPredicateCondition(request.Context.Identity, ""); identityCondition != "" {
 		conditions = append(conditions, identityCondition)
 		args = append(args, identityArgs...)
@@ -579,6 +593,8 @@ SELECT
     source_id,
     source_type,
     source_identifier,
+    inbox_state,
+    read_state,
     message_type,
     conversation_type,
     title,
@@ -733,6 +749,8 @@ SELECT
     p.source_id,
     p.source_type,
     p.source_identifier,
+    p.inbox_state,
+    p.read_state,
     p.message_type,
     p.conversation_type,
     p.title,
@@ -865,6 +883,8 @@ func exploreLogicalEntriesCTE(withParticipantLists bool) string {
         source_id,
         source_type,
         source_identifier,
+        inbox_state,
+        read_state,
         message_type,
 		list_id,
         conversation_type,
@@ -894,6 +914,8 @@ func exploreLogicalEntriesCTE(withParticipantLists bool) string {
         source_id,
         arg_max(source_type, struct_pack(occurred_at := occurred_at, message_id := message_id)) AS source_type,
         arg_max(source_identifier, struct_pack(occurred_at := occurred_at, message_id := message_id)) AS source_identifier,
+        'unknown' AS inbox_state,
+        'unknown' AS read_state,
         arg_max(message_type, struct_pack(occurred_at := occurred_at, message_id := message_id)) AS message_type,
 		arg_max(list_id, struct_pack(occurred_at := occurred_at, message_id := message_id)) AS list_id,
         arg_max(conversation_type, struct_pack(occurred_at := occurred_at, message_id := message_id)) AS conversation_type,

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -16,7 +17,7 @@ var (
 	// SavedViewFilterFields are the Explore filter dimensions a v1 definition may name.
 	// The legacy aliases source_id and participant_id are also accepted and
 	// normalized by SavedViewFilterDimension.
-	SavedViewFilterFields = []string{"source", "participant", "domain", "message_type", "after", "before", "deletion"}
+	SavedViewFilterFields = []string{"source", "identity", "participant", "domain", "mailing_list", "message_type", "after", "before", "deletion", "inbox_state", "read_state"}
 	// SavedViewFilterAliases map legacy v1 filter field names onto Explore dimensions.
 	SavedViewFilterAliases   = map[string]string{"source_id": "source", "participant_id": "participant"}
 	SavedViewFilterOperators = []string{"eq", "in"}
@@ -45,6 +46,7 @@ func ValidateSavedViewState(state SavedViewStateEnvelope) error {
 
 func validateSavedViewState(state SavedViewStateEnvelope) error {
 	seen := map[string]bool{}
+	var identityValues, sourceValues []string
 	for i, filter := range state.Filters {
 		if !slices.Contains(SavedViewFilterFields, SavedViewFilterDimension(filter.Field)) {
 			return fmt.Errorf("filters[%d].field %q is not executable", i, filter.Field)
@@ -56,20 +58,44 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 			return fmt.Errorf("filters[%d].values must not be empty", i)
 		}
 		for j, value := range filter.Values {
-			if strings.TrimSpace(value) == "" {
+			if strings.TrimSpace(value) == "" && (SavedViewFilterDimension(filter.Field) != "identity" || j != 2) {
 				return fmt.Errorf("filters[%d].values[%d] must not be empty", i, j)
 			}
 		}
 
 		dimension := SavedViewFilterDimension(filter.Field)
-		if dimension != "participant" && dimension != "domain" {
+		if dimension != "participant" && dimension != "domain" && dimension != "mailing_list" {
 			if seen[dimension] {
 				return fmt.Errorf("filter dimension %q may appear only once", dimension)
 			}
 			seen[dimension] = true
 		}
+		if dimension == "source" {
+			sourceValues = filter.Values
+		}
+		if dimension == "identity" {
+			identityValues = filter.Values
+			if len(identityValues) != 3 {
+				return fmt.Errorf("filters[%d] identity requires source ID, identifier and direction", i)
+			}
+			id, err := strconv.ParseInt(identityValues[0], 10, 64)
+			if err != nil || id < 1 {
+				return fmt.Errorf("filters[%d] identity requires a positive source ID", i)
+			}
+			if !slices.Contains([]string{"", "any", "sender", "recipient"}, identityValues[2]) {
+				return fmt.Errorf("filters[%d] identity direction accepts any, sender or recipient", i)
+			}
+		}
 		for _, value := range filter.Values {
 			switch dimension {
+			case "inbox_state", "read_state":
+				allowed := []string{"inbox", "outside", "unknown"}
+				if dimension == "read_state" {
+					allowed = []string{"read", "unread", "unknown"}
+				}
+				if !slices.Contains(allowed, value) {
+					return fmt.Errorf("filters[%d] %s accepts %s", i, dimension, strings.Join(allowed, ", "))
+				}
 			case "source", "participant":
 				id, err := strconv.ParseInt(value, 10, 64)
 				if err != nil || id < 1 {
@@ -87,6 +113,16 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 					return fmt.Errorf("filters[%d] deletion accepts active or deleted", i)
 				}
 			}
+		}
+	}
+	if identityValues != nil {
+		if len(sourceValues) != 1 {
+			return errors.New("identity requires exactly one matching source filter")
+		}
+		sourceID, err := strconv.ParseInt(sourceValues[0], 10, 64)
+		identityID, identityErr := strconv.ParseInt(identityValues[0], 10, 64)
+		if err != nil || identityErr != nil || sourceID != identityID {
+			return errors.New("identity requires exactly one matching source filter")
 		}
 	}
 	if state.SearchMode != "" && !slices.Contains(SavedViewSearchModes, state.SearchMode) {

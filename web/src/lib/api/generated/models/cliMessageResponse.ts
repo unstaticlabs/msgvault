@@ -3,6 +3,8 @@
  */
 import type { CliMessageAddress } from "./cliMessageAddress";
 import type { CliMessageAttachment } from "./cliMessageAttachment";
+import type { CliMessageResponseInboxState } from "./cliMessageResponseInboxState";
+import type { CliMessageResponseReadState } from "./cliMessageResponseReadState";
 
 export interface CliMessageResponse {
   attachments: CliMessageAttachment[];
@@ -16,14 +18,17 @@ export interface CliMessageResponse {
   from: CliMessageAddress[];
   has_attachments: boolean;
   id: number;
+  inbox_state?: CliMessageResponseInboxState;
   labels: string[];
   message_type?: string;
+  read_state?: CliMessageResponseReadState;
   /** @nullable */
   received_at: string | null;
   sent_at: string;
   size_estimate: number;
   snippet: string;
   source_conversation_id: string;
+  source_id?: number;
   source_message_id: string;
   subject: string;
   to: CliMessageAddress[];

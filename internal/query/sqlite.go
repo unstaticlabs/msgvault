@@ -1165,7 +1165,10 @@ func (e *SQLiteEngine) GetMessageSummariesByIDs(ctx context.Context, ids []int64
 }
 
 func (e *SQLiteEngine) fetchLabelsForMessages(ctx context.Context, messages []MessageSummary) error {
-	return fetchLabelsForMessageList(ctx, e.db, e.dialect.Rebind, "", messages)
+	if err := fetchLabelsForMessageList(ctx, e.db, e.dialect.Rebind, "", messages); err != nil {
+		return err
+	}
+	return e.fetchProviderState(ctx, messages)
 }
 
 // GetMessage retrieves a full message by internal ID.
@@ -1188,7 +1191,17 @@ func (e *SQLiteEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID
 }
 
 func (e *SQLiteEngine) getMessageByQuery(ctx context.Context, whereClause string, args ...any) (*MessageDetail, error) {
-	return getMessageByQueryShared(ctx, e.db, e.dialect.Rebind, "", whereClause, args...)
+	message, err := getMessageByQueryShared(ctx, e.db, e.dialect.Rebind, "", whereClause, args...)
+	if err != nil || message == nil {
+		return message, err
+	}
+	rows := []MessageSummary{{ID: message.ID}}
+	if err := e.fetchProviderState(ctx, rows); err != nil {
+		return nil, err
+	}
+	message.InboxState = rows[0].InboxState
+	message.ReadState = rows[0].ReadState
+	return message, nil
 }
 
 // GetAttachment retrieves attachment metadata by ID.

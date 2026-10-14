@@ -35,7 +35,7 @@ import (
 // string. Version 27 adds curated person display names.
 // Schema bumps force a full rebuild before readers use an older publication,
 // so committed caches never mix shards of different shapes.
-const CacheSchemaVersion = 27
+const CacheSchemaVersion = 28
 
 // CacheSyncState is the commit marker written after a complete analytics
 // cache publication. SQLite remains authoritative; these watermarks only

@@ -143,6 +143,8 @@ func generatedMessageToAPIMessage(m generated.MessageSummary) store.APIMessage {
 	}
 	return store.APIMessage{
 		ID:              m.ID,
+		InboxState:      providerStateFromEnum(m.InboxState),
+		ReadState:       providerStateFromEnum(m.ReadState),
 		SourceID:        int64Value(m.SourceID),
 		SourceMessageID: stringValue(m.SourceMessageID),
 		ConversationID:  int64Value(m.ConversationID),
@@ -188,6 +190,8 @@ func generatedDetailToAPIMessage(m *generated.MessageDetail) *store.APIMessage {
 	}
 	msg := &store.APIMessage{
 		ID:              m.ID,
+		InboxState:      providerStateFromEnum(m.InboxState),
+		ReadState:       providerStateFromEnum(m.ReadState),
 		SourceID:        int64Value(m.SourceID),
 		SourceMessageID: stringValue(m.SourceMessageID),
 		ConversationID:  int64Value(m.ConversationID),

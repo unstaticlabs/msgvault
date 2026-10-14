@@ -822,6 +822,9 @@ type cliAccountResponse struct {
 }
 
 type cliMessageResponse struct {
+	SourceID             int64                  `json:"source_id,omitempty"`
+	InboxState           string                 `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState            string                 `json:"read_state,omitempty" enum:"read,unread,unknown"`
 	ID                   int64                  `json:"id"`
 	SourceMessageID      string                 `json:"source_message_id"`
 	ConversationID       int64                  `json:"conversation_id"`
@@ -3275,7 +3278,10 @@ func (s *Server) resolveCLIMessage(r *http.Request, idStr string) (*query.Messag
 func cliMessageResponseFromQuery(msg *query.MessageDetail) cliMessageResponse {
 	return cliMessageResponse{
 		ID:                   msg.ID,
+		InboxState:           providerStateValue(msg.InboxState),
+		ReadState:            providerStateValue(msg.ReadState),
 		SourceMessageID:      msg.SourceMessageID,
+		SourceID:             msg.SourceID,
 		ConversationID:       msg.ConversationID,
 		SourceConversationID: msg.SourceConversationID,
 		Subject:              msg.Subject,

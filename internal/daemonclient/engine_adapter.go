@@ -571,6 +571,8 @@ func querySummaryFromAPIMessage(msg store.APIMessage) query.MessageSummary {
 	}
 	return query.MessageSummary{
 		ID:                   msg.ID,
+		InboxState:           providerStateFromString(msg.InboxState),
+		ReadState:            providerStateFromString(msg.ReadState),
 		SourceID:             msg.SourceID,
 		SourceMessageID:      msg.SourceMessageID,
 		ConversationID:       msg.ConversationID,
@@ -779,6 +781,8 @@ func queryDetailFromAPIMessage(msg *store.APIMessage) *query.MessageDetail {
 	}
 	detail := &query.MessageDetail{
 		ID:                   msg.ID,
+		InboxState:           providerStateFromString(msg.InboxState),
+		ReadState:            providerStateFromString(msg.ReadState),
 		SourceID:             msg.SourceID,
 		SourceMessageID:      msg.SourceMessageID,
 		ConversationID:       msg.ConversationID,
@@ -865,6 +869,8 @@ func (e *Engine) GetMessageSummariesByIDs(ctx context.Context, ids []int64) ([]q
 		}
 		summary := query.MessageSummary{
 			ID:                   md.ID,
+			InboxState:           providerStateFromString(md.InboxState),
+			ReadState:            providerStateFromString(md.ReadState),
 			SourceID:             md.SourceID,
 			SourceMessageID:      md.SourceMessageID,
 			ConversationID:       md.ConversationID,

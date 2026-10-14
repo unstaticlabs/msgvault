@@ -1913,6 +1913,9 @@ func TestGetCLIMessage_Success(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"id": 42,
+ "source_id": 3,
+ "inbox_state": "inbox",
+ "read_state": "unread",
 			"source_message_id": "remote-42",
 			"conversation_id": 7,
 			"subject": "Test Subject",
@@ -1935,6 +1938,9 @@ func TestGetCLIMessage_Success(t *testing.T) {
 
 	require.NotNil(t, msg, "message")
 	assert.Equal(int64(42), msg.ID, "ID")
+	assert.Equal(int64(3), msg.SourceID)
+	assert.Equal("inbox", msg.InboxState)
+	assert.Equal("unread", msg.ReadState)
 	assert.Equal("remote-42", msg.SourceMessageID, "SourceMessageID")
 	assert.Equal("Test Subject", msg.Subject, "Subject")
 	assert.Equal("alice@example.com", msg.From[0].Email, "From")

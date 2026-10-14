@@ -13,6 +13,7 @@
   import { rebaseVirtualScroll, RowGeometry, tableViewportHeight } from '../../theme/preferences.svelte';
   import IdentityBadge from './IdentityBadge.svelte';
   import RowKind from './RowKind.svelte';
+ import { mailboxCaption } from '../../explore/mailbox-state';
 
   interface Props {
     rows: EntryRow[];
@@ -556,6 +557,9 @@
                       {/if}
                     {:else if column === 'title'}
                       <strong>{row.title || '(untitled)'}</strong>
+                      {#if row.kind === 'email'}
+                        <span class="mailbox-state" title={mailboxCaption(row.inbox_state, row.read_state)}>{mailboxCaption(row.inbox_state, row.read_state)}</span>
+                      {/if}
                     {:else if column === 'excerpt'}
                       {row.match.strongest_excerpt || row.preview}
                       {#if row.match.lexical_match_count !== undefined}
@@ -771,7 +775,23 @@
     box-shadow: inset 2px 0 0 var(--accent-blue);
   }
 
+  .cell--title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .mailbox-state {
+    flex: none;
+    max-width: 50%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
+  }
   .cell--title strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     color: var(--text-primary);
     font-weight: 600;
   }
