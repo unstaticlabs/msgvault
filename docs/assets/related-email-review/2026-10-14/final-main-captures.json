@@ -1,0 +1,68 @@
+{
+  "capture_date": "2026-10-14",
+  "product_revision": "df10dca4858366a8b49bc905c78a90e8ecbf0b87",
+  "context": "Coherent native API and web assets; synthetic three-account archive; Member exact-copy handled confirmation and Undo, Viewer permitted reading on desktop and mobile.",
+  "limits": "Still images demonstrate layout. Native browser interactions and actual native HTTP scope/ZIP receipts are separate evidence. No claim of an operating-system download artifact.",
+  "images": [
+    {
+      "file": "work-items-root-final-grouped-overview-df10.jpg",
+      "sha256": "55662ae0dca9a1cd58c760b88f4eb3e506f18617d7c4a53ba8144a887857d11c",
+      "dimensions": {
+        "width": 1280,
+        "height": 720
+      },
+      "metadata": "JFIF only; no EXIF, XMP, IPTC or comments",
+      "privacy": "Lead and implementation owner personally inspected exact pixels; synthetic fixtures only."
+    },
+    {
+      "file": "work-items-root-final-handled-df10.jpg",
+      "sha256": "f85c4834d97070c23ffc83c2d4ad8c86da05c1a741bb05b70d1eb7ab0f8c6e99",
+      "dimensions": {
+        "width": 1280,
+        "height": 720
+      },
+      "metadata": "JFIF only; no EXIF, XMP, IPTC or comments",
+      "privacy": "Lead and implementation owner personally inspected exact pixels; synthetic fixtures only."
+    },
+    {
+      "file": "work-items-root-final-handled-preview-df10.jpg",
+      "sha256": "5856823b81005f05cb61b02a90915acb54a4e1cc5fc6333fb8296526e3352482",
+      "dimensions": {
+        "width": 1280,
+        "height": 720
+      },
+      "metadata": "JFIF only; no EXIF, XMP, IPTC or comments",
+      "privacy": "Lead and implementation owner personally inspected exact pixels; synthetic fixtures only."
+    },
+    {
+      "file": "work-items-root-final-mobile-viewer-df10.jpg",
+      "sha256": "229adeba3b6a1fac9d5bf38dc0471f575d45306c36c81cd5517d96f4f757c2fb",
+      "dimensions": {
+        "width": 390,
+        "height": 844
+      },
+      "metadata": "JFIF only; no EXIF, XMP, IPTC or comments",
+      "privacy": "Lead and implementation owner personally inspected exact pixels; synthetic fixtures only."
+    },
+    {
+      "file": "work-items-root-final-undone-df10.jpg",
+      "sha256": "53fc7713b25f667490579c4d3f6df4966a2d55b9fdeda83d39d24c7cc8995647",
+      "dimensions": {
+        "width": 1280,
+        "height": 720
+      },
+      "metadata": "JFIF only; no EXIF, XMP, IPTC or comments",
+      "privacy": "Lead and implementation owner personally inspected exact pixels; synthetic fixtures only."
+    },
+    {
+      "file": "work-items-root-final-viewer-df10.jpg",
+      "sha256": "b097de1ccae696434bf98c333ce924e1b82805a206a64a0b6573df1cfbf312db",
+      "dimensions": {
+        "width": 1280,
+        "height": 720
+      },
+      "metadata": "JFIF only; no EXIF, XMP, IPTC or comments",
+      "privacy": "Lead and implementation owner personally inspected exact pixels; synthetic fixtures only."
+    }
+  ]
+}
