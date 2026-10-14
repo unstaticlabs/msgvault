@@ -1093,6 +1093,11 @@ func buildCacheLocked(
 		return nil, fmt.Errorf("inspect IMAP membership metadata: %w", err)
 	}
 	sourceSnapshot.hasIMAPMembership = membershipColumns > 0
+	var providerLabelColumns int
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('labels') WHERE name IN ('source_id','source_label_id','label_type')`).Scan(&providerLabelColumns); err != nil {
+		return nil, fmt.Errorf("inspect provider label metadata: %w", err)
+	}
+	sourceSnapshot.hasProviderLabels = providerLabelColumns == 3
 
 	var recipientEnvelopeColumnCount int
 	if err := sourceSnapshot.QueryRow(`
@@ -1442,7 +1447,10 @@ func buildCacheLocked(
 		sourceSnapshot.hasRecipientEnvelope,
 	)
 
-	inboxState, readState := store.MailboxStateExpressions("m", "sqlite_db.", "duckdb", sourceSnapshot.hasIMAPMembership)
+	inboxState, readState := "'unknown'", "'unknown'"
+	if sourceSnapshot.hasProviderLabels {
+		inboxState, readState = store.MailboxStateExpressions("m", "sqlite_db.", "duckdb", sourceSnapshot.hasIMAPMembership)
+	}
 	if err := runExport(tableMessages, fmt.Sprintf(`
 	COPY (
 		SELECT
@@ -1838,6 +1846,7 @@ type cacheSourceSnapshot struct {
 	hasMessageSourceAttribution bool
 	hasRecipientEnvelope        bool
 	hasIMAPMembership           bool
+	hasProviderLabels           bool
 }
 
 type cacheSnapshotTable struct {
@@ -1984,6 +1993,10 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 	// depends on the data: read_csv_auto sniffs empty or all-NULL columns as
 	// VARCHAR, which breaks downstream SQL that binds these columns against
 	// typed Parquet (e.g. COALESCE(BIGINT, VARCHAR) is a binder error).
+	providerLabelColumns := "NULL AS source_id, NULL AS source_label_id, NULL AS label_type"
+	if s.hasProviderLabels {
+		providerLabelColumns = "source_id, source_label_id, label_type"
+	}
 	tables := []cacheSnapshotTable{
 		// deleted_at is exported so the main COPY query can apply the
 		// `deleted_at IS NULL` filter on this path the same way it does
@@ -2004,7 +2017,7 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 			"types={'source_id': 'BIGINT', 'address': 'VARCHAR'}"},
 		{tableParticipantIdentifiers, "SELECT participant_id, identifier_type, identifier_value, display_value, is_primary FROM participant_identifiers",
 			"types={'participant_id': 'BIGINT', 'identifier_type': 'VARCHAR', 'identifier_value': 'VARCHAR', 'display_value': 'VARCHAR', 'is_primary': 'BOOLEAN'}"},
-		{tableLabels, "SELECT id, name,source_id,source_label_id,label_type FROM labels",
+		{tableLabels, "SELECT id, name, " + providerLabelColumns + " FROM labels",
 			"types={'id': 'BIGINT', 'name': 'VARCHAR','source_id':'BIGINT','source_label_id':'VARCHAR','label_type':'VARCHAR'}"},
 		{"sources", "SELECT id, identifier, source_type FROM sources",
 			"types={'id': 'BIGINT', 'identifier': 'VARCHAR', 'source_type': 'VARCHAR'}"},

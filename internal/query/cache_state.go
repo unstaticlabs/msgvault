@@ -32,7 +32,8 @@ import (
 // message dimension; version 26 adds envelope_address (the header address as
 // recorded, NULL when absent) to message_recipients and makes email_address
 // the resolved recipient address (envelope, else participant), never an empty
-// string. Version 27 adds curated person display names.
+// string. Version 27 adds curated person display names; version 28 adds
+// provider Inbox and read status to messages and logical email entries.
 // Schema bumps force a full rebuild before readers use an older publication,
 // so committed caches never mix shards of different shapes.
 const CacheSchemaVersion = 28

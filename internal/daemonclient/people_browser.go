@@ -785,6 +785,7 @@ func fileRowFromGenerated(row generated.PersonFileSearchRow) query.FileRow {
 
 func entryRowFromGenerated(row generated.EntryRow) query.EntryRow {
 	return query.EntryRow{
+		InboxState: providerStateFromEnum(row.InboxState), ReadState: providerStateFromEnum(row.ReadState),
 		Key: row.Key, Kind: query.EntryKind(row.Kind), AnchorMessageID: copyInt64(row.AnchorMessageID),
 		ConversationID: copyInt64(row.ConversationID), OccurredAt: row.OccurredAt,
 		Match: query.MatchSummary{

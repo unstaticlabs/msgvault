@@ -3,8 +3,11 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,4 +202,64 @@ func TestBuildCacheIMAPFlagsRefreshAndCSVFallback(t *testing.T) {
 			assert.True(t, repeated.Skipped)
 		})
 	}
+}
+
+// A prior publication has neither state column. Rebuilding at the same message
+// watermark must replace its shape before an analytical reader uses it.
+func TestBuildCacheSchema27MailboxStateUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	dbPath, cache := filepath.Join(dir, "mail.db"), filepath.Join(dir, "cache")
+	st, err := store.Open(dbPath)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, st.Close()) }()
+	require.NoError(t, st.InitSchema())
+	source, err := st.GetOrCreateSource("gmail", "upgrade@example.com")
+	require.NoError(t, err)
+	conv, err := st.EnsureConversation(source.ID, "upgrade-thread", "[QA] Upgrade")
+	require.NoError(t, err)
+	id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: "upgrade-id", MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), Valid: true}})
+	require.NoError(t, err)
+	for _, name := range []string{"INBOX", "UNREAD"} {
+		label, err := st.EnsureLabel(source.ID, name, name, "system")
+		require.NoError(t, err)
+		require.NoError(t, st.AddMessageLabels(id, []int64{label}))
+	}
+	first, err := buildCache(dbPath, cache, false)
+	require.NoError(t, err)
+	files, err := filepath.Glob(filepath.Join(cache, "messages", "*", "*.parquet"))
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	db, err := sql.Open("duckdb", "")
+	require.NoError(t, err)
+	for _, path := range files {
+		old := path + ".previous"
+		escape := func(s string) string { return strings.ReplaceAll(filepath.ToSlash(s), "'", "''") }
+		_, err = db.Exec(fmt.Sprintf("COPY (SELECT * EXCLUDE(inbox_state,read_state) FROM read_parquet('%s')) TO '%s' (FORMAT PARQUET)", escape(path), escape(old)))
+		require.NoError(t, err)
+		require.NoError(t, os.Rename(old, path))
+	}
+	require.NoError(t, db.Close())
+	state, err := query.ReadCacheSyncState(cache)
+	require.NoError(t, err)
+	state.SchemaVersion = 27
+	bytes, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(cache, "_last_sync.json"), bytes, 0o600))
+	stale := cacheNeedsBuild(dbPath, cache)
+	require.True(t, stale.NeedsBuild)
+	require.True(t, stale.FullRebuild)
+	rebuilt, err := buildCache(dbPath, cache, false)
+	require.NoError(t, err)
+	require.False(t, rebuilt.Skipped)
+	assert.Equal(t, first.MaxMessageID, rebuilt.MaxMessageID)
+	engine, err := query.NewDuckDBEngine(cache, dbPath, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, engine.Close()) }()
+	result, err := engine.Explore(t.Context(), query.ExploreRequest{Context: query.Context{InboxStates: []string{"inbox"}, ReadStates: []string{"unread"}}})
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, id, *result.Rows[0].AnchorMessageID)
+	state, err = query.ReadCacheSyncState(cache)
+	require.NoError(t, err)
+	assert.Equal(t, 28, state.SchemaVersion)
 }
