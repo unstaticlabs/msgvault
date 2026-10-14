@@ -52,6 +52,9 @@ func duckDBDateParam(value time.Time) string {
 // appear in aggregates until the next `build-parquet --full-rebuild`. For the full deletion
 // index solution, see beads issue msgvault-ozj.
 type DuckDBEngine struct {
+	emailWorkMu   sync.Mutex
+	emailWorkMemo []*emailWorkPopulation
+
 	db               *sql.DB
 	analyticsDir     string
 	sqlitePath       string        // Path to SQLite database for sqlite_scan queries

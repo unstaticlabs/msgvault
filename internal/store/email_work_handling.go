@@ -17,6 +17,7 @@ type EmailWorkActivity struct {
 	OccurredAt            time.Time
 	Incoming              bool
 	AttributionComplete   bool
+	UnavailableReasons    []string
 	ConfirmedSourceSender bool
 	PositiveSent          bool
 	Draft                 bool
@@ -74,7 +75,13 @@ func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
 		}
 		if !member.AttributionComplete {
 			incomplete = true
-			reason("identity_unavailable")
+			if len(member.UnavailableReasons) == 0 {
+				reason("identity_unavailable")
+			} else {
+				for _, unavailable := range member.UnavailableReasons {
+					reason(unavailable)
+				}
+			}
 		}
 		if member.Linkage.Version != mime.EmailLinkageVersion || member.Linkage.Outcome != "complete" {
 			incomplete = true
