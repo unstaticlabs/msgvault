@@ -66,6 +66,7 @@ var operationMinimumRole = map[string]authz.Role{
 	"getAggregates":                 authz.RoleViewer,
 	"getSubAggregates":              authz.RoleViewer,
 	"getTotalStats":                 authz.RoleViewer,
+	"getEmailWorkMembers":           authz.RoleViewer,
 	"explore":                       authz.RoleViewer,
 	"exploreGroups":                 authz.RoleViewer,
 	"listExploreFiles":              authz.RoleViewer,

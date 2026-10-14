@@ -124,3 +124,9 @@ func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error)
 func validateExecutable(state store.SavedViewStateEnvelope) error {
 	return store.ValidateSavedViewState(state)
 }
+
+// EmailWorkReader keeps a work-item read on the exact Saved View and archive
+// revisions that produced its row, rather than silently broadening account scope.
+type EmailWorkReader interface {
+	GetEmailWorkItem(ctx context.Context, viewID, viewRevision int64, uid, cacheRevision string, limit, offset int) (*query.EmailWorkMembersResponse, error)
+}

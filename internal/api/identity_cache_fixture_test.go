@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/identityindex"
+	"go.kenn.io/msgvault/internal/query"
 )
 
 // ensureIdentityCacheFixtureDatasets keeps hand-built API fixtures compatible
@@ -24,6 +26,7 @@ func ensureIdentityCacheFixtureDatasets(
 	analyticsDir string,
 ) {
 	t.Helper()
+	ensureEmailWorkCacheFixtureDatasets(t, db, analyticsDir)
 	personDisplayNamesDir := filepath.Join(analyticsDir, "person_display_names")
 	require.NoError(t, os.MkdirAll(personDisplayNamesDir, 0o755), "create person_display_names fixture directory")
 	personDisplayNamesPath := filepath.ToSlash(filepath.Join(personDisplayNamesDir, "person_display_names.parquet"))
@@ -38,4 +41,22 @@ func ensureIdentityCacheFixtureDatasets(
 		OutputRoot:     analyticsDir,
 	})
 	require.NoError(t, err, "derive identity fixture datasets")
+}
+
+func ensureEmailWorkCacheFixtureDatasets(t *testing.T, db *sql.DB, analyticsDir string) {
+	t.Helper()
+	for _, spec := range []struct{ name, selectSQL string }{
+		{query.DatasetEmailWorkFacts, "SELECT 0::BIGINT AS message_id,1::INTEGER AS extraction_version,''::VARCHAR AS outcome,''::VARCHAR AS facts WHERE false"},
+		{query.DatasetEmailWorkSeeds, "SELECT 0::BIGINT AS ordinal,''::VARCHAR AS uid,0::BIGINT AS anchor_message_id,NULL::BIGINT AS live_message_id WHERE false"},
+		{query.DatasetEmailWorkIdentities, "SELECT 0::BIGINT AS source_id,''::VARCHAR AS address WHERE false"},
+		{query.DatasetEmailWorkDelivery, "SELECT 0::BIGINT AS message_id,0::BIGINT AS source_id,NULL::VARCHAR AS provider_thread_id,false AS native_sent,false AS native_draft,false AS provider_complete WHERE false"},
+	} {
+		path := filepath.Join(analyticsDir, spec.name, spec.name+".parquet")
+		if _, err := os.Stat(path); err == nil {
+			continue
+		}
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		_, err := db.Exec(fmt.Sprintf("COPY (%s) TO '%s' (FORMAT PARQUET)", spec.selectSQL, strings.ReplaceAll(filepath.ToSlash(path), "'", "''")))
+		require.NoError(t, err, "write typed empty work dataset")
+	}
 }

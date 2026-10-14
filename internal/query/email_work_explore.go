@@ -9,6 +9,14 @@ import (
 )
 
 func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request ExploreRequest, conditions, rank string, withLists bool) (string, *emailWorkPopulation, func(), error) {
+	if len(request.Context.HandlingStates) > 0 && request.Context.RowUnit != RowUnitEmailWork {
+		return "", nil, nil, fmt.Errorf("%w: handling filters require related email rows", ErrInvalidExploreRequest)
+	}
+	for _, state := range request.Context.HandlingStates {
+		if !slices.Contains([]string{"handled", "actionable", "unknown"}, state) {
+			return "", nil, nil, fmt.Errorf("%w: unsupported handling state", ErrInvalidExploreRequest)
+		}
+	}
 	if request.Context.RowUnit == RowUnitDefault {
 		if withLists {
 			return buildExploreLogicalSQLWithCandidateRank(conditions, rank), nil, func() {}, nil
@@ -24,7 +32,7 @@ func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request Expl
 		return "", nil, nil, err
 	}
 	table := fmt.Sprintf("_email_work_members_%d", e.tempTableSeq.Add(1))
-	if _, err := e.db.ExecContext(ctx, "CREATE TEMP TABLE "+table+" (message_id BIGINT,work_key VARCHAR)"); err != nil {
+	if _, err := e.db.ExecContext(ctx, "CREATE TEMP TABLE "+table+" (message_id BIGINT,work_key VARCHAR,handling_state VARCHAR)"); err != nil {
 		return "", nil, nil, err
 	}
 	cleanup := func() { _, _ = e.db.Exec("DROP TABLE IF EXISTS " + table) }
@@ -45,8 +53,8 @@ func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request Expl
 			continue
 		} // Unprocessed legacy mail stays readable as ordinary rows.
 		for _, id := range members {
-			values = append(values, "(?,?)")
-			args = append(args, id, "email-work:"+seed.UID)
+			values = append(values, "(?,?,?)")
+			args = append(args, id, "email-work:"+seed.UID, population.handling[i].State)
 			if len(values) == 1000 {
 				if err := flush(); err != nil {
 					cleanup()
@@ -62,15 +70,29 @@ func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request Expl
 	// Conditions and ranking are evaluated once on witnesses. Complete permitted
 	// work families, including completed outbound copies outside Inbox, are then
 	// projected from the same scoped map. No account outside it enters the row.
+	stateCondition := ""
+	legacyCondition := ""
+	if len(request.Context.HandlingStates) > 0 {
+		quoted := make([]string, len(request.Context.HandlingStates))
+		for i, state := range request.Context.HandlingStates {
+			quoted[i] = "'" + state + "'"
+		}
+		stateCondition = " WHERE w.handling_state IN (" + strings.Join(quoted, ",") + ")"
+		if slices.Contains(request.Context.HandlingStates, "unknown") {
+			legacyCondition = " AND COALESCE(NULLIF(message_type,''),'email')='email'"
+		} else {
+			legacyCondition = " AND FALSE"
+		}
+	}
 	sql := `WITH witnesses AS (
  SELECT *, ` + rank + ` AS candidate_rank FROM analytical_entries WHERE ` + conditions + `
 ), matched_work AS (
- SELECT w.work_key,a.message_id,a.candidate_rank FROM witnesses a JOIN ` + table + ` w ON w.message_id=a.message_id
+ SELECT w.work_key,a.message_id,a.candidate_rank FROM witnesses a JOIN ` + table + ` w ON w.message_id=a.message_id` + stateCondition + `
 ), classified AS (
  SELECT a.*, ` + sqlIsChatPredicate("message_type", "conversation_type") + ` AS is_chat,
  ` + identityindex.EntryKindSQL("message_type") + ` AS entry_kind,
  NULL::VARCHAR AS work_key,true AS is_match_witness FROM witnesses a
- WHERE NOT EXISTS (SELECT 1 FROM ` + table + ` w WHERE w.message_id=a.message_id)
+ WHERE NOT EXISTS (SELECT 1 FROM ` + table + ` w WHERE w.message_id=a.message_id)` + legacyCondition + `
  UNION ALL
  SELECT a.*, mw.candidate_rank,false AS is_chat,'email_work_item' AS entry_kind,w.work_key,mw.message_id IS NOT NULL AS is_match_witness
  FROM analytical_entries a JOIN ` + table + ` w ON w.message_id=a.message_id

@@ -415,6 +415,10 @@ type ClientInterface interface {
 	Explore(ctx context.Context, options *ExploreRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ExploreResponse, error)
 	ExploreWithResponse(ctx context.Context, options *ExploreRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ExploreResp, error)
 
+	// GetEmailWorkMembers Read every permitted source copy and link evidence in an email work item
+	GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResponse, error)
+	GetEmailWorkMembersWithResponse(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResp, error)
+
 	// ListExploreFiles List bounded chronological attachment facts
 	ListExploreFiles(ctx context.Context, options *ListExploreFilesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListExploreFilesResponse, error)
 	ListExploreFilesWithResponse(ctx context.Context, options *ListExploreFilesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListExploreFilesResp, error)
@@ -6769,6 +6773,70 @@ func (c *Client) Explore(ctx context.Context, options *ExploreRequestOptions, re
 	}
 
 	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+	return responseParser(ctx, resp)
+}
+
+// GetEmailWorkMembers Read every permitted source copy and link evidence in an email work item
+func (c *Client) GetEmailWorkMembers(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResponse, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/members",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*GetEmailWorkMembersResponse, error) {
+		bodyBytes := resp.Content
+		if resp.StatusCode != 200 {
+			target := new(GetEmailWorkMembersErrorResponse)
+			// Handle empty error response body gracefully - skip unmarshal if no content
+			if len(bodyBytes) > 0 {
+				if err = json.Unmarshal(bodyBytes, target); err != nil {
+					return nil, &runtime.ResponseDecodeError{
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Headers.Get("Content-Type"),
+						ContentLength: len(bodyBytes),
+						TargetType:    "GetEmailWorkMembersErrorResponse",
+						Body:          bodyBytes,
+						Err:           err,
+					}
+				}
+			}
+			// Return error with (possibly empty) target
+			if errTarget, ok := any(*target).(error); ok {
+				return nil, runtime.NewClientAPIError(errTarget, runtime.WithStatusCode(resp.StatusCode))
+			}
+			return nil, runtime.NewClientAPIError(fmt.Errorf("API error (status %d): %v", resp.StatusCode, *target),
+				runtime.WithStatusCode(resp.StatusCode))
+		}
+		target := new(GetEmailWorkMembersResponse)
+		// Handle empty response body gracefully
+		if len(bodyBytes) == 0 {
+			return target, nil
+		}
+		if err = json.Unmarshal(bodyBytes, target); err != nil {
+			return nil, &runtime.ResponseDecodeError{
+				StatusCode:    resp.StatusCode,
+				ContentType:   resp.Headers.Get("Content-Type"),
+				ContentLength: len(bodyBytes),
+				TargetType:    "GetEmailWorkMembersResponse",
+				Body:          bodyBytes,
+				Err:           err,
+			}
+		}
+		return target, nil
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/members")
 	if err != nil {
 		return nil, fmt.Errorf("error executing request: %w", err)
 	}

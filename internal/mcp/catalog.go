@@ -10,6 +10,7 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/savedview"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector/visual"
 	"go.kenn.io/msgvault/pkg/client/generated"
@@ -41,6 +42,7 @@ type catalogCapabilities struct {
 	people          bool
 	visualSearch    bool
 	savedViews      bool
+	emailWork       bool
 }
 
 func visualSearchAvailable(capabilities catalogCapabilities) bool {
@@ -113,6 +115,7 @@ func (d toolDefinition) bind(h *handlers) func(context.Context, toolRequest) (*t
 }
 
 func capabilitiesFor(opts ServeOptions) catalogCapabilities {
+	_, emailWork := opts.SavedViews.(savedview.EmailWorkReader)
 	return catalogCapabilities{
 		semanticSearch:  opts.HybridEngine != nil || opts.HybridSearcher != nil,
 		vectorInMessage: opts.HybridEngine != nil && opts.Backend != nil,
@@ -121,19 +124,20 @@ func capabilitiesFor(opts ServeOptions) catalogCapabilities {
 		people:          opts.PeopleBackend != nil,
 		visualSearch:    opts.VisualSearcher != nil,
 		savedViews:      opts.SavedViews != nil,
+		emailWork:       emailWork,
 	}
 }
 
 // stableOperationCatalogs owns the immutable schemas registered with the SDK.
 // The SDK v1.7 schema cache keys explicit schemas by pointer identity, so a
 // stateless server must reuse these roots instead of rebuilding them per HTTP
-// request. There are only 128 possible capability keys, which also keeps the
+// request. There are only 256 possible capability keys, which also keeps the
 // shared SDK cache boundary fixed.
 var stableOperationCatalogs = buildOperationCatalogs()
 
 func buildOperationCatalogs() map[catalogCapabilities][]toolDefinition {
-	catalogs := make(map[catalogCapabilities][]toolDefinition, 128)
-	for mask := range 128 {
+	catalogs := make(map[catalogCapabilities][]toolDefinition, 256)
+	for mask := range 256 {
 		capabilities := catalogCapabilities{
 			semanticSearch:  mask&0b1000000 != 0,
 			vectorInMessage: mask&0b0100000 != 0,
@@ -142,6 +146,7 @@ func buildOperationCatalogs() map[catalogCapabilities][]toolDefinition {
 			people:          mask&0b0000100 != 0,
 			visualSearch:    mask&0b0000010 != 0,
 			savedViews:      mask&0b0000001 != 0,
+			emailWork:       mask&0b10000000 != 0,
 		}
 		catalogs[capabilities] = buildOperationCatalog(capabilities)
 	}
@@ -170,6 +175,7 @@ func buildOperationCatalog(capabilities catalogCapabilities) []toolDefinition {
 		listMessagesDefinition(nil),
 		listSavedViewsDefinition(nil),
 		runSavedViewDefinition(nil),
+		getEmailWorkItemDefinition(nil),
 		searchByDomainsDefinition(nil),
 		searchDocumentsDefinition(nil),
 		searchInMessageDefinition(nil, capabilities.vectorInMessage),
@@ -292,6 +298,7 @@ func documentSearchAvailable(c catalogCapabilities) bool { return c.documentSear
 func peopleAvailable(c catalogCapabilities) bool { return c.people }
 
 func savedViewsAvailable(c catalogCapabilities) bool { return c.savedViews }
+func emailWorkAvailable(c catalogCapabilities) bool  { return c.savedViews && c.emailWork }
 
 func toolAnnotations(readOnly bool) *sdkmcp.ToolAnnotations {
 	falseValue := false

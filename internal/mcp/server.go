@@ -54,6 +54,7 @@ const (
 	ToolUpdatePersonNotes       = "update_person_notes"
 	ToolListSavedViews          = "list_saved_views"
 	ToolGetSavedView            = "get_saved_view"
+	ToolGetEmailWorkItem        = "get_email_work_item"
 	ToolRunSavedView            = "run_saved_view"
 	ToolCreateSavedView         = "create_saved_view"
 	ToolUpdateSavedView         = "update_saved_view"

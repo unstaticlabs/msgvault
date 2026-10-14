@@ -308,7 +308,10 @@ import (
 // 2.25.0 adds provider-neutral inbox_state/read_state filters to Explore and
 // Saved Views, provider state in message/entry results, and source_id in CLI
 // message detail so remote MCP readers retain account provenance.
-const APISchemaVersion = "2.25.0"
+// 2.26.0 adds opt-in related-email work rows, handling filters and scoped,
+// revision-pinned member provenance. Cached member body links can require their
+// opaque message identity so physical ID reuse cannot redirect an old link.
+const APISchemaVersion = "2.26.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

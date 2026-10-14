@@ -71,6 +71,9 @@ func (e *DuckDBEngine) Explore(ctx context.Context, request ExploreRequest) (*Ex
 	countArgs := append(append([]any{}, conditionArgs...), candidateRankArgs...)
 	args := append(append([]any{}, countArgs...), limit, request.Page.Offset)
 	var queryText string
+	if len(request.Context.HandlingStates) > 0 && request.Context.RowUnit != RowUnitEmailWork {
+		return nil, fmt.Errorf("%w: handling filters require related email rows", ErrInvalidExploreRequest)
+	}
 	fastPath := request.Context.RowUnit == RowUnitDefault && !e.exploreFastPathDisabled && !exploreConditionsTouchParticipantLists(request)
 	var population *emailWorkPopulation
 	var workLogicalSQL string

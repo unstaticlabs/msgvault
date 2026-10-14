@@ -813,7 +813,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 	case "listMessages":
 		return paginationParams("page", "page_size")
 	case "getMessage":
-		return []*huma.Param{pathIntegerParam("Message ID")}
+		return []*huma.Param{pathIntegerParam("Message ID"), queryStringParam("expected_message_uid", "Opaque identity of a cached work-item copy; prevents an old link opening reused message IDs", false)}
 	case "listMessageTasks", "createOrLinkMessageTask":
 		params := []*huma.Param{pathIntegerParam("Archived email message ID")}
 		if operationID == "createOrLinkMessageTask" {

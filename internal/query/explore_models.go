@@ -60,6 +60,7 @@ const (
 type Context struct {
 	RowUnit          RowUnit            `json:"row_unit,omitempty"`
 	WorkAuthorityKey string             `json:"-"`
+	HandlingStates   []string           `json:"handling_states,omitempty"`
 	InboxStates      []string           `json:"inbox_states,omitempty"`
 	ReadStates       []string           `json:"read_states,omitempty"`
 	SourceIDs        []int64            `json:"source_ids,omitempty"`

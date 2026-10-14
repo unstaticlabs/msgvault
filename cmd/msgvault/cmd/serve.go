@@ -3768,3 +3768,7 @@ func (a *storeAPIAdapter) inboxArchiveYieldCheck() func() bool {
 	}
 	return gate.HasRequestWaiters
 }
+
+func (a *storeAPIAdapter) EmailWorkSeedForMessage(ctx context.Context, id int64) (*store.EmailWorkSeed, error) {
+	return a.store.EmailWorkSeedForMessage(ctx, id)
+}

@@ -694,6 +694,9 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Message not found")
 			return
 		case err == nil:
+			if !s.validateExpectedMessageUID(w, r, id) {
+				return
+			}
 			writeJSON(w, http.StatusOK, messageDetailFromQuery(qMsg))
 			return
 		}
@@ -738,6 +741,9 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	detail.Attachments = attachments
 
+	if !s.validateExpectedMessageUID(w, r, id) {
+		return
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 

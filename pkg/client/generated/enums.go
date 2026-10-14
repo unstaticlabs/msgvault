@@ -659,12 +659,14 @@ const (
 	ExploreFilterDimensionParticipant ExploreFilterDimension = "participant"
 	ExploreFilterDimensionReadState   ExploreFilterDimension = "read_state"
 	ExploreFilterDimensionSource      ExploreFilterDimension = "source"
+	HandlingState                     ExploreFilterDimension = "handling_state"
+	RowUnit                           ExploreFilterDimension = "row_unit"
 )
 
 // Validate checks if the ExploreFilterDimension value is valid
 func (e ExploreFilterDimension) Validate() error {
 	switch e {
-	case ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionInboxState, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionReadState, ExploreFilterDimensionSource:
+	case ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionInboxState, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionReadState, ExploreFilterDimensionSource, HandlingState, RowUnit:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ExploreFilterDimension value, got: %v", e))

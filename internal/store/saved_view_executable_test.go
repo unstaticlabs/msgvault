@@ -61,3 +61,11 @@ func TestSavedViewsKeepNativeIdentityAndMailingListFiltersExecutable(t *testing.
 		require.NoError(t, err)
 	}
 }
+
+func TestSavedViewEmailWorkVocabularyPreservesDefinition(t *testing.T) {
+	requirements := require.New(t)
+	state := store.SavedViewStateEnvelope{Filters: []store.SavedViewFilter{{Field: "row_unit", Operator: "eq", Values: []string{"email_work_item"}}, {Field: "handling_state", Operator: "in", Values: []string{"actionable", "unknown"}}}}
+	requirements.NoError(store.ValidateSavedViewState(state))
+	state.Filters = state.Filters[1:]
+	requirements.ErrorIs(store.ValidateSavedViewState(state), store.ErrSavedViewInvalidState)
+}

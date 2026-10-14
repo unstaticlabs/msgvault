@@ -80,6 +80,8 @@ type PatchEmploymentBody = EmploymentBody
 
 type ExploreBody = ExploreHTTPRequest
 
+type GetEmailWorkMembersBody = EmailWorkMembersHTTPRequest
+
 type ListExploreFilesBody = ExploreFilesHTTPRequest
 
 type ExploreGroupsBody = ExploreGroupsHTTPRequest

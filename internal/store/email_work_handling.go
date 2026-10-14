@@ -8,6 +8,8 @@ import (
 	"go.kenn.io/msgvault/internal/mime"
 )
 
+const EmailWorkUnknown = "unknown"
+
 // EmailWorkActivity is a source-scoped published activity fact. PositiveSent
 // comes from native Sent membership, never messages.is_sent. Incoming is
 // resolved separately from confirmed owner identities in the selected scope.
@@ -44,7 +46,7 @@ type emailReceivedEvent struct {
 // EvaluateEmailWorkHandling receives one already-authorized scoped component.
 // Grouping references and provider threads do not confer handling authority.
 func EvaluateEmailWorkHandling(members []EmailWorkActivity) EmailWorkHandling {
-	result := EmailWorkHandling{State: "unknown", OutstandingEventIDs: []int64{}, OutboundEvidenceIDs: []int64{}, Reasons: []string{}}
+	result := EmailWorkHandling{State: EmailWorkUnknown, OutstandingEventIDs: []int64{}, OutboundEvidenceIDs: []int64{}, Reasons: []string{}}
 	events := map[string]*emailReceivedEvent{}
 	identityEvent := map[string]string{}
 	memberEvent := map[int64]string{}

@@ -2997,6 +2997,131 @@ func (d DuplicateCostRisk) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(d))
 }
 
+type EmailWorkMemberFact struct {
+	AttachedOriginalIds   []string  `json:"attached_original_ids,omitempty"`
+	AttributionComplete   bool      `json:"attribution_complete"`
+	ConfirmedSourceSender bool      `json:"confirmed_source_sender"`
+	ConversationID        int64     `json:"conversation_id"`
+	InboxState            string    `json:"inbox_state" validate:"required"`
+	Incoming              bool      `json:"incoming"`
+	Labels                []string  `json:"labels" validate:"required"`
+	LinkageOutcome        string    `json:"linkage_outcome" validate:"required"`
+	MessageID             int64     `json:"message_id"`
+	MessageUID            *string   `json:"message_uid,omitempty"`
+	NativeDraft           bool      `json:"native_draft"`
+	NativeSent            bool      `json:"native_sent"`
+	OccurredAt            time.Time `json:"occurred_at" validate:"required"`
+	Preview               string    `json:"preview" validate:"required"`
+	ProviderThreadID      *string   `json:"provider_thread_id,omitempty"`
+	ReadState             string    `json:"read_state" validate:"required"`
+	ReferenceIds          []string  `json:"reference_ids,omitempty"`
+	ReplyIds              []string  `json:"reply_ids,omitempty"`
+	RfcMessageID          *string   `json:"rfc_message_id,omitempty"`
+	SourceID              int64     `json:"source_id"`
+	SourceIdentifier      string    `json:"source_identifier" validate:"required"`
+	SourceMessageID       string    `json:"source_message_id" validate:"required"`
+	SourceType            string    `json:"source_type" validate:"required"`
+	Title                 string    `json:"title" validate:"required"`
+	UnavailableReasons    []string  `json:"unavailable_reasons,omitempty"`
+}
+
+func (e EmailWorkMemberFact) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
+type EmailWorkMembersHTTPRequest struct {
+	CacheRevision *string            `json:"cache_revision,omitempty"`
+	Limit         *int64             `json:"limit,omitempty" validate:"omitempty,gte=0,lte=500"`
+	Offset        *int64             `json:"offset,omitempty" validate:"omitempty,gte=0"`
+	Predicate     ExploreHTTPRequest `json:"predicate"`
+	UID           string             `json:"uid" validate:"required,max=128,min=1"`
+}
+
+func (e EmailWorkMembersHTTPRequest) Validate() error {
+	var errors runtime.ValidationErrors
+	if e.Limit != nil {
+		if err := typesValidator.Var(e.Limit, "omitempty,gte=0,lte=500"); err != nil {
+			errors = errors.Append("Limit", err)
+		}
+	}
+	if e.Offset != nil {
+		if err := typesValidator.Var(e.Offset, "omitempty,gte=0"); err != nil {
+			errors = errors.Append("Offset", err)
+		}
+	}
+	if v, ok := any(e.Predicate).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Predicate", err)
+		}
+	}
+	if err := typesValidator.Var(e.UID, "required,max=128,min=1"); err != nil {
+		errors = errors.Append("UID", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type EmailWorkMembersResponse struct {
+	CacheRevision         string                `json:"cache_revision" validate:"required"`
+	EvidenceMessageIds    []int64               `json:"evidence_message_ids" validate:"required"`
+	Members               []EmailWorkMemberFact `json:"members" validate:"required"`
+	OutstandingMessageIds []int64               `json:"outstanding_message_ids" validate:"required"`
+	RequestedUID          string                `json:"requested_uid" validate:"required"`
+	Summary               EmailWorkSummary      `json:"summary"`
+	TotalCount            int64                 `json:"total_count"`
+	UID                   string                `json:"uid" validate:"required"`
+}
+
+func (e EmailWorkMembersResponse) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.CacheRevision, "required"); err != nil {
+		errors = errors.Append("CacheRevision", err)
+	}
+	if err := typesValidator.Var(e.EvidenceMessageIds, "required"); err != nil {
+		errors = errors.Append("EvidenceMessageIds", err)
+	}
+	for i, item := range e.Members {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("Members[%d]", i), err)
+			}
+		}
+	}
+	if err := typesValidator.Var(e.OutstandingMessageIds, "required"); err != nil {
+		errors = errors.Append("OutstandingMessageIds", err)
+	}
+	if err := typesValidator.Var(e.RequestedUID, "required"); err != nil {
+		errors = errors.Append("RequestedUID", err)
+	}
+	if v, ok := any(e.Summary).(runtime.Validator); ok {
+		if err := v.Validate(); err != nil {
+			errors = errors.Append("Summary", err)
+		}
+	}
+	if err := typesValidator.Var(e.UID, "required"); err != nil {
+		errors = errors.Append("UID", err)
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type EmailWorkSummary struct {
+	EvidenceCount    int64    `json:"evidence_count"`
+	OutstandingCount int64    `json:"outstanding_count"`
+	Reasons          []string `json:"reasons" validate:"required"`
+	SourceIds        []int64  `json:"source_ids" validate:"required"`
+	State            string   `json:"state" validate:"required"`
+	UID              string   `json:"uid" validate:"required"`
+}
+
+func (e EmailWorkSummary) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
 type Employment struct {
 	AddressID      *int64       `json:"address_id,omitempty"`
 	Confidence     *float64     `json:"confidence,omitempty"`
@@ -3156,6 +3281,7 @@ type EntryRow struct {
 	ConversationType           string              `json:"conversation_type" validate:"required"`
 	CounterpartParticipantID   *int64              `json:"counterpart_participant_id,omitempty"`
 	DeletedFromSource          bool                `json:"deleted_from_source"`
+	EmailWork                  *EmailWorkSummary   `json:"email_work,omitempty"`
 	HasAttachments             bool                `json:"has_attachments"`
 	InboxState                 *EntryRowInboxState `json:"inbox_state,omitempty"`
 	Key                        string              `json:"key" validate:"required"`
@@ -3180,6 +3306,13 @@ func (e EntryRow) Validate() error {
 	var errors runtime.ValidationErrors
 	if err := typesValidator.Var(e.ConversationType, "required"); err != nil {
 		errors = errors.Append("ConversationType", err)
+	}
+	if e.EmailWork != nil {
+		if v, ok := any(e.EmailWork).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("EmailWork", err)
+			}
+		}
 	}
 	if e.InboxState != nil {
 		if v, ok := any(e.InboxState).(runtime.Validator); ok {
