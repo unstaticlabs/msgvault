@@ -197,7 +197,7 @@
         <p>{mailboxCaption(member.inbox_state, member.read_state)} · Local read: {member.local_read_state ?? 'unknown'} · {member.native_draft ? 'Draft' : member.native_sent ? 'Sent' : member.incoming ? 'Received' : 'Direction unknown'}</p>
         <p>{detail.outstanding_message_ids.includes(member.message_id) ? 'Outstanding received event' : detail.evidence_message_ids.includes(member.message_id) ? 'Completed outbound reply evidence' : 'Retained related copy'}</p>
         <details><summary>Why these copies are linked</summary>
-          <dl><dt>Source message ID</dt><dd>{member.source_message_id}</dd><dt>Source thread ID</dt><dd>{member.provider_thread_id || member.conversation_id}</dd><dt>Saved labels</dt><dd>{member.labels.join(', ') || 'None'}</dd><dt>Archived evidence</dt><dd>{emailWorkExtractionLabel(member.linkage_outcome)}</dd><dt>Sender matches a confirmed account identity</dt><dd>{member.confirmed_source_sender ? 'Yes' : 'No'}</dd>
+          <dl><dt>Source message ID</dt><dd>{member.source_message_id}</dd><dt>{member.provider_thread_id ? 'Source thread ID' : 'Archive conversation ID'}</dt><dd>{member.provider_thread_id || member.conversation_id}</dd><dt>Saved labels</dt><dd>{member.labels.join(', ') || 'None'}</dd><dt>Archived evidence</dt><dd>{emailWorkExtractionLabel(member.linkage_outcome)}</dd><dt>Sender matches a confirmed account identity</dt><dd>{member.confirmed_source_sender ? 'Yes' : 'No'}</dd>
             {#if member.rfc_message_id}<dt>Message-ID</dt><dd>{member.rfc_message_id}</dd>{/if}
             {#if member.reply_ids?.length}<dt>Direct reply</dt><dd>{member.reply_ids.join(', ')}</dd>{/if}
             {#if member.reference_ids?.length}<dt>References</dt><dd>{member.reference_ids.join(', ')}</dd>{/if}

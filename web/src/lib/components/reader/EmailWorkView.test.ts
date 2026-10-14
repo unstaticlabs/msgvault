@@ -101,6 +101,7 @@ describe("native related email reader", () => {
       cacheRevision: "qa-work-1",
     });
     await screen.findByText("Handled in these accounts");
+    expect(screen.getAllByText("Archive conversation ID")).toHaveLength(2);
     expect(
       screen.getByText("Unread · In inbox · Local read: read · Received"),
     ).toBeTruthy();
