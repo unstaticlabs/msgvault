@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
@@ -95,6 +96,120 @@ func TestBuildCacheEmailWorkNativeAndCSVPublication(t *testing.T) {
 			assertions.True(sent)
 			assertions.False(draft)
 			assertions.True(complete)
+		})
+	}
+}
+
+func TestBuildCacheLocalWorkRecoveryNativeAndCSV(t *testing.T) {
+	for _, mode := range []string{"native", "csv"} {
+		t.Run(mode, func(t *testing.T) {
+			requirements := require.New(t)
+			assertions := assert.New(t)
+			ctx := context.Background()
+			if mode == "csv" {
+				t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "1")
+			}
+			root := t.TempDir()
+			dbPath, cache := filepath.Join(root, "synthetic.db"), filepath.Join(root, "cache")
+			st, err := store.Open(dbPath)
+			requirements.NoError(err)
+			defer func() { requirements.NoError(st.Close()) }()
+			requirements.NoError(st.InitSchema())
+			var targets []store.EmailWorkActionTarget
+			var sourceIDs []int64
+			var ids []int64
+			var originalFrom, originalTo int64
+			for i := range 3 {
+				owner := fmt.Sprintf("account-%d@example.test", i)
+				source, err := st.GetOrCreateSource("gmail", owner)
+				requirements.NoError(err)
+				sourceIDs = append(sourceIDs, source.ID)
+				requirements.NoError(st.AddAccountIdentity(source.ID, owner, "manual"))
+				conversation, err := st.EnsureConversation(source.ID, "source-thread", "[QA] independent mail")
+				requirements.NoError(err)
+				from, err := st.EnsureParticipant("requester@example.test", "[QA] Requester", "example.test")
+				requirements.NoError(err)
+				to, err := st.EnsureParticipant(owner, "[QA] Account", "example.test")
+				requirements.NoError(err)
+				if i == 0 {
+					originalFrom = from
+					originalTo = to
+				}
+				id, err := st.PersistMessage(&store.MessagePersistData{Message: &store.Message{SourceID: source.ID, ConversationID: conversation, SourceMessageID: fmt.Sprintf("message-%d", i), MessageType: "email", Subject: sql.NullString{String: "[QA] Same subject is not identity", Valid: true}, SentAt: sql.NullTime{Time: time.Date(2026, 1, 1, 12, i, 0, 0, time.UTC), Valid: true}}, RawMIME: []byte(fmt.Sprintf("Message-ID: <message-%d@example.test>\r\n\r\n[QA]", i)), Recipients: []store.RecipientSet{{Type: "from", ParticipantIDs: []int64{from}, EmailAddresses: []string{"requester@example.test"}}, {Type: "to", ParticipantIDs: []int64{to}, EmailAddresses: []string{owner}}}})
+				requirements.NoError(err)
+				ids = append(ids, id)
+				seed, err := st.EmailWorkSeedForMessage(ctx, id)
+				requirements.NoError(err)
+				targets = append(targets, store.EmailWorkActionTarget{UID: seed.UID, SourceID: source.ID})
+			}
+			_, err = buildCache(dbPath, cache, true)
+			requirements.NoError(err)
+			engine, err := query.NewDuckDBEngine(cache, dbPath, nil)
+			requirements.NoError(err)
+			defer func() { requirements.NoError(engine.Close()) }()
+			request := query.ExploreRequest{Context: query.Context{RowUnit: query.RowUnitEmailWork, WorkAuthorityKey: "synthetic-reader"}}
+			before, err := engine.Explore(ctx, request)
+			requirements.NoError(err)
+			assertions.Equal(int64(3), before.TotalCount, "same subject never automatically merges unrelated mail")
+			snapshot, err := st.EmailWorkRecoverySnapshot(ctx)
+			requirements.NoError(err)
+			linked, err := st.CreateEmailWorkAction(ctx, store.EmailWorkActionInput{UID: strings.Repeat("a", 32), Kind: "link", Targets: targets[:2], Snapshot: snapshot, ActorKind: "user", ActorUserID: 7})
+			requirements.NoError(err)
+			published, err := buildCache(dbPath, cache, false)
+			requirements.NoError(err)
+			assertions.False(published.Skipped, "local change invalidates a cache with unchanged max message ID")
+			grouped, err := engine.Explore(ctx, request)
+			requirements.NoError(err)
+			assertions.Equal(int64(2), grouped.TotalCount)
+			scoped := request
+			scoped.Context.SourceIDs = []int64{sourceIDs[0], sourceIDs[2]}
+			separate, err := engine.Explore(ctx, scoped)
+			requirements.NoError(err)
+			assertions.Equal(int64(2), separate.TotalCount)
+			for _, row := range separate.Rows {
+				assertions.Equal(int64(1), row.MessageCount, "hidden B cannot supply a local bridge")
+			}
+			snapshot, err = st.EmailWorkRecoverySnapshot(ctx)
+			requirements.NoError(err)
+			_, err = st.CreateEmailWorkAction(ctx, store.EmailWorkActionInput{UID: strings.Repeat("b", 32), Kind: "handled", Targets: targets[:2], Snapshot: snapshot, ActorKind: "user", ActorUserID: 7})
+			requirements.NoError(err)
+			_, err = buildCache(dbPath, cache, false)
+			requirements.NoError(err)
+			members, err := engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: request, UID: targets[0].UID})
+			requirements.NoError(err)
+			nativeSnapshot, err := st.EmailWorkRecoverySnapshot(ctx)
+			requirements.NoError(err)
+			assertions.Equal(nativeSnapshot, members.RecoverySnapshot, "publication uses the exact pinned authoritative native snapshot")
+			assertions.Equal("handled", members.Summary.State)
+			assertions.Empty(members.EvidenceMessageIDs, "local assertion is distinct from a sent reply")
+			assertions.Contains(members.Summary.Reasons, "local_confirmation")
+			assertions.Len(members.LocalActions, 2)
+			assertions.Len(members.Members, 2)
+			// A later real incoming message is outside the fixed local confirmation.
+			incoming, err := st.PersistMessage(&store.MessagePersistData{Message: &store.Message{SourceID: sourceIDs[0], ConversationID: members.Members[0].ConversationID, SourceMessageID: "later-inbound", MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC), Valid: true}}, RawMIME: []byte("Message-ID: <later@example.test>\r\nIn-Reply-To: <message-0@example.test>\r\n\r\n[QA] new request"), Recipients: []store.RecipientSet{{Type: "from", ParticipantIDs: []int64{originalFrom}, EmailAddresses: []string{"requester@example.test"}}, {Type: "to", ParticipantIDs: []int64{originalTo}, EmailAddresses: []string{"account-0@example.test"}}}})
+			requirements.NoError(err)
+			_, err = buildCache(dbPath, cache, false)
+			requirements.NoError(err)
+			_, err = engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: request, UID: targets[0].UID, ExpectedCacheRevision: members.CacheRevision})
+			requirements.ErrorIs(err, query.ErrEmailWorkRevisionChanged)
+			current, err := engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: request, UID: targets[0].UID})
+			requirements.NoError(err)
+			assertions.Equal("actionable", current.Summary.State)
+			assertions.Equal([]int64{incoming}, current.OutstandingMessageIDs)
+			snapshot, err = st.EmailWorkRecoverySnapshot(ctx)
+			requirements.NoError(err)
+			_, err = st.UndoEmailWorkAction(ctx, linked.UID, snapshot, linked.Revision)
+			requirements.NoError(err)
+			_, err = buildCache(dbPath, cache, false)
+			requirements.NoError(err)
+			split, err := engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: request, UID: targets[1].UID})
+			requirements.NoError(err)
+			assertions.Equal(targets[1].UID, split.UID, "undo recomputes the second immutable alias from its own anchor")
+			assertions.Len(split.Members, 1)
+			assertions.Equal(ids[1], split.Members[0].MessageID)
+			individual, err := engine.Explore(ctx, query.ExploreRequest{})
+			requirements.NoError(err)
+			assertions.Equal(int64(4), individual.TotalCount, "default individual-message unit remains unchanged")
 		})
 	}
 }

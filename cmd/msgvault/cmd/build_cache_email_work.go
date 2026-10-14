@@ -17,8 +17,16 @@ func emailWorkSnapshotTables(snapshot *cacheSourceSnapshot) []cacheSnapshotTable
 	if snapshot.hasEmailWorkSeeds {
 		seeds = "SELECT ordinal,uid,anchor_message_id,live_message_id FROM email_work_seeds"
 	}
+	actions := "SELECT CAST(NULL AS TEXT) AS uid,CAST(NULL AS TEXT) AS kind,CAST(NULL AS INTEGER) AS revision,CAST(NULL AS INTEGER) AS active,CAST(NULL AS TEXT) AS actor_kind,CAST(NULL AS INTEGER) AS actor_user_id,CAST(NULL AS TEXT) AS created_at WHERE 0"
+	targets := "SELECT CAST(NULL AS TEXT) AS action_uid,CAST(NULL AS TEXT) AS seed_uid WHERE 0"
+	if snapshot.hasEmailWorkActions {
+		actions = "SELECT uid,kind,revision,active,actor_kind,actor_user_id,created_at FROM email_work_actions"
+		targets = "SELECT action_uid,seed_uid FROM email_work_action_targets"
+	}
 	return []cacheSnapshotTable{
 		{"email_linkage_facts", facts, "types={'message_id':'BIGINT','extraction_version':'INTEGER','outcome':'VARCHAR','facts':'VARCHAR'}"},
+		{"email_work_actions", actions, "types={'uid':'VARCHAR','kind':'VARCHAR','revision':'BIGINT','active':'BOOLEAN','actor_kind':'VARCHAR','actor_user_id':'BIGINT','created_at':'TIMESTAMP'}"},
+		{"email_work_action_targets", targets, "types={'action_uid':'VARCHAR','seed_uid':'VARCHAR'}"},
 		{"email_work_seeds", seeds, "types={'ordinal':'BIGINT','uid':'VARCHAR','anchor_message_id':'BIGINT','live_message_id':'BIGINT'}"},
 	}
 }
@@ -32,6 +40,10 @@ func exportEmailWorkDatasets(snapshot *cacheSourceSnapshot, runExport func(strin
 	seeds := "SELECT NULL::BIGINT AS ordinal,NULL::VARCHAR AS uid,NULL::BIGINT AS anchor_message_id,NULL::BIGINT AS live_message_id WHERE FALSE"
 	if snapshot.hasEmailWorkSeeds {
 		seeds = fmt.Sprintf("SELECT ordinal,uid,anchor_message_id,live_message_id FROM sqlite_db.email_work_seeds WHERE live_message_id IS NULL OR live_message_id<=%d", maxID)
+	}
+	actions := "SELECT NULL::VARCHAR AS action_uid,NULL::VARCHAR AS kind,NULL::BIGINT AS revision,false AS active,NULL::VARCHAR AS actor_kind,NULL::BIGINT AS actor_user_id,NULL::TIMESTAMP AS created_at,NULL::VARCHAR AS target_uid,NULL::BIGINT AS target_count WHERE FALSE"
+	if snapshot.hasEmailWorkActions {
+		actions = `SELECT a.uid AS action_uid,a.kind,a.revision,CAST(a.active AS BOOLEAN) AS active,a.actor_kind,a.actor_user_id,CAST(a.created_at AS TIMESTAMP) AS created_at,t.seed_uid AS target_uid,(SELECT COUNT(*) FROM sqlite_db.email_work_action_targets all_t WHERE all_t.action_uid=a.uid) AS target_count FROM sqlite_db.email_work_actions a JOIN sqlite_db.email_work_action_targets t ON t.action_uid=a.uid`
 	}
 	sent := "FALSE"
 	draft := "FALSE"
@@ -67,6 +79,7 @@ func exportEmailWorkDatasets(snapshot *cacheSourceSnapshot, runExport func(strin
 		{query.DatasetEmailWorkFacts, facts}, {query.DatasetEmailWorkSeeds, seeds},
 		{query.DatasetEmailWorkIdentities, "SELECT source_id,address FROM sqlite_db.account_identities"},
 		{query.DatasetEmailWorkDelivery, delivery},
+		{query.DatasetEmailWorkActions, actions},
 	} {
 		destination := strings.ReplaceAll(filepath.Join(root, dataset.name, dataset.name+".parquet"), "'", "''")
 		if err := runExport(dataset.name, fmt.Sprintf("COPY (%s) TO '%s' (FORMAT PARQUET,COMPRESSION 'zstd')", dataset.selectSQL, destination)); err != nil {

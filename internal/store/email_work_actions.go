@@ -70,7 +70,9 @@ func emailWorkRevision(q rowQuerier, key string) (int64, error) {
 	return revision, nil
 }
 
-func emailWorkRecoverySnapshot(q rowQuerier) (string, error) {
+// EmailWorkRecoverySnapshotFor stamps an already-pinned native read snapshot.
+// The cache publisher and local-action transactions use the same calculation.
+func EmailWorkRecoverySnapshotFor(q rowQuerier) (string, error) {
 	derived, err := emailWorkRevision(q, derivedDataRevisionKey)
 	if err != nil {
 		return "", err
@@ -99,7 +101,7 @@ func (s *Store) EmailWorkRecoverySnapshot(ctx context.Context) (string, error) {
 	var token string
 	err := s.withReadSnapshotContext(ctx, func(tx *loggedTx) error {
 		var err error
-		token, err = emailWorkRecoverySnapshot(boundQuerier{ctx: ctx, q: tx})
+		token, err = EmailWorkRecoverySnapshotFor(boundQuerier{ctx: ctx, q: tx})
 		return err
 	})
 	return token, err
@@ -176,7 +178,7 @@ func (s *Store) CreateEmailWorkAction(ctx context.Context, input EmailWorkAction
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		snapshot, err := emailWorkRecoverySnapshot(boundQuerier{ctx: ctx, q: tx})
+		snapshot, err := EmailWorkRecoverySnapshotFor(boundQuerier{ctx: ctx, q: tx})
 		if err != nil {
 			return err
 		}
@@ -239,7 +241,7 @@ func (s *Store) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, e
 		if action.Revision != expectedRevision {
 			return ErrEmailWorkActionChanged
 		}
-		current, err := emailWorkRecoverySnapshot(boundQuerier{ctx: ctx, q: tx})
+		current, err := EmailWorkRecoverySnapshotFor(boundQuerier{ctx: ctx, q: tx})
 		if err != nil {
 			return err
 		}

@@ -22,6 +22,7 @@ type EmailWorkScope struct {
 
 type emailWorkPopulation struct {
 	revision            string
+	recoverySnapshot    string
 	key                 string
 	activities          map[int64]store.EmailWorkActivity
 	components          [][]int64
@@ -30,6 +31,7 @@ type emailWorkPopulation struct {
 	handling            []store.EmailWorkHandling
 	canonicalSeeds      []store.EmailWorkSeed
 	cost                int64
+	localActions        []store.EmailWorkAction
 }
 
 const emailWorkMemoBudget = 64 << 20
@@ -75,6 +77,7 @@ func (e *DuckDBEngine) emailWorkPopulationLocked(ctx context.Context, scope Emai
 	}
 	population.key = key
 	population.revision = state.Revision()
+	population.recoverySnapshot = state.RecoverySnapshot
 	if population.cost <= emailWorkMemoBudget {
 		e.emailWorkMemo = append([]*emailWorkPopulation{population}, e.emailWorkMemo...)
 		var cost int64
@@ -168,25 +171,6 @@ func (e *DuckDBEngine) readEmailWorkPopulation(ctx context.Context, sources []in
 	if err != nil {
 		return nil, err
 	}
-	members := make([]store.EmailWorkMember, 0, len(population.activities))
-	attributor := store.NewEmailWorkAttributor(owners)
-	for id, activity := range population.activities {
-		activity = attributor.Attribute(activity, envelopes[id], providerComplete[id])
-		population.activities[id] = activity
-		members = append(members, activity.EmailWorkMember)
-	}
-	population.components, err = store.PartitionEmailWorkMembers(members)
-	if err != nil {
-		return nil, err
-	}
-	for i, component := range population.components {
-		activities := make([]store.EmailWorkActivity, 0, len(component))
-		for _, id := range component {
-			population.componentForMessage[id] = i
-			activities = append(activities, population.activities[id])
-		}
-		population.handling = append(population.handling, store.EvaluateEmailWorkHandling(activities))
-	}
 	err = scanEmailWorkRows(ctx, e.db, fmt.Sprintf("SELECT ordinal,uid,anchor_message_id,live_message_id FROM read_parquet('%s')", e.parquetPath(DatasetEmailWorkSeeds)), nil, func(rows *sql.Rows) error {
 		var seed store.EmailWorkSeed
 		if err := rows.Scan(&seed.Ordinal, &seed.UID, &seed.AnchorMessageID, &seed.LiveMessageID); err != nil {
@@ -198,6 +182,30 @@ func (e *DuckDBEngine) readEmailWorkPopulation(ctx context.Context, sources []in
 	})
 	if err != nil {
 		return nil, err
+	}
+	localLinks, localHandled, err := e.readEmailWorkLocalActions(ctx, population, sources)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]store.EmailWorkMember, 0, len(population.activities))
+	attributor := store.NewEmailWorkAttributor(owners)
+	for id, activity := range population.activities {
+		activity = attributor.Attribute(activity, envelopes[id], providerComplete[id])
+		activity.LocalHandled = localHandled[id]
+		population.activities[id] = activity
+		members = append(members, activity.EmailWorkMember)
+	}
+	population.components, err = store.PartitionEmailWorkMembersWithLocalLinks(members, localLinks)
+	if err != nil {
+		return nil, err
+	}
+	for i, component := range population.components {
+		activities := make([]store.EmailWorkActivity, 0, len(component))
+		for _, id := range component {
+			population.componentForMessage[id] = i
+			activities = append(activities, population.activities[id])
+		}
+		population.handling = append(population.handling, store.EvaluateEmailWorkHandling(activities))
 	}
 	population.canonicalSeeds = make([]store.EmailWorkSeed, len(population.components))
 	for _, seed := range population.seeds {

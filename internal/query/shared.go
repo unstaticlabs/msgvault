@@ -25,6 +25,7 @@ const (
 	DatasetEmailWorkSeeds           = "email_work_seeds"
 	DatasetEmailWorkIdentities      = "email_work_identities"
 	DatasetEmailWorkDelivery        = "email_work_delivery"
+	DatasetEmailWorkActions         = "email_work_actions"
 	datasetMessages                 = "messages"
 	datasetSources                  = "sources"
 	datasetParticipants             = "participants"

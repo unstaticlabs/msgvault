@@ -769,6 +769,7 @@ func (b *TestDataBuilder) recipientDummyRow() string {
 
 func emailWorkFixtureSpecs() []struct{ name, cols, dummy string } {
 	return []struct{ name, cols, dummy string }{
+		{DatasetEmailWorkActions, "action_uid, kind, revision, active, actor_kind, actor_user_id, created_at, target_uid, target_count", "(''::VARCHAR,''::VARCHAR,0::BIGINT,false,''::VARCHAR,0::BIGINT,NULL::TIMESTAMP,''::VARCHAR,0::BIGINT)"},
 		{DatasetEmailWorkFacts, "message_id, extraction_version, outcome, facts", "(0::BIGINT,0::INTEGER,''::VARCHAR,''::VARCHAR)"},
 		{DatasetEmailWorkSeeds, "ordinal, uid, anchor_message_id, live_message_id", "(0::BIGINT,''::VARCHAR,0::BIGINT,NULL::BIGINT)"},
 		{DatasetEmailWorkIdentities, "source_id, address", "(0::BIGINT,''::VARCHAR)"},

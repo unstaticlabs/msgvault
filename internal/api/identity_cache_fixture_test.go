@@ -46,6 +46,7 @@ func ensureIdentityCacheFixtureDatasets(
 func ensureEmailWorkCacheFixtureDatasets(t *testing.T, db *sql.DB, analyticsDir string) {
 	t.Helper()
 	for _, spec := range []struct{ name, selectSQL string }{
+		{query.DatasetEmailWorkActions, "SELECT ''::VARCHAR AS action_uid,''::VARCHAR AS kind,0::BIGINT AS revision,false AS active,''::VARCHAR AS actor_kind,0::BIGINT AS actor_user_id,NULL::TIMESTAMP AS created_at,''::VARCHAR AS target_uid,0::BIGINT AS target_count WHERE false"},
 		{query.DatasetEmailWorkFacts, "SELECT 0::BIGINT AS message_id,1::INTEGER AS extraction_version,''::VARCHAR AS outcome,''::VARCHAR AS facts WHERE false"},
 		{query.DatasetEmailWorkSeeds, "SELECT 0::BIGINT AS ordinal,''::VARCHAR AS uid,0::BIGINT AS anchor_message_id,NULL::BIGINT AS live_message_id WHERE false"},
 		{query.DatasetEmailWorkIdentities, "SELECT 0::BIGINT AS source_id,''::VARCHAR AS address WHERE false"},

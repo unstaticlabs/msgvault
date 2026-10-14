@@ -64,7 +64,16 @@ func (e *DuckDBEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMe
 	page := ids[min(request.Page.Offset, len(ids)):min(request.Page.Offset+limit, len(ids))]
 	handling := population.handling[component]
 	summary := emailWorkSummary(population, "email-work:"+canonical)
-	response := &EmailWorkMembersResponse{UID: canonical, RequestedUID: request.UID, CacheRevision: population.revision, Members: []EmailWorkMemberFact{}, TotalCount: len(ids), Summary: *summary, OutstandingMessageIDs: slices.Clone(handling.OutstandingEventIDs), EvidenceMessageIDs: slices.Clone(handling.OutboundEvidenceIDs)}
+	response := &EmailWorkMembersResponse{RecoverySnapshot: population.recoverySnapshot, LocalActions: []store.EmailWorkAction{}, UID: canonical, RequestedUID: request.UID, CacheRevision: population.revision, Members: []EmailWorkMemberFact{}, TotalCount: len(ids), Summary: *summary, OutstandingMessageIDs: slices.Clone(handling.OutstandingEventIDs), EvidenceMessageIDs: slices.Clone(handling.OutboundEvidenceIDs)}
+	for _, action := range population.localActions {
+		for _, target := range action.Targets {
+			seed := population.seeds[target]
+			if seed.LiveMessageID.Valid && slices.Contains(ids, seed.LiveMessageID.Int64) {
+				response.LocalActions = append(response.LocalActions, action)
+				break
+			}
+		}
+	}
 	if len(page) == 0 {
 		return response, nil
 	}

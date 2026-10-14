@@ -2997,6 +2997,21 @@ func (d DuplicateCostRisk) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(d))
 }
 
+type EmailWorkAction struct {
+	Active      bool      `json:"active"`
+	ActorKind   string    `json:"actor_kind" validate:"required"`
+	ActorUserID int64     `json:"actor_user_id"`
+	CreatedAt   time.Time `json:"created_at" validate:"required"`
+	Kind        string    `json:"kind" validate:"required"`
+	Revision    int64     `json:"revision"`
+	Targets     []string  `json:"targets" validate:"required"`
+	UID         string    `json:"uid" validate:"required"`
+}
+
+func (e EmailWorkAction) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(e))
+}
+
 type EmailWorkMemberFact struct {
 	AttachedOriginalIds   []string  `json:"attached_original_ids,omitempty"`
 	AttributionComplete   bool      `json:"attribution_complete"`
@@ -3066,8 +3081,10 @@ func (e EmailWorkMembersHTTPRequest) Validate() error {
 type EmailWorkMembersResponse struct {
 	CacheRevision         string                `json:"cache_revision" validate:"required"`
 	EvidenceMessageIds    []int64               `json:"evidence_message_ids" validate:"required"`
+	LocalActions          []EmailWorkAction     `json:"local_actions" validate:"required"`
 	Members               []EmailWorkMemberFact `json:"members" validate:"required"`
 	OutstandingMessageIds []int64               `json:"outstanding_message_ids" validate:"required"`
+	RecoverySnapshot      string                `json:"recovery_snapshot" validate:"required"`
 	RequestedUID          string                `json:"requested_uid" validate:"required"`
 	Summary               EmailWorkSummary      `json:"summary"`
 	TotalCount            int64                 `json:"total_count"`
@@ -3082,6 +3099,13 @@ func (e EmailWorkMembersResponse) Validate() error {
 	if err := typesValidator.Var(e.EvidenceMessageIds, "required"); err != nil {
 		errors = errors.Append("EvidenceMessageIds", err)
 	}
+	for i, item := range e.LocalActions {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("LocalActions[%d]", i), err)
+			}
+		}
+	}
 	for i, item := range e.Members {
 		if v, ok := any(item).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -3091,6 +3115,9 @@ func (e EmailWorkMembersResponse) Validate() error {
 	}
 	if err := typesValidator.Var(e.OutstandingMessageIds, "required"); err != nil {
 		errors = errors.Append("OutstandingMessageIds", err)
+	}
+	if err := typesValidator.Var(e.RecoverySnapshot, "required"); err != nil {
+		errors = errors.Append("RecoverySnapshot", err)
 	}
 	if err := typesValidator.Var(e.RequestedUID, "required"); err != nil {
 		errors = errors.Append("RequestedUID", err)

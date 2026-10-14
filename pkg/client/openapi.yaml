@@ -3333,6 +3333,39 @@ components:
         - provider_idempotent
         - detail
       type: object
+    EmailWorkAction:
+      properties:
+        active:
+          type: boolean
+        actor_kind:
+          type: string
+        actor_user_id:
+          format: int64
+          type: integer
+        created_at:
+          format: date-time
+          type: string
+        kind:
+          type: string
+        revision:
+          format: int64
+          type: integer
+        targets:
+          items:
+            type: string
+          type: array
+        uid:
+          type: string
+      required:
+        - uid
+        - kind
+        - revision
+        - active
+        - actor_kind
+        - actor_user_id
+        - created_at
+        - targets
+      type: object
     EmailWorkMemberFact:
       properties:
         attached_original_ids:
@@ -3452,6 +3485,10 @@ components:
             format: int64
             type: integer
           type: array
+        local_actions:
+          items:
+            $ref: "#/components/schemas/EmailWorkAction"
+          type: array
         members:
           items:
             $ref: "#/components/schemas/EmailWorkMemberFact"
@@ -3461,6 +3498,8 @@ components:
             format: int64
             type: integer
           type: array
+        recovery_snapshot:
+          type: string
         requested_uid:
           type: string
         summary:
@@ -3479,6 +3518,8 @@ components:
         - summary
         - outstanding_message_ids
         - evidence_message_ids
+        - local_actions
+        - recovery_snapshot
       type: object
     EmailWorkSummary:
       properties:

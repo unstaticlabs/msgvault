@@ -1,6 +1,9 @@
 package query
 
-import "time"
+import (
+	"go.kenn.io/msgvault/internal/store"
+	"time"
+)
 
 // ExploreRequest is the canonical modality-neutral analytical request. The
 // API layer validates the finite grouping/sort catalog before constructing it.
@@ -333,14 +336,16 @@ type EmailWorkMemberFact struct {
 }
 
 type EmailWorkMembersResponse struct {
-	UID                   string                `json:"uid"`
-	RequestedUID          string                `json:"requested_uid"`
-	CacheRevision         string                `json:"cache_revision"`
-	Members               []EmailWorkMemberFact `json:"members"`
-	TotalCount            int                   `json:"total_count"`
-	Summary               EmailWorkSummary      `json:"summary"`
-	OutstandingMessageIDs []int64               `json:"outstanding_message_ids"`
-	EvidenceMessageIDs    []int64               `json:"evidence_message_ids"`
+	UID                   string                  `json:"uid"`
+	RequestedUID          string                  `json:"requested_uid"`
+	CacheRevision         string                  `json:"cache_revision"`
+	Members               []EmailWorkMemberFact   `json:"members"`
+	TotalCount            int                     `json:"total_count"`
+	Summary               EmailWorkSummary        `json:"summary"`
+	OutstandingMessageIDs []int64                 `json:"outstanding_message_ids"`
+	EvidenceMessageIDs    []int64                 `json:"evidence_message_ids"`
+	LocalActions          []store.EmailWorkAction `json:"local_actions"`
+	RecoverySnapshot      string                  `json:"recovery_snapshot"`
 }
 
 type ExploreFilesRequest struct {

@@ -1111,6 +1111,17 @@ func buildCacheLocked(
 		return nil, err
 	}
 	sourceSnapshot.hasEmailWorkSeeds = workTables > 0
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('email_work_actions','email_work_action_targets')`).Scan(&workTables); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasEmailWorkActions = workTables == 2
+	var recoverySnapshot string
+	if sourceSnapshot.hasEmailWorkActions {
+		recoverySnapshot, err = store.EmailWorkRecoverySnapshotFor(sourceSnapshot)
+		if err != nil {
+			return nil, fmt.Errorf("stamp local recovery snapshot: %w", err)
+		}
+	}
 
 	var recipientEnvelopeColumnCount int
 	if err := sourceSnapshot.QueryRow(`
@@ -1634,6 +1645,7 @@ func buildCacheLocked(
 		LastFailedSyncRunIDSum:              syncCounters.failedRunIDSum,
 		IdentityRevision:                    identityRevision,
 		DerivedDataRevision:                 derivedDataRevision,
+		RecoverySnapshot:                    recoverySnapshot,
 		AccountIdentityRevision:             accountIdentityRevision,
 		ParticipantIdentifierRevision:       participantIdentifierRevision,
 		ParticipantDisplayNameRevision:      participantDisplayNameRevision,
@@ -1867,6 +1879,7 @@ type cacheSourceSnapshot struct {
 	hasLabelRole                bool
 	hasEmailWorkFacts           bool
 	hasEmailWorkSeeds           bool
+	hasEmailWorkActions         bool
 }
 
 type cacheSnapshotTable struct {
