@@ -11,6 +11,33 @@ async function assertNoViolations(page: Page, label: string) {
     .toEqual([]);
 }
 
+test('Files toggle stays readable while opening and closing its pane in dark theme', async ({ page }) => {
+  await installMixedArchive(page);
+  await page.goto('/');
+  await setKitTheme(page, 'dark');
+  await page.getByRole('grid', { name: 'Relationship results' }).getByText('Archive Person').click();
+  const toggle = page.getByRole('button', { name: 'Files 1', exact: true });
+  // Stretch the native transition so its intermediate frames can be inspected
+  // deterministically, including on runners requesting reduced motion.
+  await toggle.evaluate((button) => button.style.setProperty('transition-duration', '2s', 'important'));
+  for (const expanded of [true, false]) {
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', String(expanded));
+    const transitions = await toggle.evaluate((button) => {
+      const animations = button.getAnimations();
+      for (const animation of animations) {
+        animation.pause();
+        animation.currentTime = 500;
+      }
+      return animations.length;
+    });
+    expect(transitions).toBeGreaterThan(0);
+    const result = await new AxeBuilder({ page }).include('button[aria-label="Files 1"]').analyze();
+    expect(result.violations, `Files ${expanded ? 'opening' : 'closing'} transition`).toEqual([]);
+    await toggle.evaluate((button) => button.getAnimations().forEach((animation) => animation.finish()));
+  }
+});
+
 test('Operations workspace, detail, failure, and narrow states have no axe violations', async ({ page }) => {
   test.slow();
   const fixture = await installOperations(page);

@@ -261,7 +261,7 @@
         <Button
           label={`Files ${detail.file_count}`}
           ariaLabel={`Files ${detail.file_count}`}
-          surface={filesOpen ? 'solid' : 'outline'}
+          surface={filesOpen ? 'soft' : 'outline'}
           tone={filesOpen ? 'info' : 'neutral'}
           ariaExpanded={filesOpen}
           onclick={() => onFilesToggle(!filesOpen)}
