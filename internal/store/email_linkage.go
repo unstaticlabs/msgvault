@@ -104,8 +104,18 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 	if sourceID < 1 || limit < 1 || limit > 1000 {
 		return nil, errors.New("email linkage backfill requires a positive source and batch size from 1 to 1000")
 	}
+	if err := s.requireSyncSource(sourceID); err != nil {
+		return nil, err
+	}
 	result := &EmailLinkageBackfill{}
 	err := s.withTxContext(ctx, func(tx *loggedTx) error {
+		// Match native maintenance's sources-before-checkpoints table order.
+		// ROW EXCLUSIVE is compatible with ordinary writers, including fenced syncs.
+		if s.IsPostgreSQL() {
+			if _, err := tx.ExecContext(ctx, "LOCK TABLE sources IN ROW EXCLUSIVE MODE"); err != nil {
+				return err
+			}
+		}
 		// Reserve SQLite's writer slot before checkpoint/prior-fact reads.
 		if !s.IsPostgreSQL() {
 			if _, err := tx.ExecContext(ctx, `UPDATE embedding_change_clock SET sequence = sequence WHERE singleton = 1`); err != nil {
@@ -141,6 +151,13 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 		result.Done = len(ids) <= limit
 		ids = ids[:min(len(ids), limit)]
 		for _, id := range ids {
+			// PersistMessage also holds message before raw and seed/FK rows.
+			// Locking raw first can deadlock on a legacy missing-seed message.
+			if s.IsPostgreSQL() {
+				if err := s.lockMessageForRecipientWrite(boundQuerier{ctx: ctx, q: tx}, id); err != nil {
+					return err
+				}
+			}
 			rawSQL := `SELECT CASE WHEN length(raw_data) <= ? THEN raw_data ELSE NULL END, compression, length(raw_data), raw_format FROM message_raw WHERE message_id = ?`
 			rawSQL += s.dialect.SelectForUpdate()
 			var compressed []byte

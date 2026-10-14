@@ -137,6 +137,13 @@ func (s *Store) EmailWorkAction(ctx context.Context, uid string) (*EmailWorkActi
 }
 
 func (s *Store) lockEmailWorkCuration(ctx context.Context, tx *loggedTx) error {
+	// Conflict with native maintenance before taking the curation row or seeds.
+	// Compatible ordinary writers keep their native row-level concurrency.
+	if s.IsPostgreSQL() {
+		if _, err := tx.ExecContext(ctx, "LOCK TABLE messages IN ROW EXCLUSIVE MODE"); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO archive_metadata (key,value) VALUES (?,'0') ON CONFLICT(key) DO NOTHING`, emailWorkCurationRevisionKey); err != nil {
 		return err
 	}
@@ -193,7 +200,13 @@ func (s *Store) CreateEmailWorkAction(ctx context.Context, input EmailWorkAction
 		for _, target := range targets {
 			var source int64
 			var messageType string
-			err := tx.QueryRowContext(ctx, `SELECT m.source_id,COALESCE(NULLIF(lower(m.message_type),''),'email') FROM email_work_seeds seed JOIN messages m ON m.id=seed.live_message_id WHERE seed.uid=?`+s.dialect.SelectForUpdate(), target.UID).Scan(&source, &messageType)
+			// The message protects its immutable live seed against deletion/reuse.
+			// Do not lock seed then message according to an incidental JOIN plan.
+			targetLock := s.dialect.SelectForUpdate()
+			if s.IsPostgreSQL() {
+				targetLock = " FOR UPDATE OF m"
+			}
+			err := tx.QueryRowContext(ctx, `SELECT m.source_id,COALESCE(NULLIF(lower(m.message_type),''),'email') FROM email_work_seeds seed JOIN messages m ON m.id=seed.live_message_id WHERE seed.uid=?`+targetLock, target.UID).Scan(&source, &messageType)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrEmailWorkActionChanged
 			}

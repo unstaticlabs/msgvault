@@ -2303,6 +2303,10 @@ func (d *PostgreSQLDialect) IsFTSValueTooLargeError(err error) bool {
 var exclusiveLockTables = []string{
 	"sync_runs", "sources", "conversations", "conversation_participants",
 	"messages", "message_recipients", "message_labels", "message_bodies", "message_raw",
+	// Work evidence/aliases cascade from messages; preparation checkpoints
+	// cascade from sources. Local journal writes share the maintained barrier.
+	"email_linkage_checkpoints", "email_work_seeds", "email_linkage_facts",
+	"email_work_actions", "email_work_action_targets",
 	"attachments", "document_occurrences", "labels", "participants", "participant_identifiers", "reactions",
 	"participant_contact_observations", identityMatchCandidatesTableName, identityMatchCandidateSourcesTableName,
 	identityMatchEvidenceTableName, identityMatchEvidenceSourcesTableName,

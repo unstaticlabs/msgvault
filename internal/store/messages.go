@@ -5228,6 +5228,13 @@ func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, form
 				return err
 			}
 		}
+		// Match ordinary persistence/backfill: message before raw, then seeds/facts.
+		// This also conflicts with maintenance before taking later table locks.
+		if s.IsPostgreSQL() {
+			if err := s.lockMessageForRecipientWrite(tx, messageID); err != nil {
+				return err
+			}
+		}
 		if err := upsertMessageRawWithFormat(tx, messageID, rawData, format); err != nil {
 			return err
 		}

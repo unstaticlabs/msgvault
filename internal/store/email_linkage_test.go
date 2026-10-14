@@ -352,3 +352,31 @@ func TestEmailLinkageBackfillLegacyTypesAndSignedIDs(t *testing.T) {
 	r.NoError(err)
 	a.Equal(before+4, after)
 }
+
+func TestEmailLinkageBackfillHonorsScopedSource(t *testing.T) {
+	r := require.New(t)
+	a := assert.New(t)
+	st := testutil.NewTestStore(t)
+	owner, err := st.GetOrCreateSource("gmail", "qa-scoped-owner@example.test")
+	r.NoError(err)
+	other, err := st.GetOrCreateSource("gmail", "qa-scoped-other@example.test")
+	r.NoError(err)
+	id, err := st.PersistMessage(&store.MessagePersistData{Message: linkageMessage(t, st, other.ID, "excluded"), RawMIME: []byte("Message-ID: <excluded@example.test>\r\n\r\n[QA]")})
+	r.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`DELETE FROM email_linkage_facts WHERE message_id=?`), id)
+	r.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`DELETE FROM email_work_seeds WHERE live_message_id=?`), id)
+	r.NoError(err)
+	run, err := st.StartSync(owner.ID, "full")
+	r.NoError(err)
+	_, err = st.ScopedToSync(owner.ID, run).BackfillEmailLinkage(t.Context(), other.ID, 10)
+	r.Error(err)
+	_, found, err := st.EmailLinkageEvidence(t.Context(), id)
+	r.NoError(err)
+	a.False(found)
+	_, err = st.EmailWorkSeedForMessage(t.Context(), id)
+	r.ErrorIs(err, store.ErrEmailWorkAliasMissing)
+	var count int
+	r.NoError(st.DB().QueryRow(st.Rebind(`SELECT COUNT(*) FROM email_linkage_checkpoints WHERE source_id=?`), other.ID).Scan(&count))
+	a.Zero(count)
+}
