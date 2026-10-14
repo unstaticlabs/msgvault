@@ -396,6 +396,7 @@
   /* Spacing sits on the 4px grid: 8px between header lines, 16px of air
    * before the hairline that closes the header. */
   .relationship-header {
+    container-type: inline-size;
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
@@ -440,6 +441,26 @@
     display: flex;
     flex: none;
     gap: var(--space-2);
+  }
+
+  /* Fit the selected identity and existing actions to the actual pane,
+   * including narrow desktop splits, without shrinking the name away. */
+  @container (max-width: 640px) {
+    .title-row {
+      flex-wrap: wrap;
+    }
+
+    .title-row h2 {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
+    .actions {
+      max-width: 100%;
+      flex-basis: 100%;
+      flex-wrap: wrap;
+    }
   }
 
   .counts {
