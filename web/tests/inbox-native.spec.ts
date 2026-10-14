@@ -20,6 +20,19 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 800 }, { name: '
     await expect(grid).toBeVisible();
     await expect(grid.locator('[data-row-key]')).toHaveCount(3);
     await expect(grid.locator('[data-row-key]').first()).toContainText('Unread · In inbox');
+    for (const label of ['In inbox', 'Unread']) {
+      const chip = page.locator('.context-crumbs .crumb').filter({ hasText: new RegExp(`^${label}$`) });
+      await expect(chip).toBeVisible();
+      const box = await chip.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+    }
+    const caption = grid.locator('[data-row-key]').first().locator('.mailbox-state');
+    const captionBox = await caption.boundingBox();
+    expect(captionBox).not.toBeNull();
+    expect(captionBox!.x + captionBox!.width).toBeLessThanOrEqual(viewport.width);
     await captureScreenshot(page, path.join(output!, `inbox-unread-${viewport.name}.png`));
     await page.getByRole('button', { name: 'Filters', exact: true }).click();
     await expect(page.getByRole('combobox', { name: 'Inbox: In inbox', exact: true })).toBeVisible();

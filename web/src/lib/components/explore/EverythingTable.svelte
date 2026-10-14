@@ -919,4 +919,10 @@
       scroll-behavior: auto !important;
     }
   }
+  @media (max-width: 640px) {
+    .cell--title { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; }
+    .cell--title strong, .mailbox-state { line-height: 1.2; }
+    .cell--title strong { max-width: 100%; }
+    .mailbox-state { max-width: 100%; }
+  }
 </style>

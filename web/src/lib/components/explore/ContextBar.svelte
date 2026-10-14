@@ -238,4 +238,10 @@
     justify-content: space-between;
     gap: var(--space-4);
   }
+  @media (max-width: 640px) {
+    .context-bar { flex-wrap: wrap; }
+    .context-controls { flex: 1 1 100%; flex-wrap: wrap; }
+    .context-crumbs { flex: 1 1 calc(100% - 80px); flex-wrap: wrap; overflow: visible; }
+    .context-count { margin-left: auto; }
+  }
 </style>
