@@ -3695,3 +3695,19 @@ CREATE INDEX IF NOT EXISTS idx_account_identities_address
 
 CREATE INDEX IF NOT EXISTS idx_collection_sources_source_id
     ON collection_sources(source_id);
+
+
+-- Explicit email linkage evidence; source message/thread records stay intact.
+CREATE TABLE IF NOT EXISTS email_linkage_facts (
+    message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    extraction_version INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    facts TEXT NOT NULL,
+    raw_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS email_linkage_checkpoints (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    extraction_version INTEGER NOT NULL,
+    last_message_id BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_id, extraction_version)
+);

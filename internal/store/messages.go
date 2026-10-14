@@ -1485,11 +1485,7 @@ func nullStringValue(ns sql.NullString) string {
 
 // UpsertMessageRaw stores the compressed raw MIME data for a message.
 func (s *Store) UpsertMessageRaw(messageID int64, rawData []byte) error {
-	return upsertMessageRaw(s.db, messageID, rawData)
-}
-
-func upsertMessageRaw(q querier, messageID int64, rawData []byte) error {
-	return upsertMessageRawWithFormat(q, messageID, rawData, "mime")
+	return s.UpsertMessageRawWithFormat(messageID, rawData, "mime")
 }
 
 func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, format string) error {
@@ -2011,6 +2007,9 @@ func (s *Store) persistMessageWith(
 		}
 		if err := upsertMessageRawWithFormat(q, messageID, data.RawMIME, rawFormat); err != nil {
 			return 0, fmt.Errorf("upsert raw: %w", err)
+		}
+		if err := s.extractEmailLinkageTx(ctx, tx, messageID, data.RawMIME, rawFormat); err != nil {
+			return 0, fmt.Errorf("store email linkage: %w", err)
 		}
 	}
 
@@ -5188,15 +5187,18 @@ func (s *Store) ReplaceReactions(messageID int64, reactions []ReactionRef) error
 // UpsertMessageRawWithFormat stores compressed raw data with an explicit format.
 // Unlike UpsertMessageRaw (which hardcodes 'mime'), this accepts the format as a parameter.
 func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, format string) error {
-	if s.syncGeneration != nil {
-		return s.withTx(func(tx *loggedTx) error {
+	return s.withTx(func(tx *loggedTx) error {
+		if s.syncGeneration != nil {
 			if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
 				return err
 			}
-			return upsertMessageRawWithFormat(tx, messageID, rawData, format)
-		})
-	}
-	return upsertMessageRawWithFormat(s.db, messageID, rawData, format)
+		}
+		if err := upsertMessageRawWithFormat(tx, messageID, rawData, format); err != nil {
+			return err
+		}
+		err := s.extractEmailLinkageTx(context.Background(), tx, messageID, rawData, format)
+		return err
+	})
 }
 
 // AttachmentPathsUniqueToSource returns local content and thumbnail paths for

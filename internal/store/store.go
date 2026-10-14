@@ -1949,6 +1949,12 @@ func (s *Store) InitSchemaContext(ctx context.Context) error {
 			// through so the rest of schema init still runs.
 		}
 	}
+	// This ledger entry covers only the additive schema. Archived MIME is
+	// extracted separately in resumable batches; missing facts remain unknown.
+	if err := s.runOnceMigration(ctx, "email_linkage_schema", 1, false,
+		func(context.Context) error { return nil }); err != nil {
+		return err
+	}
 	if err := s.ensureArchiveUIDContext(ctx); err != nil {
 		return err
 	}
