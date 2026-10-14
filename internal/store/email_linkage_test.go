@@ -291,3 +291,64 @@ func TestMessageRawRevisionLegacyAndAtomicWrites(t *testing.T) {
 	requirements.NoError(err)
 	assertions.Equal(changed, restored)
 }
+
+// Legacy physical IDs and NULL types are native archive facts, not new IDs to
+// allocate or renumber. Preparation must repair them behind its watermark.
+func TestEmailLinkageBackfillLegacyTypesAndSignedIDs(t *testing.T) {
+	r := require.New(t)
+	a := assert.New(t)
+	ctx := context.Background()
+	st, _ := testutil.NewLegacyNullableEmailStore(t)
+	source, err := st.GetOrCreateSource("gmail", "qa-legacy-prepare@example.test")
+	r.NoError(err)
+	conv, err := st.EnsureConversation(source.ID, "legacy", "[QA]")
+	r.NoError(err)
+	insert := `INSERT INTO messages(id,source_id,conversation_id,source_message_id,message_type,sent_at)`
+	if st.IsPostgreSQL() {
+		insert += ` OVERRIDING SYSTEM VALUE`
+	}
+	insert += ` VALUES (?,?,?,?,?,?)`
+	for i, typ := range []any{nil, "", "EMAIL", "email", "chat"} {
+		id := int64(i - 2)
+		_, err = st.DB().Exec(st.Rebind(insert), id, source.ID, conv, fmt.Sprintf("legacy-%d", id), typ, "2026-01-01T12:00:00Z")
+		r.NoError(err)
+		if i != 3 {
+			_, err = st.DB().Exec(st.Rebind(`INSERT INTO message_raw(message_id,raw_data,raw_format,compression) VALUES (?,?,'mime',NULL)`), id, []byte(fmt.Sprintf("Message-ID: <legacy-%d@example.test>\r\nIn-Reply-To: <legacy-root@example.test>\r\n\r\n[QA]", id)))
+			r.NoError(err)
+		}
+	}
+	_, err = st.DB().Exec(st.Rebind(`INSERT INTO email_linkage_checkpoints(source_id,extraction_version,last_message_id) VALUES (?,?,100)`), source.ID, mime.EmailLinkageVersion)
+	r.NoError(err)
+	before, err := st.DerivedDataRevision()
+	r.NoError(err)
+	for i := range 4 {
+		result, err := st.BackfillEmailLinkage(ctx, source.ID, 1)
+		r.NoError(err)
+		a.Equal(1, result.Processed)
+		a.Equal(1, result.Changed)
+		a.Equal(int64(100), result.LastMessageID)
+		a.Equal(i == 3, result.Done)
+		facts, found, err := st.EmailLinkageEvidence(ctx, int64(i-2))
+		r.NoError(err)
+		r.True(found)
+		if i == 3 {
+			a.Equal("missing_raw", facts.Outcome)
+		} else {
+			a.Equal("complete", facts.Outcome)
+		}
+		seed, err := st.EmailWorkSeedForMessage(ctx, int64(i-2))
+		r.NoError(err)
+		a.Equal(int64(i-2), seed.AnchorMessageID)
+	}
+	_, found, err := st.EmailLinkageEvidence(ctx, 2)
+	r.NoError(err)
+	a.False(found, "non-email is excluded")
+	again, err := st.BackfillEmailLinkage(ctx, source.ID, 1)
+	r.NoError(err)
+	a.True(again.Done)
+	a.Zero(again.Processed)
+	a.Zero(again.Changed)
+	after, err := st.DerivedDataRevision()
+	r.NoError(err)
+	a.Equal(before+4, after)
+}

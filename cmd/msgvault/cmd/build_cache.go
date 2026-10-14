@@ -1050,8 +1050,13 @@ func buildCacheLocked(
 	}
 	var expectedBatchCount, expectedTotalCount int64
 	expectedCountQuery := "SELECT COUNT(*) FROM messages WHERE " +
-		exportableMessageWhere("") + " AND id <= ? AND id > ?"
-	if err := sourceSnapshot.QueryRow(expectedCountQuery, maxID, lastMessageID).Scan(&expectedBatchCount); err != nil {
+		exportableMessageWhere("") + " AND id <= ?"
+	expectedCountArgs := []any{maxID}
+	if !replaceAll {
+		expectedCountQuery += " AND id > ?"
+		expectedCountArgs = append(expectedCountArgs, lastMessageID)
+	}
+	if err := sourceSnapshot.QueryRow(expectedCountQuery, expectedCountArgs...).Scan(&expectedBatchCount); err != nil {
 		return nil, fmt.Errorf("count expected staged messages: %w", err)
 	}
 	expectedTotalQuery := "SELECT COUNT(*) FROM messages WHERE " +
@@ -1154,7 +1159,7 @@ func buildCacheLocked(
 
 	// Build WHERE clause for incremental exports
 	idFilter := fmt.Sprintf(" AND TRY_CAST(m.id AS BIGINT) <= %d", maxID)
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		idFilter += fmt.Sprintf(" AND TRY_CAST(m.id AS BIGINT) > %d", lastMessageID)
 	}
 
@@ -1202,7 +1207,7 @@ func buildCacheLocked(
 	// qualified and the incremental predicate names mr.message_id rather
 	// than the bare column the shared junctionFilter helper produces.
 	recipientsFilter := ""
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		recipientsFilter = fmt.Sprintf(" WHERE mr.message_id > %d", lastMessageID)
 	}
 	recipientsFilter = junctionFilterFor("mr.message_id", recipientsFilter)
@@ -1242,7 +1247,7 @@ func buildCacheLocked(
 	messageLabelsDir := filepath.Join(staging.root, "message_labels")
 	escapedMessageLabelsDir := strings.ReplaceAll(messageLabelsDir, "'", "''")
 	messageLabelsFilter := ""
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		messageLabelsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
 	messageLabelsFilter = junctionFilter(messageLabelsFilter)
@@ -1264,7 +1269,7 @@ func buildCacheLocked(
 	attachmentsDir := filepath.Join(staging.root, tableAttachments)
 	escapedAttachmentsDir := strings.ReplaceAll(attachmentsDir, "'", "''")
 	attachmentsFilter := ""
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		attachmentsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
 	attachmentsFilter = junctionFilter(attachmentsFilter)

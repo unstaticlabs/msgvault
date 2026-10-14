@@ -24,6 +24,7 @@ import (
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestPrepareEmailWorkCLIUsesNativeResumableDaemonAndSourceAuthority(t *testing.T) {
@@ -31,11 +32,9 @@ func TestPrepareEmailWorkCLIUsesNativeResumableDaemonAndSourceAuthority(t *testi
 	assertions := assert.New(t)
 	ctx := context.Background()
 	home := t.TempDir()
-	dbPath := filepath.Join(home, "msgvault.db")
+	st, dbPath := testutil.NewLegacyNullableSQLiteEmailStore(t)
 	cache := filepath.Join(home, "analytics")
-	st, err := store.Open(dbPath)
-	requirements.NoError(err)
-	t.Cleanup(func() { requirements.NoError(st.Close()) })
+
 	requirements.NoError(st.InitSchema())
 	source, err := st.GetOrCreateSource("gmail", "qa-legacy@example.test")
 	requirements.NoError(err)
@@ -51,6 +50,9 @@ func TestPrepareEmailWorkCLIUsesNativeResumableDaemonAndSourceAuthority(t *testi
 		_, err = st.PersistMessage(&store.MessagePersistData{Message: &store.Message{SourceID: source.ID, ConversationID: conversation, SourceMessageID: fmt.Sprintf("legacy-%d", i), MessageType: "email", SentAt: sql.NullTime{Time: time.Date(2026, 1, 1, 12, i, 0, 0, time.UTC), Valid: true}, Subject: sql.NullString{String: "[QA] Legacy", Valid: true}}, RawMIME: raw})
 		requirements.NoError(err)
 	}
+	// A historical nullable type must remain eligible for the documented CLI.
+	_, err = st.DB().Exec("UPDATE messages SET message_type=NULL WHERE source_id=?", source.ID)
+	requirements.NoError(err)
 	// Recreate the pre-feature archive boundary: mail/raw exists, derived facts
 	// and opaque work seeds have never been allocated. No viewer writes them.
 	_, err = st.DB().Exec("DELETE FROM email_linkage_facts")

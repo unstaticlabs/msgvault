@@ -48,7 +48,7 @@ func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request Expl
 		}
 		stateCondition = " WHERE w.handling_state IN (" + strings.Join(quoted, ",") + ")"
 		if slices.Contains(request.Context.HandlingStates, "unknown") {
-			legacyCondition = " AND COALESCE(NULLIF(message_type,''),'email')='email'"
+			legacyCondition = " AND COALESCE(NULLIF(lower(message_type),''),'email')='email'"
 		} else {
 			legacyCondition = " AND FALSE"
 		}

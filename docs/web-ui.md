@@ -307,7 +307,10 @@ Replace `7` with the source ID returned by `list-accounts`. Without `--all`, the
 command prepares one bounded batch; subsequent invocations resume from the
 committed checkpoint. Missing, corrupt, oversized, or unsupported raw messages
 receive an incomplete outcome and do not strand later mail. Preparation never
-contacts a provider. Progress reports whether the native cache is ready or
+contacts a provider. Legacy NULL or empty email types remain eligible, as do
+historical zero or negative physical message IDs; preparation preserves their
+opaque identities and repairs missing evidence behind the checkpoint.
+Progress reports whether the native cache is ready or
 still needs a refresh; retry a completed batch if publication was interrupted.
 
 Cache schema 29 rebuilds the derived work datasets without removing archived

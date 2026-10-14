@@ -378,7 +378,7 @@ func (s *Server) hydrateExploreIdentityMatches(ctx context.Context, rows []query
 	for i := range rows {
 		rows[i].MatchedSenderIdentities = make([]string, 0)
 		rows[i].MatchedRecipientIdentities = make([]string, 0)
-		if rows[i].AnchorMessageID == nil || *rows[i].AnchorMessageID < 1 {
+		if rows[i].AnchorMessageID == nil {
 			continue
 		}
 		messageID := *rows[i].AnchorMessageID

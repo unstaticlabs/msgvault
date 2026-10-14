@@ -193,7 +193,7 @@ func (s *Store) CreateEmailWorkAction(ctx context.Context, input EmailWorkAction
 		for _, target := range targets {
 			var source int64
 			var messageType string
-			err := tx.QueryRowContext(ctx, `SELECT m.source_id,COALESCE(NULLIF(m.message_type,''),'email') FROM email_work_seeds seed JOIN messages m ON m.id=seed.live_message_id WHERE seed.uid=?`+s.dialect.SelectForUpdate(), target.UID).Scan(&source, &messageType)
+			err := tx.QueryRowContext(ctx, `SELECT m.source_id,COALESCE(NULLIF(lower(m.message_type),''),'email') FROM email_work_seeds seed JOIN messages m ON m.id=seed.live_message_id WHERE seed.uid=?`+s.dialect.SelectForUpdate(), target.UID).Scan(&source, &messageType)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrEmailWorkActionChanged
 			}

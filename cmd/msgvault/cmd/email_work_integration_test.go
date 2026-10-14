@@ -26,6 +26,7 @@ import (
 	"go.kenn.io/msgvault/internal/mcp"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 // Native deletion and allocation reuse the physical ID, but an old member
@@ -456,5 +457,106 @@ func nativeEmailWorkMCPCaller(t *testing.T, daemon *api.Server) func(string, str
 		}
 		requirements.Equal(http.StatusOK, response.StatusCode)
 		return wire.Result
+	}
+}
+
+// Actual native preparation/publication/member/ZIP paths preserve signed
+// historical physical IDs, their opaque aliases and every archived MIME copy.
+func TestEmailWorkLegacySignedIDsThroughNativeExport(t *testing.T) {
+	for _, mode := range []string{"native", "csv"} {
+		t.Run(mode, func(t *testing.T) {
+			r := require.New(t)
+			a := assert.New(t)
+			ctx := context.Background()
+			if mode == "csv" {
+				t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "1")
+			}
+			root := t.TempDir()
+			cache := filepath.Join(root, "cache")
+			st, dbPath := testutil.NewLegacyNullableSQLiteEmailStore(t)
+			source, err := st.GetOrCreateSource("gmail", "qa-legacy-export@example.test")
+			r.NoError(err)
+			conv, err := st.EnsureConversation(source.ID, "legacy-thread", "[QA] Legacy copies")
+			r.NoError(err)
+			for _, id := range []int64{-7, 0, 10} {
+				_, err = st.DB().Exec(`INSERT INTO messages(id,source_id,conversation_id,source_message_id,message_type,sent_at) VALUES (?,?,?,?,NULL,?)`, id, source.ID, conv, fmt.Sprintf("legacy-%d", id), "2026-01-01T12:00:00Z")
+				r.NoError(err)
+				_, err = st.DB().Exec(`INSERT INTO message_raw(message_id,raw_data,raw_format,compression) VALUES (?,?,'mime',NULL)`, id, []byte(fmt.Sprintf("Message-ID: <legacy-%d@example.test>\r\nIn-Reply-To: <legacy-root@example.test>\r\n\r\n[QA] copy %d", id, id)))
+				r.NoError(err)
+			}
+			prepared, err := st.BackfillEmailLinkage(ctx, source.ID, 10)
+			r.NoError(err)
+			r.Equal(3, prepared.Processed)
+			r.True(prepared.Done)
+			seed, err := st.EmailWorkSeedForMessage(ctx, 0)
+			r.NoError(err)
+			_, err = buildCache(dbPath, cache, true)
+			r.NoError(err)
+			engine, err := query.NewDuckDBEngine(cache, dbPath, st.DB())
+			r.NoError(err)
+			defer func() { r.NoError(engine.Close()) }()
+			work := query.ExploreRequest{Context: query.Context{RowUnit: query.RowUnitEmailWork, WorkAuthorityKey: "synthetic-legacy"}}
+			rows, err := engine.Explore(ctx, work)
+			r.NoError(err)
+			r.Equal(int64(1), rows.TotalCount)
+			r.Len(rows.Rows, 1)
+			a.Equal(int64(3), rows.Rows[0].MessageCount)
+			members, err := engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: work, UID: seed.UID})
+			r.NoError(err)
+			r.Len(members.Members, 3)
+			ids := []int64{}
+			for _, member := range members.Members {
+				ids = append(ids, member.MessageID)
+			}
+			a.ElementsMatch([]int64{-7, 0, 10}, ids)
+			native := &emailWorkHTTPNativeStore{storeAPIAdapter: &storeAPIAdapter{store: st, analyticsDir: cache}, dbPath: dbPath, cache: cache}
+			daemon := api.NewServerWithOptions(api.ServerOptions{Config: &config.Config{Server: config.ServerConfig{APIKey: "synthetic-legacy"}}, Store: native, Engine: engine, Logger: slog.New(slog.DiscardHandler)})
+			defer func() { r.NoError(daemon.Shutdown(ctx)) }()
+			payload, err := json.Marshal(api.EmailWorkExportRequest{UID: seed.UID, CacheRevision: members.CacheRevision})
+			r.NoError(err)
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/explore/email-work/export", bytes.NewReader(payload))
+			request.Header.Set("X-Api-Key", "synthetic-legacy")
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			daemon.Router().ServeHTTP(response, request)
+			r.Equal(http.StatusOK, response.Code, response.Body.String())
+			archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+			r.NoError(err)
+			files := map[string][]byte{}
+			for _, entry := range archive.File {
+				stream, err := entry.Open()
+				r.NoError(err)
+				content, err := io.ReadAll(stream)
+				r.NoError(err)
+				r.NoError(stream.Close())
+				r.NotContains(files, entry.Name)
+				files[entry.Name] = content
+			}
+			var manifest api.EmailWorkExportManifest
+			r.NoError(json.Unmarshal(files["manifest.json"], &manifest))
+			a.Equal("complete", manifest.State)
+			r.Len(manifest.Copies, 3)
+			a.Len(files, 4)
+			exported := []int64{}
+			for _, copy := range manifest.Copies {
+				exported = append(exported, copy.Member.MessageID)
+				raw, err := st.GetMessageRaw(copy.Member.MessageID)
+				r.NoError(err)
+				a.Equal(raw, files[copy.Filename])
+			}
+			a.ElementsMatch([]int64{-7, 0, 10}, exported)
+			_, err = st.DB().Exec(`DELETE FROM messages WHERE id=0`)
+			r.NoError(err)
+			_, err = engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: work, UID: seed.UID})
+			r.ErrorIs(err, store.ErrEmailWorkAliasGone)
+			_, err = st.DB().Exec(`INSERT INTO messages(id,source_id,conversation_id,source_message_id,message_type,sent_at) VALUES (0,?,?,?,'email',?)`, source.ID, conv, "replacement-zero", "2026-01-01T12:00:00Z")
+			r.NoError(err)
+			r.NoError(st.UpsertMessageRaw(0, []byte("Message-ID: <replacement@example.test>\r\n\r\n[QA] Replacement")))
+			fresh, err := st.EmailWorkSeedForMessage(ctx, 0)
+			r.NoError(err)
+			a.NotEqual(seed.UID, fresh.UID)
+			_, err = engine.EmailWorkMembers(ctx, query.EmailWorkMembersRequest{Explore: work, UID: seed.UID})
+			r.ErrorIs(err, store.ErrEmailWorkAliasGone)
+		})
 	}
 }

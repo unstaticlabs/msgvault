@@ -33,8 +33,8 @@ func PartitionEmailWorkMembersWithLocalLinks(members []EmailWorkMember, links []
 	parents := make(map[int64]int64, len(members))
 	var ids []int64
 	for _, member := range members {
-		if member.MessageID < 1 || member.SourceID < 1 {
-			return nil, errors.New("email work members require positive message and source IDs")
+		if member.SourceID < 1 {
+			return nil, errors.New("email work members require positive source IDs")
 		}
 		if _, exists := parents[member.MessageID]; exists {
 			return nil, errors.New("email work population contains a repeated message ID")

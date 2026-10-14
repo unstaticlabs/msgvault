@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestBuildCacheEmailWorkNativeAndCSVPublication(t *testing.T) {
@@ -256,6 +257,53 @@ func TestBuildCacheLocalWorkRecoveryNativeAndCSV(t *testing.T) {
 			individual, err := engine.Explore(ctx, query.ExploreRequest{})
 			requirements.NoError(err)
 			assertions.Equal(int64(4), individual.TotalCount, "default individual-message unit remains unchanged")
+		})
+	}
+}
+
+// A zero watermark is a real committed legacy population, not a sentinel for
+// exporting all rows again during the next incremental publication.
+func TestBuildCacheLegacySignedIDIncremental(t *testing.T) {
+	for _, mode := range []string{"native", "csv"} {
+		t.Run(mode, func(t *testing.T) {
+			r := require.New(t)
+			a := assert.New(t)
+			if mode == "csv" {
+				t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "1")
+			}
+			st, path := testutil.NewLegacyNullableSQLiteEmailStore(t)
+			cache := filepath.Join(t.TempDir(), "cache")
+			source, err := st.GetOrCreateSource("gmail", "qa-signed-cache@example.test")
+			r.NoError(err)
+			conv, err := st.EnsureConversation(source.ID, "legacy", "[QA]")
+			r.NoError(err)
+			insert := func(id int64) {
+				_, err := st.DB().Exec(`INSERT INTO messages(id,source_id,conversation_id,source_message_id,message_type,sent_at) VALUES (?,?,?,?,NULL,?)`, id, source.ID, conv, fmt.Sprintf("signed-%d", id), "2026-01-01T12:00:00Z")
+				r.NoError(err)
+			}
+			insert(-7)
+			insert(0)
+			_, err = buildCache(path, cache, true)
+			r.NoError(err)
+			state, err := query.ReadCacheSyncState(cache)
+			r.NoError(err)
+			a.Zero(state.LastMessageID)
+			insert(10)
+			result, err := buildCache(path, cache, false)
+			r.NoError(err)
+			a.False(result.Skipped)
+			engine, err := query.NewDuckDBEngine(cache, path, st.DB())
+			r.NoError(err)
+			defer func() { r.NoError(engine.Close()) }()
+			rows, err := engine.Explore(context.Background(), query.ExploreRequest{})
+			r.NoError(err)
+			a.Equal(int64(3), rows.TotalCount, "incremental publication must not duplicate zero/negative existing rows")
+			ids := []int64{}
+			for _, row := range rows.Rows {
+				r.NotNil(row.AnchorMessageID)
+				ids = append(ids, *row.AnchorMessageID)
+			}
+			a.ElementsMatch([]int64{-7, 0, 10}, ids)
 		})
 	}
 }

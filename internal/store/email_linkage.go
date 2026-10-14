@@ -14,10 +14,10 @@ import (
 
 func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, raw []byte, format string) error {
 	var messageType string
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(message_type, '') FROM messages WHERE id = ?`, messageID).Scan(&messageType); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(lower(message_type), ''), 'email') FROM messages WHERE id = ?`, messageID).Scan(&messageType); err != nil {
 		return err
 	}
-	if format != "mime" || (messageType != MessageTypeEmail && messageType != "") {
+	if format != "mime" || messageType != MessageTypeEmail {
 		result, err := tx.ExecContext(ctx, `DELETE FROM email_linkage_facts WHERE message_id = ?`, messageID)
 		if err != nil {
 			return err
@@ -120,7 +120,7 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 		if err := tx.QueryRowContext(ctx, checkpointSQL, sourceID, mime.EmailLinkageVersion).Scan(&result.LastMessageID); err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT m.id FROM messages m WHERE m.source_id = ? AND m.message_type IN ('email', '') AND (m.id > ? OR NOT EXISTS (SELECT 1 FROM email_linkage_facts f WHERE f.message_id = m.id AND f.extraction_version = ?) OR NOT EXISTS (SELECT 1 FROM email_work_seeds seed WHERE seed.live_message_id = m.id)) ORDER BY m.id LIMIT ?`, sourceID, result.LastMessageID, mime.EmailLinkageVersion, limit+1)
+		rows, err := tx.QueryContext(ctx, `SELECT m.id FROM messages m WHERE m.source_id = ? AND COALESCE(NULLIF(lower(m.message_type),''),'email')='email' AND (m.id > ? OR NOT EXISTS (SELECT 1 FROM email_linkage_facts f WHERE f.message_id = m.id AND f.extraction_version = ?) OR NOT EXISTS (SELECT 1 FROM email_work_seeds seed WHERE seed.live_message_id = m.id)) ORDER BY m.id LIMIT ?`, sourceID, result.LastMessageID, mime.EmailLinkageVersion, limit+1)
 		if err != nil {
 			return err
 		}

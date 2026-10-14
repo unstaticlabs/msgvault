@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"database/sql"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -99,52 +100,56 @@ func TestEmailWorkAliasTombstoneSurvivesPhysicalIDReuse(t *testing.T) {
 // A pre-feature archive may contain zero as a physical ID. Native UID
 // allocation/migration protects its live anchor, and reuse cannot redirect it.
 func TestEmailWorkLegacyZeroIDMigrationAndLifecycle(t *testing.T) {
-	requirements := require.New(t)
-	assertions := assert.New(t)
-	st := testutil.NewTestStore(t)
-	ctx := context.Background()
-	source, err := st.GetOrCreateSource("gmail", "qa-legacy-zero@example.test")
-	requirements.NoError(err)
-	original := linkageMessage(t, st, source.ID, "legacy-zero")
-	insert := `INSERT INTO messages(id,source_id,conversation_id,source_message_id,message_type)`
-	if st.IsPostgreSQL() {
-		insert += ` OVERRIDING SYSTEM VALUE`
+	for _, physicalID := range []int64{0, -7} {
+		t.Run(strconv.FormatInt(physicalID, 10), func(t *testing.T) {
+			requirements := require.New(t)
+			assertions := assert.New(t)
+			st := testutil.NewTestStore(t)
+			ctx := context.Background()
+			source, err := st.GetOrCreateSource("gmail", "qa-legacy-zero@example.test")
+			requirements.NoError(err)
+			original := linkageMessage(t, st, source.ID, "legacy-zero")
+			insert := `INSERT INTO messages(id,source_id,conversation_id,source_message_id,message_type)`
+			if st.IsPostgreSQL() {
+				insert += ` OVERRIDING SYSTEM VALUE`
+			}
+			insert += ` VALUES (?,?,?,?,'email')`
+			_, err = st.DB().Exec(st.Rebind(insert), physicalID, source.ID, original.ConversationID, original.SourceMessageID)
+			requirements.NoError(err)
+			id, err := st.UpsertMessage(original)
+			requirements.NoError(err)
+			assertions.Equal(physicalID, id)
+			seed, err := st.EmailWorkSeedForMessage(ctx, id)
+			requirements.NoError(err)
+			requirements.NotNil(seed)
+			assertions.Equal(physicalID, seed.AnchorMessageID)
+			assertions.Equal(sql.NullInt64{Int64: physicalID, Valid: true}, seed.LiveMessageID)
+			requirements.NoError(st.InitSchema())
+			migrated, err := st.EmailWorkSeedForAlias(ctx, seed.UID)
+			requirements.NoError(err)
+			assertions.Equal(seed, migrated, "native schema migration preserves the live allocation")
+			_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET id=10000 WHERE id=?`), id)
+			requirements.Error(err, "live physical identity mutation must remain rejected")
+			unchanged, err := st.EmailWorkSeedForAlias(ctx, seed.UID)
+			requirements.NoError(err)
+			assertions.Equal(seed, unchanged)
+			_, err = st.DB().Exec(st.Rebind(`DELETE FROM messages WHERE id=?`), id)
+			requirements.NoError(err)
+			tombstone, err := st.EmailWorkSeedForAlias(ctx, seed.UID)
+			requirements.NoError(err)
+			assertions.False(tombstone.LiveMessageID.Valid)
+			assertions.Equal(seed.AnchorMessageID, tombstone.AnchorMessageID)
+			replacement := linkageMessage(t, st, source.ID, "replacement-zero")
+			_, err = st.DB().Exec(st.Rebind(insert), physicalID, source.ID, replacement.ConversationID, replacement.SourceMessageID)
+			requirements.NoError(err)
+			reused, err := st.UpsertMessage(replacement)
+			requirements.NoError(err)
+			assertions.Equal(id, reused)
+			fresh, err := st.EmailWorkSeedForMessage(ctx, reused)
+			requirements.NoError(err)
+			assertions.NotEqual(seed.UID, fresh.UID)
+			_, err = store.ResolveEmailWorkAlias(*tombstone, [][]int64{{id}}, []store.EmailWorkSeed{*fresh})
+			requirements.ErrorIs(err, store.ErrEmailWorkAliasGone)
+		})
 	}
-	insert += ` VALUES (0,?,?,?,'email')`
-	_, err = st.DB().Exec(st.Rebind(insert), source.ID, original.ConversationID, original.SourceMessageID)
-	requirements.NoError(err)
-	id, err := st.UpsertMessage(original)
-	requirements.NoError(err)
-	assertions.Zero(id)
-	seed, err := st.EmailWorkSeedForMessage(ctx, id)
-	requirements.NoError(err)
-	requirements.NotNil(seed)
-	assertions.Zero(seed.AnchorMessageID)
-	assertions.Equal(sql.NullInt64{Int64: 0, Valid: true}, seed.LiveMessageID)
-	requirements.NoError(st.InitSchema())
-	migrated, err := st.EmailWorkSeedForAlias(ctx, seed.UID)
-	requirements.NoError(err)
-	assertions.Equal(seed, migrated, "native schema migration preserves the live allocation")
-	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET id=10000 WHERE id=?`), id)
-	requirements.Error(err, "live physical identity mutation must remain rejected")
-	unchanged, err := st.EmailWorkSeedForAlias(ctx, seed.UID)
-	requirements.NoError(err)
-	assertions.Equal(seed, unchanged)
-	_, err = st.DB().Exec(st.Rebind(`DELETE FROM messages WHERE id=?`), id)
-	requirements.NoError(err)
-	tombstone, err := st.EmailWorkSeedForAlias(ctx, seed.UID)
-	requirements.NoError(err)
-	assertions.False(tombstone.LiveMessageID.Valid)
-	assertions.Equal(seed.AnchorMessageID, tombstone.AnchorMessageID)
-	replacement := linkageMessage(t, st, source.ID, "replacement-zero")
-	_, err = st.DB().Exec(st.Rebind(insert), source.ID, replacement.ConversationID, replacement.SourceMessageID)
-	requirements.NoError(err)
-	reused, err := st.UpsertMessage(replacement)
-	requirements.NoError(err)
-	assertions.Equal(id, reused)
-	fresh, err := st.EmailWorkSeedForMessage(ctx, reused)
-	requirements.NoError(err)
-	assertions.NotEqual(seed.UID, fresh.UID)
-	_, err = store.ResolveEmailWorkAlias(*tombstone, [][]int64{{id}}, []store.EmailWorkSeed{*fresh})
-	requirements.ErrorIs(err, store.ErrEmailWorkAliasGone)
 }
