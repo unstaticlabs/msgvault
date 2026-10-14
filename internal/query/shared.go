@@ -20,6 +20,11 @@ import (
 // Analytics dataset names. Each is both the Parquet subdirectory under
 // analyticsDir and the view/probe key for that dataset's optional columns.
 const (
+	// DatasetEmailWorkFacts and the related email work datasets share the existing atomic publication.
+	DatasetEmailWorkFacts           = "email_work_facts"
+	DatasetEmailWorkSeeds           = "email_work_seeds"
+	DatasetEmailWorkIdentities      = "email_work_identities"
+	DatasetEmailWorkDelivery        = "email_work_delivery"
 	datasetMessages                 = "messages"
 	datasetSources                  = "sources"
 	datasetParticipants             = "participants"

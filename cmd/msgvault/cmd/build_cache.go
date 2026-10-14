@@ -1098,6 +1098,19 @@ func buildCacheLocked(
 		return nil, fmt.Errorf("inspect provider label metadata: %w", err)
 	}
 	sourceSnapshot.hasProviderLabels = providerLabelColumns == 3
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('labels') WHERE name='system_role'`).Scan(&providerLabelColumns); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasLabelRole = providerLabelColumns > 0
+	var workTables int
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='email_linkage_facts'`).Scan(&workTables); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasEmailWorkFacts = workTables > 0
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='email_work_seeds'`).Scan(&workTables); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasEmailWorkSeeds = workTables > 0
 
 	var recipientEnvelopeColumnCount int
 	if err := sourceSnapshot.QueryRow(`
@@ -1435,6 +1448,10 @@ func buildCacheLocked(
 		if err := buildCacheBeforeMessagesExportHook(); err != nil {
 			return nil, err
 		}
+	}
+
+	if err := exportEmailWorkDatasets(sourceSnapshot, runExport, staging.root, maxID); err != nil {
+		return nil, err
 	}
 
 	// 8. Export messages (partitioned by year) into staging.
@@ -1847,6 +1864,9 @@ type cacheSourceSnapshot struct {
 	hasRecipientEnvelope        bool
 	hasIMAPMembership           bool
 	hasProviderLabels           bool
+	hasLabelRole                bool
+	hasEmailWorkFacts           bool
+	hasEmailWorkSeeds           bool
 }
 
 type cacheSnapshotTable struct {
@@ -1997,6 +2017,10 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 	if s.hasProviderLabels {
 		providerLabelColumns = "source_id, source_label_id, label_type"
 	}
+	roleColumn := "NULL AS system_role"
+	if s.hasLabelRole {
+		roleColumn = "system_role"
+	}
 	tables := []cacheSnapshotTable{
 		// deleted_at is exported so the main COPY query can apply the
 		// `deleted_at IS NULL` filter on this path the same way it does
@@ -2017,8 +2041,8 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 			"types={'source_id': 'BIGINT', 'address': 'VARCHAR'}"},
 		{tableParticipantIdentifiers, "SELECT participant_id, identifier_type, identifier_value, display_value, is_primary FROM participant_identifiers",
 			"types={'participant_id': 'BIGINT', 'identifier_type': 'VARCHAR', 'identifier_value': 'VARCHAR', 'display_value': 'VARCHAR', 'is_primary': 'BOOLEAN'}"},
-		{tableLabels, "SELECT id, name, " + providerLabelColumns + " FROM labels",
-			"types={'id': 'BIGINT', 'name': 'VARCHAR','source_id':'BIGINT','source_label_id':'VARCHAR','label_type':'VARCHAR'}"},
+		{tableLabels, "SELECT id, name, " + providerLabelColumns + ", " + roleColumn + " FROM labels",
+			"types={'id': 'BIGINT', 'name': 'VARCHAR','source_id':'BIGINT','source_label_id':'VARCHAR','label_type':'VARCHAR','system_role':'VARCHAR'}"},
 		{"sources", "SELECT id, identifier, source_type FROM sources",
 			"types={'id': 'BIGINT', 'identifier': 'VARCHAR', 'source_type': 'VARCHAR'}"},
 		{tableConversations, "SELECT id, source_conversation_id, title, COALESCE(conversation_type, 'email_thread') AS conversation_type FROM conversations",
@@ -2026,6 +2050,7 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 		{tableConversationParticipants, "SELECT conversation_id, participant_id FROM conversation_participants",
 			"types={'conversation_id': 'BIGINT', 'participant_id': 'BIGINT'}"},
 	}
+	tables = append(tables, emailWorkSnapshotTables(s)...)
 	if s.hasIMAPMembership {
 		tables = append(tables, cacheSnapshotTable{"imap_message_memberships", "SELECT source_id,message_id,mailbox,flags FROM imap_message_memberships", "types={'source_id':'BIGINT','message_id':'BIGINT','mailbox':'VARCHAR','flags':'VARCHAR'}"})
 	}

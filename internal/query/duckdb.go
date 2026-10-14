@@ -2508,6 +2508,7 @@ func (e *DuckDBEngine) deletionTargetsForMessageIDChunk(ctx context.Context, ids
 // contain at least one .parquet file for the cache to be considered complete.
 // Shared between the cache builder, TUI, and MCP startup paths.
 var RequiredParquetDirs = []string{
+	DatasetEmailWorkFacts, DatasetEmailWorkSeeds, DatasetEmailWorkIdentities, DatasetEmailWorkDelivery,
 	datasetMessages,
 	"sources",
 	datasetParticipants,

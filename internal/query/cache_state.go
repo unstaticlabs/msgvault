@@ -33,10 +33,12 @@ import (
 // recorded, NULL when absent) to message_recipients and makes email_address
 // the resolved recipient address (envelope, else participant), never an empty
 // string. Version 27 adds curated person display names; version 28 adds
-// provider Inbox and read status to messages and logical email entries.
+// provider Inbox and read status to messages and logical email entries. Version 29
+// publishes explicit email linkage, durable aliases, confirmed identities and
+// provider completion facts in the same generation.
 // Schema bumps force a full rebuild before readers use an older publication,
 // so committed caches never mix shards of different shapes.
-const CacheSchemaVersion = 28
+const CacheSchemaVersion = 29
 
 // CacheSyncState is the commit marker written after a complete analytics
 // cache publication. SQLite remains authoritative; these watermarks only
