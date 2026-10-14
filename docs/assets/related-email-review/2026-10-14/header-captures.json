@@ -1,0 +1,27 @@
+{
+  "capture_date": "2026-10-14",
+  "ui_source": "df10dca4858366a8b49bc905c78a90e8ecbf0b87; served product inputs match the committed source",
+  "api_source": "49be771b4a8d7d673afa2c9e63ea81561567d541; backend production source unchanged by subsequent UI/test commits",
+  "context": "Separate native import-eml QA archive; one invented email and one invented text attachment; synthetic administrator; no provider configuration or calls",
+  "scope": "Relationship header and Files control layout only. Images are not functional proof or qualification of the complete related-email backend. Existing calendar overflow and horizontally scrollable Files table at narrow widths were not redesigned.",
+  "files": [
+    {
+      "file": "relationship-header-320-light-compact.jpg",
+      "sha256": "2d6b3dd25684dcece04ab4750790196d6628da63d45af762108e487141b84192",
+      "metadata": "JFIF only; no Exif/XMP/IPTC/comments",
+      "privacy_review": "Lead and implementation owner personally inspected pixels and metadata; synthetic content only"
+    },
+    {
+      "file": "relationship-header-390-dark-comfortable.jpg",
+      "sha256": "3b27dbb32a6f691a234ae66e75f7003636003139c300f6ce1b7f4bbc6f90d170",
+      "metadata": "JFIF only; no Exif/XMP/IPTC/comments",
+      "privacy_review": "Lead and implementation owner personally inspected pixels and metadata; synthetic content only"
+    },
+    {
+      "file": "relationship-files-1280-dark-comfortable.jpg",
+      "sha256": "d4376f93e4fa6f1261b39201f2b424d48562a3784df8f9dda7aa3759eab6eed2",
+      "metadata": "JFIF only; no Exif/XMP/IPTC/comments",
+      "privacy_review": "Lead and implementation owner personally inspected pixels and metadata; synthetic content only"
+    }
+  ]
+}
