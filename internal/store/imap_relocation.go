@@ -167,10 +167,10 @@ func (s *Store) PersistIMAPRelocationWithParticipantsContext(
 
 func validateIMAPRelocationRecipients(recipients []RecipientSet) error {
 	required := map[string]int{
-		"from": 0,
-		"to":   0,
-		"cc":   0,
-		"bcc":  0,
+		messageSenderRole: 0,
+		"to":              0,
+		"cc":              0,
+		"bcc":             0,
 	}
 	for _, recipient := range recipients {
 		count, ok := required[recipient.Type]

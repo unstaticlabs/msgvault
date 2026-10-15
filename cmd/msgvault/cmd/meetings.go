@@ -217,7 +217,7 @@ func (flags *meetingScopeFlags) request(command *cobra.Command) (*generated.Meet
 		return nil, errors.New("--after must be before --before")
 	}
 	flags.deletion = strings.ToLower(strings.TrimSpace(flags.deletion))
-	if flags.deletion != "any" && flags.deletion != "active" && flags.deletion != "deleted" {
+	if flags.deletion != "any" && flags.deletion != "active" && flags.deletion != "deleted" { //nolint:goconst // Archive deletion state is independent of draft lifecycle.
 		return nil, errors.New("--deletion must be any, active, or deleted")
 	}
 	deletion := generated.MeetingScopeRequestDeletion(flags.deletion)

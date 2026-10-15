@@ -674,7 +674,7 @@ func (s *scopedEngine) ResolveMessageID(ctx context.Context, ref string) (int64,
 // message authority. Every subsequent query still intersects the source scope.
 func (s *scopedAnalyticalEngine) ExpandParticipantClusterMembers(ctx context.Context, ids []int64) ([]int64, error) {
 	expander, ok := s.inner.(interface {
-		ExpandParticipantClusterMembers(context.Context, []int64) ([]int64, error)
+		ExpandParticipantClusterMembers(ctx context.Context, ids []int64) ([]int64, error)
 	})
 	if !ok {
 		return slices.Clone(ids), nil

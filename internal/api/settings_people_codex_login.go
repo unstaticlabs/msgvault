@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -111,6 +113,11 @@ func (s *Server) peopleCodexLoginOwner(w http.ResponseWriter, r *http.Request) (
 		}
 	case AuthModeAPIKey:
 		return "owner-api-key", true
+	case AuthModeToken:
+		if auth.Principal.IdentityIssuer != "" && auth.Principal.IdentitySubject != "" {
+			identity := auth.Principal.IdentityIssuer + "\x00" + auth.Principal.IdentitySubject
+			return fmt.Sprintf("oidc:%x", sha256.Sum256([]byte(identity))), true
+		}
 	case AuthModeCaller:
 		return "caller", true
 	case AuthModeLoopback:

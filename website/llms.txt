@@ -24,6 +24,7 @@ below, or replace a page's trailing slash with `.md`: `/docs/setup/` becomes
 ## Explore Your Archive
 
 - [Web UI](https://msgvault.io/docs/web-ui.md): the browser application
+- [Users and Visible Sources](https://msgvault.io/docs/usage/users.md): user roles and account visibility
 - [Terminal UI](https://msgvault.io/docs/usage/tui.md)
 - [Searching](https://msgvault.io/docs/usage/searching.md): query syntax and modes
 - [Semantic and Visual Search](https://msgvault.io/docs/usage/vector-search.md): semantic and hybrid setup

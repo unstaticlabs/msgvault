@@ -186,15 +186,17 @@ func TestRunSavedViewRejectsInvalidStoredDefinitions(t *testing.T) {
 	}
 	for name, state := range cases {
 		t.Run(name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
 			// Simulate a historical stored definition that predates strict value validation.
 			view := createRunTestView(t, st, name, `{}`)
 			_, err := st.DB().ExecContext(t.Context(), st.Rebind("UPDATE saved_views SET canonical_state = ? WHERE id = ?"), state, view.ID)
-			require.NoError(t, err)
+			requirements.NoError(err)
 			response, _ := runSavedView(t, srv, view.ID, `{}`)
-			assert.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			assertions.Equal(http.StatusBadRequest, response.Code, response.Body.String())
 			var failure ErrorResponse
-			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &failure))
-			assert.Equal(t, "invalid_saved_view", failure.Error)
+			requirements.NoError(json.Unmarshal(response.Body.Bytes(), &failure))
+			assertions.Equal("invalid_saved_view", failure.Error)
 		})
 	}
 }

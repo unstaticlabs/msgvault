@@ -349,7 +349,7 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 	}
 	defer cleanup()
 	entriesCTE, entryArgs := personEntriesCTE(exactID, clusterMemberIDs, conditions, request.Explore.Context.RowUnit == RowUnitEmailWork,
-		e.parquetPath(datasetParticipantClusters), "")
+		e.parquetPath(datasetParticipantClusters))
 	args = append(args, entryArgs...)
 	// bestNameExpr is the shared cluster label policy (see person_label.go).
 	// Listing/search rows are canonical identities, so the label evaluates
@@ -561,7 +561,7 @@ FROM counted ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 //     cluster (e.g. cc'ing a contact's work and personal addresses) is never
 //     double-counted. The clusters/canon CTEs remain only for the caller's
 //     label, search-match, and identifier subqueries.
-func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work bool, clustersGlob, activityGlob string) (string, []any) {
+func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work bool, clustersGlob string) (string, []any) {
 	if exactID == nil {
 		return fmt.Sprintf(`
 ), clusters AS (

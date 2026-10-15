@@ -353,7 +353,7 @@ func TestRunSavedViewUsesCanonicalExploreDefinition(t *testing.T) {
 	assertions.Equal("cache-9", page.CacheRevision)
 
 	// Recovery still uses this helper; ordinary execution belongs to the daemon.
-	explored, _, err = savedViewPredicate(page.View, 25, "")
+	explored, _, err = savedViewPredicate(page.View, 25)
 	requirements.NoError(err)
 	requirements.NotNil(explored.Query)
 	assertions.Equal("quarterly invoice", *explored.Query)
@@ -406,7 +406,7 @@ func TestRunSavedViewPreservesGrouping(t *testing.T) {
 	assertions.Equal(savedview.ResultGroups, page.ResultKind)
 	requirements.Len(page.Groups, 1)
 	assertions.Equal("example.com", page.Groups[0].Key)
-	_, state, err := savedViewPredicate(page.View, 20, "")
+	_, state, err := savedViewPredicate(page.View, 20)
 	requirements.NoError(err)
 	for _, dimension := range state.Grouping {
 		grouped.Grouping = append(grouped.Grouping, generated.ExploreGroupDimension(dimension))
@@ -460,7 +460,7 @@ func TestRunSavedViewPreservesFilesPresentationAndCursor(t *testing.T) {
 	requirements.Len(page.Files, 1)
 	assertions.Equal("invoice.pdf", page.Files[0].Filename)
 	assertions.Equal("files-next", page.NextCursor)
-	filesRequest.Predicate, _, err = savedViewPredicate(page.View, 20, "")
+	filesRequest.Predicate, _, err = savedViewPredicate(page.View, 20)
 	requirements.NoError(err)
 	filesRequest.Cursor = runRequest.Cursor
 	requirements.NotNil(filesRequest.Cursor)
@@ -473,6 +473,7 @@ func TestRunSavedViewPreservesFilesPresentationAndCursor(t *testing.T) {
 }
 
 func TestRunSavedViewRejectsInvalidDefinitionBeforeExplore(t *testing.T) {
+	requirements := require.New(t)
 	invalid := `{
 		"id":9,"name":"Invalid","canonical_state":{"filters":[{"field":"source","operator":"contains","values":["3"]}]},
 		"schema_version":1,"revision":1,
@@ -496,12 +497,12 @@ func TestRunSavedViewRejectsInvalidDefinitionBeforeExplore(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	_, err := newSavedViewTestClient(t, server).RunSavedView(t.Context(), 9, 20, "")
-	require.ErrorIs(t, err, store.ErrSavedViewInvalidState)
+	requirements.ErrorIs(err, store.ErrSavedViewInvalidState)
 	assert.Zero(t, exploreCalls)
 	var stored store.SavedView
-	require.NoError(t, json.Unmarshal([]byte(invalid), &stored))
-	_, _, err = savedViewPredicate(stored, 20, "")
-	require.ErrorIs(t, err, store.ErrSavedViewInvalidState)
+	requirements.NoError(json.Unmarshal([]byte(invalid), &stored))
+	_, _, err = savedViewPredicate(stored, 20)
+	requirements.ErrorIs(err, store.ErrSavedViewInvalidState)
 }
 
 func TestRunSavedViewSurfacesVectorCapabilityError(t *testing.T) {

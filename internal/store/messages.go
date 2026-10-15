@@ -2353,6 +2353,12 @@ func (s *Store) persistMessageWith(
 		message = &messageCopy
 	}
 
+	var existed bool
+	if len(data.RawMIME) > 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM messages WHERE source_id = ? AND source_message_id = ?)`, message.SourceID, message.SourceMessageID).Scan(&existed); err != nil {
+			return 0, fmt.Errorf("inspect message before linkage extraction: %w", err)
+		}
+	}
 	messageID, err := upsertMessageWith(q, s.dialect, message)
 	if err != nil {
 		return 0, fmt.Errorf("upsert message: %w", err)
@@ -2385,7 +2391,7 @@ func (s *Store) persistMessageWith(
 		if err := upsertMessageRawWithFormat(q, messageID, data.RawMIME, rawFormat); err != nil {
 			return 0, fmt.Errorf("upsert raw: %w", err)
 		}
-		if err := s.extractEmailLinkageTx(ctx, tx, messageID, data.RawMIME, rawFormat); err != nil {
+		if err := s.extractEmailLinkageTx(ctx, tx, messageID, data.RawMIME, rawFormat, existed); err != nil {
 			return 0, fmt.Errorf("store email linkage: %w", err)
 		}
 	}
@@ -6073,7 +6079,7 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 		if err := upsertMessageRawWithFormat(boundQuerier{ctx: ctx, q: tx}, messageID, rawData, format); err != nil {
 			return err
 		}
-		if err := s.extractEmailLinkageTx(ctx, tx, messageID, rawData, format); err != nil {
+		if err := s.extractEmailLinkageTx(ctx, tx, messageID, rawData, format, true); err != nil {
 			return err
 		}
 		if err := s.refreshMeetingProjectionWith(ctx, tx, messageID); err != nil {

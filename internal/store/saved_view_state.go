@@ -223,24 +223,6 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 	return nil
 }
 
-func validateSavedViewFilter(filter SavedViewFilter) error {
-	if !explorecatalog.IsFilterDimension(SavedViewFilterDimension(filter.Field)) {
-		return fmt.Errorf(".field %q is not a supported filter dimension", filter.Field)
-	}
-	if !slices.Contains(SavedViewFilterOperators, filter.Operator) {
-		return fmt.Errorf(".operator must be %s", strings.Join(SavedViewFilterOperators, " or "))
-	}
-	if len(filter.Values) == 0 {
-		return errors.New(".values must not be empty")
-	}
-	for j, value := range filter.Values {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf(".values[%d] must not be empty", j)
-		}
-	}
-	return nil
-}
-
 func isJSONNull(value []byte) bool {
 	return bytes.Equal(bytes.TrimSpace(value), []byte("null"))
 }

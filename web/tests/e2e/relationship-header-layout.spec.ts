@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from '@playwright/test';
-import { selectKitOption, setKitTheme } from '../kit-ui';
+import { setTemporaryDensity, setKitTheme } from '../kit-ui';
 import { installMixedArchive } from './fixtures/mixed-archive';
 
 // The optional native lane uses only a separately provisioned synthetic MIME
@@ -30,7 +30,7 @@ for (const width of [320, 390, 1280]) {
           await page.goto('/');
         }
         await setKitTheme(page, theme);
-        await selectKitOption(page, 'Temporary density', `Density: ${density === 'compact' ? 'Compact' : 'Comfortable'}`);
+        await setTemporaryDensity(page, density === 'compact' ? 'Compact' : 'Comfortable');
         if (nativeURL) {
           // A one-message import is below the default relationship threshold.
           // Include this synthetic counterpart through the ordinary control.

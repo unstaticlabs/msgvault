@@ -251,7 +251,6 @@ func savedViewAPIError(err error) error {
 func savedViewPredicate(
 	view store.SavedView,
 	limit int,
-	cursor string,
 ) (generated.ExploreHTTPRequest, store.SavedViewStateEnvelope, error) {
 	state, err := savedview.ExecutableState(view)
 	if err != nil {
@@ -259,9 +258,6 @@ func savedViewPredicate(
 	}
 
 	predicate := generated.ExploreHTTPRequest{Limit: new(int64(limit))}
-	if cursor != "" {
-		predicate.Cursor = &cursor
-	}
 	for _, filter := range state.Filters {
 		predicate.Filters = append(predicate.Filters, generated.ExploreFilter{
 			Dimension: generated.ExploreFilterDimension(savedview.FilterDimension(filter.Field)),

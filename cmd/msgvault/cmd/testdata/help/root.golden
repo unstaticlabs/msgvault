@@ -1,19 +1,19 @@
-msgvault keeps an offline, searchable archive of email, chat, and meeting
-records. A daemon owns the archive: commands start or reuse a local daemon,
-or use [remote].url from config.toml (--local forces the local daemon).
+Archive and search email, chat, and meeting records offline.
+Commands start or reuse a daemon, or use [remote].url in config.toml.
+Use --local for the local daemon.
 
 Start here:
-  msgvault list-accounts --json    # id, email, type, counts, sync
+  msgvault list-accounts --json    # id, email, type, counts
   msgvault search 'from:alice@example.com newer_than:30d' --json
-  # "id" feeds the commands below
+  # Use the returned "id" below
   msgvault show-message <id> --json  # body_text, attachments
   msgvault export-eml <id> -o msg.eml  # export-attachments <id> -o DIR
   msgvault export-messages --start 2026-09-01T00:00:00Z --end 2026-10-01T00:00:00Z
-  msgvault list-senders -n 20 --json  # also list-domains, list-labels
+  msgvault list-senders -n 20 --json  # list-domains, list-labels
   msgvault stats
   msgvault person --help  # contacts
   msgvault daemon status
-  msgvault setup status --json  # features and next steps
+  msgvault setup status --json  # next steps
 
 Output and exit status:
   --json prints JSON on stdout (export-messages prints JSON Lines). Progress and
@@ -156,6 +156,7 @@ Maintenance and repair:
   init-db              Initialize the database schema
   migrate              Apply this binary's archive schema migrations offline
   pack-attachments     Pack loose attachment files into sealed pack files
+  prepare-email-work   Prepare archived MIME evidence for related email rows
   purge-excluded-media Reclaim locally stored media excluded by current policy
   repack-attachments   Reclaim dead bytes from sparse attachment packs
   repair-dates         Repair missing or implausible email sent dates
@@ -184,6 +185,7 @@ Setup, daemon, and integrations:
   setup        Run first-time setup; 'setup status' shows enabled features
   skills       Manage agent skills for coding assistants
   update       Update msgvault to the latest version
+  user         Manage users and the sources they may read
   version      Print version information
 
 Flags:

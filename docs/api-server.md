@@ -158,9 +158,11 @@ recurrence limits, notification behavior, and reconciliation instructions.
 The API publishes its generated OpenAPI contract at `/openapi.json`.
 `msgvault openapi` prints the checked-in contract without starting a daemon or
 opening an archive. OpenAPI `info.version` is the **API schema version**;
-it is separate from the binary release version. The current schema is **3.17.0**.
+it is separate from the binary release version. The current schema is **3.18.0**.
 Upgrade clients and daemon together across incompatible schema versions,
 including remote deployments.
+
+Schema 3.18.0 combines the native archive tools with named roles, identity-provider sessions, per-user source visibility, provider Inbox/read state, and related-email recovery. Saved View execution remains daemon-owned. Provider writes and publication approval require administrator authority; ordinary message and evidence reads stay within the caller's assigned sources. See [integration compatibility](https://github.com/unstaticlabs/msgvault/blob/main/docs/internal/2026-10-upstream-compatibility.md) for archive and cache upgrade boundaries.
 
 Schema 3.11.0 adds `GET /media/search/status` to report whether Docbank transcript search is configured. It also adds source filename, title and date to transcript search results and optional `conversation_title` to `GET /messages/{id}`.
 

@@ -43,8 +43,8 @@ func ensureIdentityCacheFixtureDatasets(
 	require.NoError(tb, err, "derive identity fixture datasets")
 }
 
-func ensureEmailWorkCacheFixtureDatasets(t testing.TB, db *sql.DB, analyticsDir string) {
-	t.Helper()
+func ensureEmailWorkCacheFixtureDatasets(tb testing.TB, db *sql.DB, analyticsDir string) {
+	tb.Helper()
 	for _, spec := range []struct{ name, selectSQL string }{
 		{query.DatasetEmailWorkActions, "SELECT ''::VARCHAR AS action_uid,''::VARCHAR AS kind,0::BIGINT AS revision,false AS active,''::VARCHAR AS actor_kind,0::BIGINT AS actor_user_id,NULL::TIMESTAMP AS created_at,''::VARCHAR AS target_uid,0::BIGINT AS target_count WHERE false"},
 		{query.DatasetEmailWorkFacts, "SELECT 0::BIGINT AS message_id,1::INTEGER AS extraction_version,''::VARCHAR AS outcome,''::VARCHAR AS facts WHERE false"},
@@ -56,8 +56,8 @@ func ensureEmailWorkCacheFixtureDatasets(t testing.TB, db *sql.DB, analyticsDir 
 		if _, err := os.Stat(path); err == nil {
 			continue
 		}
-		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		require.NoError(tb, os.MkdirAll(filepath.Dir(path), 0o755))
 		_, err := db.Exec(fmt.Sprintf("COPY (%s) TO '%s' (FORMAT PARQUET)", spec.selectSQL, strings.ReplaceAll(filepath.ToSlash(path), "'", "''")))
-		require.NoError(t, err, "write typed empty work dataset")
+		require.NoError(tb, err, "write typed empty work dataset")
 	}
 }

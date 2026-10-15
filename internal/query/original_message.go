@@ -123,7 +123,7 @@ func (e *SQLiteEngine) ReadOriginalMessage(ctx context.Context, ref MessageRef, 
 
 // SourceOriginalMessageReader resolves source authority before reading MIME.
 type SourceOriginalMessageReader interface {
-	ReadOriginalMessageForSources(context.Context, MessageRef, int64, []int64) (*OriginalMessage, error)
+	ReadOriginalMessageForSources(ctx context.Context, ref MessageRef, maxBytes int64, sourceIDs []int64) (*OriginalMessage, error)
 }
 
 func (e *SQLiteEngine) ReadOriginalMessageForSources(ctx context.Context, ref MessageRef, maxBytes int64, sourceIDs []int64) (*OriginalMessage, error) {

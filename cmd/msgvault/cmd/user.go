@@ -58,7 +58,7 @@ var userListCmd = &cobra.Command{
 		writer := tabwriter.NewWriter(os.Stdout, 0, 8, 2, ' ', 0)
 		_, _ = fmt.Fprintln(writer, "ID\tEMAIL\tNAME\tROLE\tSTANDING\tSOURCES")
 		for _, user := range users {
-			standing := "active"
+			standing := "active" //nolint:goconst // User standing is independent of draft lifecycle.
 			if user.Disabled {
 				standing = "disabled"
 			}

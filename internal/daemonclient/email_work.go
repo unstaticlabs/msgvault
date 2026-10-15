@@ -25,7 +25,7 @@ func (c *Client) GetEmailWorkItem(ctx context.Context, viewID, viewRevision int6
 	if view.Revision != viewRevision {
 		return nil, store.ErrSavedViewRevisionConflict
 	}
-	predicate, state, err := savedViewPredicate(*view, limit, "")
+	predicate, state, err := savedViewPredicate(*view, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +59,7 @@ func (c *Client) emailWorkSavedPredicate(ctx context.Context, viewID, revision i
 	if view.Revision != revision {
 		return generated.ExploreHTTPRequest{}, store.ErrSavedViewRevisionConflict
 	}
-	predicate, state, err := savedViewPredicate(*view, 1, "")
+	predicate, state, err := savedViewPredicate(*view, 1)
 	if err != nil {
 		return generated.ExploreHTTPRequest{}, err
 	}

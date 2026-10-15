@@ -111,7 +111,7 @@ Examples:
 		if searchSort == "date" && searchMode == "fts" {
 			return usageErr(cmd, errors.New("--sort date requires --mode vector or hybrid"))
 		}
-		if searchDeletionScope != "active" && searchDeletionScope != "deleted" && searchDeletionScope != "any" {
+		if searchDeletionScope != "active" && searchDeletionScope != "deleted" && searchDeletionScope != "any" { //nolint:goconst // Archive deletion scope is independent of draft lifecycle.
 			return usageErr(cmd, fmt.Errorf(
 				"invalid --deletion-scope: %q (want active|deleted|any)", searchDeletionScope))
 		}

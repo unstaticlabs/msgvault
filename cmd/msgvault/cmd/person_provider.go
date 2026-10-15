@@ -2094,7 +2094,7 @@ func writePersonProviderStatus(
 	}
 	state := "inactive"
 	if output.Consent.Active {
-		state = "active"
+		state = "active" //nolint:goconst // Consent state is independent of draft lifecycle.
 	} else if output.Consent.LastRevoked != nil {
 		state = "revoked"
 	}

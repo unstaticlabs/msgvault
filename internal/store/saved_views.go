@@ -230,10 +230,6 @@ func validateSavedViewInput(input SavedViewInput) (SavedViewInput, error) {
 	return input, nil
 }
 
-func validateSavedViewEnvelope(envelope SavedViewStateEnvelope) error {
-	return ValidateSavedViewState(envelope)
-}
-
 func scanSavedView(row scanner) (*SavedView, error) {
 	var (
 		view        SavedView

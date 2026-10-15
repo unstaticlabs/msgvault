@@ -119,6 +119,10 @@ func TestExportTokenKeepsMountedKeyOutOfSavedConfig(t *testing.T) { //nolint:par
 			require.NoError(runExportTokenWithClient(command, []string{"account@example.test"}, daemon.Client()))
 			snapshot, err := config.ReadConfigFile(path)
 			require.NoError(err)
+			// Reload the saved file without reapplying the runtime overrides
+			// whose absence from that file is the behavior under test.
+			require.NoError(os.Unsetenv("MSGVAULT_REMOTE_URL"))
+			require.NoError(os.Unsetenv("MSGVAULT_REMOTE_ALLOW_INSECURE"))
 			saved, err := config.LoadConfigFile(snapshot, home)
 			require.NoError(err)
 			assert.Equal(wantURL, saved.Remote.URL)

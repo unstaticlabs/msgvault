@@ -9,36 +9,38 @@ import (
 )
 
 func TestUnifiedSchemaNormalizesDraftRolesWithoutLosingEvidence(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
 	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource("imap", "legacy-draft@example.test")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	ids, err := st.EnsureLabelsBatch(source.ID, map[string]store.LabelInfo{
 		"old":    {Name: "[QA] legacy draft", Type: "system", SystemRole: "draft"},
 		"native": {Name: "[QA] native draft", Type: "system", SystemRole: "drafts"},
 		"sent":   {Name: "[QA] contradictory sent", Type: "system", SystemRole: "sent"},
 	})
-	require.NoError(t, err)
+	requirements.NoError(err)
 	// Recreate the exact legacy literal, even if native label ingestion normalizes it.
 	_, err = st.DB().Exec(st.Rebind("UPDATE labels SET system_role='draft' WHERE id=?"), ids["old"])
-	require.NoError(t, err)
+	requirements.NoError(err)
 	_, err = st.DB().Exec("DELETE FROM applied_migrations WHERE name='email_work_draft_role_alias_v1'")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	before, err := st.DerivedDataRevision()
-	require.NoError(t, err)
-	require.NoError(t, st.InitSchemaContext(t.Context()))
+	requirements.NoError(err)
+	requirements.NoError(st.InitSchemaContext(t.Context()))
 	for key, want := range map[string]string{"old": "drafts", "native": "drafts", "sent": "sent"} {
 		var got string
-		require.NoError(t, st.DB().QueryRow(st.Rebind("SELECT system_role FROM labels WHERE id=?"), ids[key]).Scan(&got))
-		assert.Equal(t, want, got)
+		requirements.NoError(st.DB().QueryRow(st.Rebind("SELECT system_role FROM labels WHERE id=?"), ids[key]).Scan(&got))
+		assertions.Equal(want, got)
 	}
 	after, err := st.DerivedDataRevision()
-	require.NoError(t, err)
-	assert.Equal(t, before+1, after)
-	require.NoError(t, st.InitSchemaContext(t.Context()))
+	requirements.NoError(err)
+	assertions.Equal(before+1, after)
+	requirements.NoError(st.InitSchemaContext(t.Context()))
 	repeated, err := st.DerivedDataRevision()
-	require.NoError(t, err)
-	assert.Equal(t, after, repeated)
+	requirements.NoError(err)
+	assertions.Equal(after, repeated)
 	version, err := st.SchemaVersionContext(t.Context())
-	require.NoError(t, err)
-	assert.Equal(t, 7, version)
+	requirements.NoError(err)
+	assertions.Equal(7, version)
 }

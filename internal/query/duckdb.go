@@ -2204,7 +2204,7 @@ func (e *DuckDBEngine) fetchLabelsForMessages(ctx context.Context, messages []Me
 	if err := fetchLabelsForMessageList(ctx, e.db, noopRebind, "sqlite_db.", messages); err != nil {
 		return err
 	}
-	return fetchProviderStateForMessageList(ctx, e.db, noopRebind, "sqlite_db.", "duckdb", messages)
+	return e.fetchProviderState(ctx, messages)
 }
 
 // GetMessageSummariesByIDs delegates to the SQLite engine — the
@@ -2283,7 +2283,7 @@ func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string
 		return message, err
 	}
 	rows := []MessageSummary{{ID: message.ID}}
-	if err := fetchProviderStateForMessageList(ctx, e.db, noopRebind, "sqlite_db.", "duckdb", rows); err != nil {
+	if err := e.fetchProviderState(ctx, rows); err != nil {
 		return nil, err
 	}
 	message.InboxState = rows[0].InboxState
