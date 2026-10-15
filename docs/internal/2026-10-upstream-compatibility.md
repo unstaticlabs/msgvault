@@ -33,3 +33,27 @@ Provider changes, archive maintenance, credential/consent changes, and external 
 Qualification uses separate synthetic predecessor archives produced by the exact original store implementations. The legacy fork archive upgrades from version 0 to 7 while preserving its original message bytes, bodies, recipients, labels, sources, conversations, linkage facts, stable work identities, recovery records, users, and source bindings. An archive produced by exact upstream `60b903a5` upgrades from schema 6 to 7. The schema-6 reader's refusal of the upgraded archive is checked separately.
 
 These are upgrade/read contracts. Still images of the interface do not prove provider behavior, migration safety, or recovery correctness.
+
+## Chatwoot follow-up at `ecbfcaa7`
+
+The follow-up preserves the original three upstream commits after `60b903a5`:
+Chatwoot ingestion, the runtime PCRE2 package refresh, and the pinned browser
+sanitizer and build dependencies. It stops at `ecbfcaa7`; later upstream work
+requires a separate integration.
+
+The existing combined API 3.18 and upstream's new API 3.18 describe different
+additive interfaces. Their union is API 3.19. Both generated message contracts
+retain calendar state, and the CLI contract retains source, Inbox, and read
+state while adding the optional related-message ID. Native generators produce
+the HTTP schemas and Go and browser clients from that combined contract.
+
+This follow-up makes no archive DDL, required data migration, or analytics cache
+shape change. Archive schema 7 and cache 32 therefore remain unchanged. A new
+Chatwoot source uses the existing source and message tables.
+
+A call can link to its meeting representation only when the target is live,
+has the opposite message type, and belongs to the same source. Metadata alone
+cannot create a link into another inbox. Named Members and Viewers keep their
+source bindings; delegated agents keep their granted sources. Ingestion remains
+administrative and read-only toward the provider. Tokens stay in the daemon's
+environment and are never transferred from a remote CLI.
