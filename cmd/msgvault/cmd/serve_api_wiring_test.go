@@ -7,7 +7,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,7 +31,7 @@ func TestPersonRenameHTTPRefreshesCachedPeople(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
-	dbPath := filepath.Join(tmp, "test.db")
+	dbPath := filepath.Join(tmp, "msgvault.db")
 	analyticsDir := filepath.Join(tmp, "analytics")
 	st, err := store.Open(dbPath)
 	require.NoError(err)
@@ -51,17 +54,44 @@ func TestPersonRenameHTTPRefreshesCachedPeople(t *testing.T) {
 	require.NoError(err)
 	t.Cleanup(func() { require.NoError(engine.Close()) })
 
-	// Keep the real refresh builder and publication path, running it in this
-	// process so the HTTP fixture needs no separately installed daemon binary.
-	old := runDerivedCacheSubprocess
-	runDerivedCacheSubprocess = func(_ context.Context, dir string) error {
-		_, refreshErr := buildCacheDerivedOnly(dbPath, dir)
-		return refreshErr
+	// Exercise the actual HTTP-to-child boundary. A lost invocation must use
+	// this owned invalid fallback, never an operator's default archive.
+	fallback := t.TempDir()
+	require.NoError(os.WriteFile(filepath.Join(fallback, "config.toml"), []byte("invalid = ["), 0o600))
+	t.Setenv("MSGVAULT_HOME", fallback)
+	configPath := filepath.Join(tmp, "config.toml")
+	require.NoError(os.WriteFile(configPath, []byte("[analytics]\nengine = 'duckdb'\nauto_build_cache = false\n[telemetry]\nenabled = false\n"), 0o600))
+	cfg, err := config.Load(configPath, tmp)
+	require.NoError(err)
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	require.NoError(err)
+	binary := filepath.Join(t.TempDir(), "msgvault")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
 	}
-	t.Cleanup(func() { runDerivedCacheSubprocess = old })
+	build := exec.CommandContext(t.Context(), "go", "build", "-tags", "fts5 sqlite_vec", "-o", binary, "./cmd/msgvault")
+	build.Dir = repoRoot
+	output, err := build.CombinedOutput()
+	require.NoError(err, "%s", output)
+	old := executeBuildCacheSubprocessMode
+	executeBuildCacheSubprocessMode = func(ctx context.Context, mode buildCacheMode) error {
+		command, commandErr := newBuildCacheSubprocessCommand(ctx, mode)
+		if commandErr != nil {
+			return commandErr
+		}
+		// The test executable is not the CLI; retain the production arguments
+		// and environment and substitute only the freshly built executable.
+		command.Path, command.Args[0] = binary, binary
+		childOutput, childErr := command.CombinedOutput()
+		if childErr != nil {
+			return fmt.Errorf("cache child: %w: %s", childErr, childOutput)
+		}
+		return nil
+	}
+	t.Cleanup(func() { executeBuildCacheSubprocessMode = old })
 	srv := api.NewServerWithOptions(api.ServerOptions{
-		Config: &config.Config{},
-		Store:  &storeAPIAdapter{store: st, analyticsDir: analyticsDir},
+		Config: cfg,
+		Store:  &storeAPIAdapter{store: st, config: cfg, options: invocationOptions{homeDir: tmp, cfgFile: configPath}, analyticsDir: analyticsDir},
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	for _, test := range []struct {

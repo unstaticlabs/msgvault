@@ -109,7 +109,7 @@ func TestExecutableStateRejectsNonExecutableDefinitions(t *testing.T) {
 			name:    "malformed state",
 			view:    store.SavedView{ID: 2, SchemaVersion: 1, CanonicalState: json.RawMessage(`{"query":`)},
 			wantErr: store.ErrSavedViewInvalidState,
-			message: "decode Saved View 2",
+			message: "saved view 2: invalid saved view canonical state: decode JSON value",
 		},
 		{
 			name: "unknown filter field",
@@ -142,7 +142,7 @@ func TestExecutableStateRejectsNonExecutableDefinitions(t *testing.T) {
 			name:    "unsupported grouping",
 			view:    store.SavedView{ID: 7, SchemaVersion: 1, CanonicalState: json.RawMessage(`{"grouping":["weekday"]}`)},
 			wantErr: store.ErrSavedViewInvalidState,
-			message: `grouping[0] "weekday" is not supported`,
+			message: `grouping[0] "weekday" is not a supported analytical dimension`,
 		},
 		{
 			name:    "unsupported presentation",
@@ -155,13 +155,13 @@ func TestExecutableStateRejectsNonExecutableDefinitions(t *testing.T) {
 			view: store.SavedView{ID: 9, SchemaVersion: 1, CanonicalState: json.RawMessage(
 				`{"sort":[{"field":"occurred_at","direction":"asc"}]}`)},
 			wantErr: store.ErrSavedViewInvalidState,
-			message: "sort[0] must be occurred_at descending",
+			message: "sort[0] must be occurred_at desc",
 		},
 		{
 			name:    "unknown column",
 			view:    store.SavedView{ID: 10, SchemaVersion: 1, CanonicalState: json.RawMessage(`{"columns":["labels"]}`)},
 			wantErr: store.ErrSavedViewInvalidState,
-			message: `columns[0] "labels" is not supported`,
+			message: `columns[0] "labels" is not a supported column`,
 		},
 	}
 	for _, tc := range cases {

@@ -3781,7 +3781,7 @@ func (s *Store) UpsertFTS(messageID int64, subject, bodyText, fromAddr, toAddrs,
 
 // UpsertFTSContext honors cancellation during UpsertFTS.
 func (s *Store) UpsertFTSContext(ctx context.Context, messageID int64, subject, bodyText, fromAddr, toAddrs, ccAddrs string) error {
-	if !s.fts5Available {
+	if !s.fts5Available && s.syncGeneration == nil {
 		return nil
 	}
 	doc := FTSDoc{
@@ -3796,6 +3796,9 @@ func (s *Store) UpsertFTSContext(ctx context.Context, messageID int64, subject, 
 		return s.withTxContext(ctx, func(tx *loggedTx) error {
 			if err := s.requireSyncMessageSourceTx(boundQuerier{ctx: ctx, q: tx}, messageID); err != nil {
 				return err
+			}
+			if !s.fts5Available {
+				return nil
 			}
 			return s.dialect.FTSUpsert(boundQuerier{ctx: ctx, q: tx}, doc)
 		})
