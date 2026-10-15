@@ -128,6 +128,8 @@ export interface ExploreScrollAnchor {
 /** Browser-restorable exploration context. Bulk selection is session-only. */
 export interface ExploreURLState {
   schemaVersion: number;
+  savedViewID?: number;
+  savedViewRevision?: number;
   workspace: ExploreWorkspace;
   directoryQuery: string;
   directoryContactState: string;
@@ -221,6 +223,14 @@ export function isValidSourceID(value: string | undefined): value is string {
   if (value === undefined || !/^\d+$/.test(value)) return false;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0;
+}
+
+// Native filter IDs travel as strings and use the store's positive int64
+// contract. Keep isValidSourceID for JSON-number metadata endpoints.
+export function isValidFilterID(value: string | undefined): value is string {
+  if (value === undefined || !/^\+?\d+$/.test(value)) return false;
+  const id = BigInt(value);
+  return id > 0n && id <= 9223372036854775807n;
 }
 
 export interface ExploreResult {

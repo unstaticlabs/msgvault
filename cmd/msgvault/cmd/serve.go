@@ -1497,6 +1497,10 @@ func (a *storeAPIAdapter) GetFileMetadataBatch(ctx context.Context, ids []int64)
 	return a.store.GetFileMetadataBatch(ctx, ids)
 }
 
+func (a *storeAPIAdapter) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit int) (*store.EmailLinkageBackfill, error) {
+	return a.store.BackfillEmailLinkage(ctx, sourceID, limit)
+}
+
 func (a *storeAPIAdapter) GetArchivedMessageRaw(ctx context.Context, id int64) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -3767,4 +3771,25 @@ func (a *storeAPIAdapter) inboxArchiveYieldCheck() func() bool {
 		return nil
 	}
 	return gate.HasRequestWaiters
+}
+
+func (a *storeAPIAdapter) EmailWorkSeedForMessage(ctx context.Context, id int64) (*store.EmailWorkSeed, error) {
+	return a.store.EmailWorkSeedForMessage(ctx, id)
+}
+
+func (a *storeAPIAdapter) MessageRawRevision(ctx context.Context) (int64, error) {
+	return a.store.MessageRawRevision(ctx)
+}
+
+func (a *storeAPIAdapter) EmailWorkRecoverySnapshot(ctx context.Context) (string, error) {
+	return a.store.EmailWorkRecoverySnapshot(ctx)
+}
+func (a *storeAPIAdapter) EmailWorkAction(ctx context.Context, uid string) (*store.EmailWorkAction, error) {
+	return a.store.EmailWorkAction(ctx, uid)
+}
+func (a *storeAPIAdapter) CreateEmailWorkAction(ctx context.Context, input store.EmailWorkActionInput) (*store.EmailWorkAction, error) {
+	return a.store.CreateEmailWorkAction(ctx, input)
+}
+func (a *storeAPIAdapter) UndoEmailWorkAction(ctx context.Context, uid, snapshot string, revision int64, view ...int64) (*store.EmailWorkAction, error) {
+	return a.store.UndoEmailWorkAction(ctx, uid, snapshot, revision, view...)
 }

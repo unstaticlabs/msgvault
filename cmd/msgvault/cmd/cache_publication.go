@@ -128,6 +128,7 @@ func cachePublishPlanForMode(replaceAll bool) cachePublishPlan {
 		plan.Append[dataset] = true
 	}
 	for _, dataset := range []string{
+		query.DatasetEmailWorkFacts, query.DatasetEmailWorkSeeds, query.DatasetEmailWorkIdentities, query.DatasetEmailWorkDelivery,
 		tableParticipants,
 		tableParticipantIdentifiers,
 		tableLabels,

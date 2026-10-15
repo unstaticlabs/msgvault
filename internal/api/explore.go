@@ -37,21 +37,25 @@ const (
 )
 
 type ExploreFilter struct {
-	Dimension string   `json:"dimension" enum:"source,participant,domain,message_type,mailing_list,after,before,deletion,identity"`
+	Dimension string   `json:"dimension" enum:"source,participant,domain,message_type,mailing_list,after,before,deletion,identity,inbox_state,read_state,row_unit,handling_state"`
 	Values    []string `json:"values" minItems:"1"`
 }
 
 // Explore filter dimension names, matching ExploreFilter.Dimension's enum tag.
 const (
-	exploreFilterSource      = "source"
-	exploreFilterParticipant = "participant"
-	exploreFilterDomain      = "domain"
-	exploreFilterMessageType = "message_type"
-	exploreFilterMailingList = "mailing_list"
-	exploreFilterAfter       = "after"
-	exploreFilterBefore      = "before"
-	exploreFilterDeletion    = "deletion"
-	exploreFilterIdentity    = "identity"
+	exploreFilterHandlingState = "handling_state"
+	exploreFilterRowUnit       = "row_unit"
+	exploreFilterSource        = "source"
+	exploreFilterInboxState    = "inbox_state"
+	exploreFilterReadState     = "read_state"
+	exploreFilterParticipant   = "participant"
+	exploreFilterDomain        = "domain"
+	exploreFilterMessageType   = "message_type"
+	exploreFilterMailingList   = "mailing_list"
+	exploreFilterAfter         = "after"
+	exploreFilterBefore        = "before"
+	exploreFilterDeletion      = "deletion"
+	exploreFilterIdentity      = "identity"
 )
 
 var (
@@ -244,6 +248,7 @@ func (s *Server) registerExploreRoutes(api huma.API) {
 	registerExploreRoute[ExplorePreflightRequest, ExplorePreflightResponse](api, "preflightExploreSelection", "/explore/preflight", "Preflight a revision-pinned analytical selection", s.handleExplorePreflight)
 	registerExploreRoute[ExploreMatchCountsRequest, ExploreMatchCountsResponse](api, "countExploreMatches", "/explore/match-counts", "Count exact lexical matches in visible rows", s.handleExploreMatchCounts)
 	s.registerExploreFilesRoute(api)
+	s.registerEmailWorkRoutes(api)
 }
 
 func registerExploreRoute[Req any, Resp any](api huma.API, operationID, path, summary string, handler http.HandlerFunc) {
@@ -373,7 +378,7 @@ func (s *Server) hydrateExploreIdentityMatches(ctx context.Context, rows []query
 	for i := range rows {
 		rows[i].MatchedSenderIdentities = make([]string, 0)
 		rows[i].MatchedRecipientIdentities = make([]string, 0)
-		if rows[i].AnchorMessageID == nil || *rows[i].AnchorMessageID < 1 {
+		if rows[i].AnchorMessageID == nil {
 			continue
 		}
 		messageID := *rows[i].AnchorMessageID
@@ -470,6 +475,9 @@ func (s *Server) handleExploreGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Grouping = []ExploreGroupDimension{dimension}
 	requestHash := hashCanonicalValue(request, true)
+	if ctx.RowUnit == query.RowUnitEmailWork {
+		requestHash = hashCanonicalValue([]string{requestHash, ctx.WorkAuthorityKey}, false)
+	}
 	offset, ok := s.parseExploreCursor(w, request.Cursor, requestHash)
 	if !ok {
 		return
@@ -787,6 +795,9 @@ func (s *Server) prepareExploreRequest(w http.ResponseWriter, r *http.Request, s
 	}
 	searchDeletionScope := applySemanticDeletionScope(request.SearchMode, &ctx)
 	requestHash := canonicalScopedExploreHash(request, scope)
+	if ctx.RowUnit == query.RowUnitEmailWork {
+		requestHash = hashCanonicalValue([]string{requestHash, ctx.WorkAuthorityKey}, false)
+	}
 	offset := 0
 	if request.Cursor != "" {
 		cursor, err := s.decodeExploreCursor(request.Cursor)
@@ -812,6 +823,9 @@ func (s *Server) resolveExploreIdentityContext(
 	filters []ExploreFilter,
 	result *query.Context,
 ) error {
+	if result.RowUnit == query.RowUnitEmailWork {
+		result.WorkAuthorityKey = emailWorkAuthorityKey(ctx)
+	}
 	if result.Identity == nil {
 		return nil
 	}
@@ -997,6 +1011,33 @@ func exploreContext(filters []ExploreFilter) (query.Context, error) {
 			return result, fmt.Errorf("filter dimension %q requires at least one value", filter.Dimension)
 		}
 		switch filter.Dimension {
+		case exploreFilterHandlingState:
+			for _, value := range filter.Values {
+				if !slices.Contains([]string{"handled", "actionable", "unknown"}, value) {
+					return result, errors.New("handling_state accepts handled, actionable or unknown")
+				}
+			}
+			result.HandlingStates = slices.Clone(filter.Values)
+		case exploreFilterRowUnit:
+			if len(filter.Values) != 1 || filter.Values[0] != string(query.RowUnitEmailWork) {
+				return result, errors.New("row_unit accepts email_work_item")
+			}
+			result.RowUnit = query.RowUnitEmailWork
+		case exploreFilterInboxState, exploreFilterReadState:
+			allowed := []string{"inbox", "outside", "unknown"}
+			if filter.Dimension == exploreFilterReadState {
+				allowed = []string{"read", "unread", "unknown"}
+			}
+			for _, value := range filter.Values {
+				if !slices.Contains(allowed, value) {
+					return result, fmt.Errorf("filter %s accepts %s", filter.Dimension, strings.Join(allowed, ", "))
+				}
+			}
+			if filter.Dimension == exploreFilterInboxState {
+				result.InboxStates = append([]string(nil), filter.Values...)
+			} else {
+				result.ReadStates = append([]string(nil), filter.Values...)
+			}
 		case exploreFilterSource:
 			ids := make([]int64, len(filter.Values))
 			for i, value := range filter.Values {
@@ -1066,6 +1107,9 @@ func exploreContext(filters []ExploreFilter) (query.Context, error) {
 		default:
 			return result, fmt.Errorf("unknown filter dimension %q", filter.Dimension)
 		}
+	}
+	if len(result.HandlingStates) > 0 && result.RowUnit != query.RowUnitEmailWork {
+		return result, errors.New("handling_state requires row_unit email_work_item")
 	}
 	return result, nil
 }
@@ -1896,6 +1940,10 @@ func decodeExploreJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 }
 
 func (s *Server) writeExploreError(ctx context.Context, w http.ResponseWriter, err error) {
+	if errors.Is(err, query.ErrEmailWorkRevisionChanged) {
+		writeError(w, http.StatusConflict, "work_item_revision_changed", err.Error())
+		return
+	}
 	var unavailable *query.CacheUnavailableError
 	if errors.As(err, &unavailable) || errors.Is(err, query.ErrCacheUnavailable) {
 		readiness := query.CacheInterrupted

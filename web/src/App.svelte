@@ -79,7 +79,7 @@
 {#if session.authMode === 'required'}
   <Login {session} />
 {:else if shellMounted}
-  <AppShell client={session.client} {appearanceDefaults} {searchModeDefault}>
+  <AppShell principal={session.principal} client={session.client} {appearanceDefaults} {searchModeDefault}>
     {#snippet settings(cardDAVRequest, onCardDAVRequestConsumed, navigationTarget)}
       <SettingsWorkspace
         client={session.client}

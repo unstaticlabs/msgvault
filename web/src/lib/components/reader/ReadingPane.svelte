@@ -22,6 +22,8 @@
 </script>
 
 <script lang="ts">
+  import type { EmailWorkMemberFact } from '../../api/generated/models';
+  import type { PrincipalInfo } from '../../api/generated/models';
   import { Button, EmptyState } from '@kenn-io/kit-ui';
   import { onDestroy, untrack } from 'svelte';
 
@@ -33,16 +35,22 @@
   import IdentityBadge from '../explore/IdentityBadge.svelte';
   import TaskLinks from '../tasks/TaskLinks.svelte';
   import AttachmentRail from './AttachmentRail.svelte';
+  import EmailWorkView from './EmailWorkView.svelte';
   import ConversationView from './ConversationView.svelte';
 
   let {
     client,
+    principal = undefined,
     selection = undefined,
     targetKey = '',
     status = 'ready',
     statusMessage = '',
     unavailable = undefined,
     predicate,
+    cacheRevision = '',
+    savedViewID = undefined, savedViewRevision = undefined,
+    onRefresh = undefined,
+    onOpenIndividual = undefined,
     onClose = undefined,
     conversationAnchorId = undefined,
     conversationStart = undefined,
@@ -52,12 +60,17 @@
     onOpenRelationship = undefined
   }: {
     client: APIClient;
+    principal?: PrincipalInfo;
     selection?: ReadingPaneSelection;
     targetKey?: string;
     status?: ReadingPaneStatus;
     statusMessage?: string;
     unavailable?: ExploreCacheUnavailable;
     predicate: ExplorePredicate;
+    cacheRevision?: string;
+    savedViewID?: number; savedViewRevision?: number;
+    onRefresh?: () => void;
+    onOpenIndividual?: (member: EmailWorkMemberFact) => void;
     onClose?: () => void;
     /** Overrides the entry's own anchor when the reader navigated within the
      * thread (URL-carried, so Back/Forward restore the same message). */
@@ -102,7 +115,8 @@
   const counterpartParticipantId = $derived(
     selection?.kind === 'entry' ? selection.row.counterpart_participant_id : undefined
   );
-  const showTasks = $derived(selection?.kind === 'entry' &&
+  const workUID = $derived(selection?.kind === 'entry' ? selection.row.email_work?.uid : targetKey.startsWith('email-work:') ? targetKey.slice(11) : undefined);
+  const showTasks = $derived(!workUID && selection?.kind === 'entry' &&
     isEmailMessageType(selection.row.message_type) && selection.row.anchor_message_id !== undefined);
 
   const metaStrip = $derived.by((): string => {
@@ -252,7 +266,9 @@
   {/if}
 
   <div class="pane-body">
-    {#if conversationRow && threadAnchorId !== undefined}
+    {#if workUID}
+      <EmailWorkView canCurate={principal?.role === 'member' || principal?.role === 'admin'} {client} uid={workUID} {predicate} {cacheRevision} {onRefresh} {savedViewID} {savedViewRevision} {onOpenIndividual} />
+    {:else if conversationRow && threadAnchorId !== undefined}
       <ConversationView
         {client}
         conversationId={conversationRow.conversation_id!}
@@ -363,6 +379,34 @@
     flex: none;
     align-items: center;
     gap: var(--space-2);
+  }
+
+  @media (max-width: 640px) {
+    .pane-header {
+      flex-wrap: wrap;
+      align-items: flex-start;
+      gap: var(--space-2);
+    }
+
+    .pane-heading {
+      flex: 1 1 100%;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: var(--space-1);
+    }
+
+    .pane-title,
+    .pane-meta {
+      max-width: 100%;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+
+    .pane-actions {
+      margin-left: auto;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
   }
 
   .tasks-disclosure summary {

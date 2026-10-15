@@ -358,6 +358,8 @@ func queryAddressesFromStrings(addresses []string) []query.Address {
 func queryMessageSummaryFromGenerated(msg generated.CLIQueryMessageSummary) query.MessageSummary {
 	return query.MessageSummary{
 		ID:                   msg.ID,
+		InboxState:           providerStateFromEnum(msg.InboxState),
+		ReadState:            providerStateFromEnum(msg.ReadState),
 		SourceID:             int64Value(msg.SourceID),
 		SourceMessageID:      msg.SourceMessageID,
 		ConversationID:       msg.ConversationID,
@@ -398,11 +400,14 @@ func queryAddressesFromGenerated(addresses []generated.Address) []query.Address 
 
 func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query.MessageDetail {
 	if resp == nil {
-		return &query.MessageDetail{}
+		return nil
 	}
 	return &query.MessageDetail{
 		CalendarState:        calendarStateFromGenerated(resp.CalendarState),
 		ID:                   resp.ID,
+		SourceID:             int64Value(resp.SourceID),
+		InboxState:           providerStateFromEnum(resp.InboxState),
+		ReadState:            providerStateFromEnum(resp.ReadState),
 		SourceMessageID:      resp.SourceMessageID,
 		ConversationID:       resp.ConversationID,
 		SourceConversationID: resp.SourceConversationID,
@@ -906,4 +911,17 @@ func calendarStateFromGenerated(state *generated.CalendarEventState) *store.Cale
 		SourceStatusBeforeSuperseded: stringValue(state.SourceStatusBeforeSuperseded),
 		SupersededReason:             stringValue(state.SupersededReason), SupersededAt: stringValue(state.SupersededAt),
 	}
+}
+
+func providerStateFromEnum[T ~string](value *T) string {
+	if value == nil || *value == "" {
+		return "unknown"
+	}
+	return string(*value)
+}
+func providerStateFromString(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }

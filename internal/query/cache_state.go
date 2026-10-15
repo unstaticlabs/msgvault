@@ -32,10 +32,13 @@ import (
 // message dimension; version 26 adds envelope_address (the header address as
 // recorded, NULL when absent) to message_recipients and makes email_address
 // the resolved recipient address (envelope, else participant), never an empty
-// string. Version 27 adds curated person display names.
+// string. Version 27 adds curated person display names; version 28 adds
+// provider Inbox and read status to messages and logical email entries. Version 29
+// publishes explicit email linkage, durable aliases, confirmed identities and
+// provider completion facts and undoable local assertions in the same generation.
 // Schema bumps force a full rebuild before readers use an older publication,
 // so committed caches never mix shards of different shapes.
-const CacheSchemaVersion = 27
+const CacheSchemaVersion = 29
 
 // CacheSyncState is the commit marker written after a complete analytics
 // cache publication. SQLite remains authoritative; these watermarks only
@@ -55,6 +58,8 @@ type CacheSyncState struct {
 	// inside the committed message ID boundary, so drift requires a full cache
 	// rebuild rather than an incremental append.
 	DerivedDataRevision int64 `json:"derived_data_revision,omitempty"`
+	// RecoverySnapshot is an optimistic native snapshot token, never authority.
+	RecoverySnapshot string `json:"recovery_snapshot,omitempty"`
 	// AccountIdentityRevision tracks identity mutations that invalidate
 	// baked message data — confirming or removing a "me" address, and
 	// participant merges (which repoint messages.sender_id) — separately

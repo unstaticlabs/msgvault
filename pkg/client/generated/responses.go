@@ -957,6 +957,112 @@ func (e *ExploreErrorResponseJSON503) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type ApplyEmailWorkActionResponse = EmailWorkActionResponse
+
+type ApplyEmailWorkActionErrorResponse = ErrorResponse
+
+type ExportEmailWorkItemResponse = []byte
+
+type ExportEmailWorkItemErrorResponse = ErrorResponse
+
+type ExportEmailWorkItemErrorResponseJSON = ErrorResponse
+
+type GetEmailWorkMembersResponse = EmailWorkMembersResponse
+
+type GetEmailWorkMembersErrorResponse = ErrorResponse
+
+type GetEmailWorkMembersErrorResponseJSON = ErrorResponse
+
+type GetEmailWorkMembersErrorResponseJSON503 struct {
+	GetEmailWorkMembers_ErrorResponse_503_AnyOf *GetEmailWorkMembers_ErrorResponse_503_AnyOf `json:"-"`
+}
+
+func (g GetEmailWorkMembersErrorResponseJSON503) MarshalJSON() ([]byte, error) {
+	var parts []json.RawMessage
+
+	{
+		b, err := runtime.MarshalJSON(g.GetEmailWorkMembers_ErrorResponse_503_AnyOf)
+		if err != nil {
+			return nil, fmt.Errorf("GetEmailWorkMembers_ErrorResponse_503_AnyOf marshal: %w", err)
+		}
+		parts = append(parts, b)
+	}
+
+	return runtime.CoalesceOrMerge(parts...)
+}
+
+func (g *GetEmailWorkMembersErrorResponseJSON503) UnmarshalJSON(data []byte) error {
+	trim := bytes.TrimSpace(data)
+	if bytes.Equal(trim, []byte("null")) {
+		return nil
+	}
+	if len(trim) == 0 {
+		return fmt.Errorf("empty JSON input")
+	}
+
+	if g.GetEmailWorkMembers_ErrorResponse_503_AnyOf == nil {
+		g.GetEmailWorkMembers_ErrorResponse_503_AnyOf = &GetEmailWorkMembers_ErrorResponse_503_AnyOf{}
+	}
+
+	if err := runtime.UnmarshalJSON(data, g.GetEmailWorkMembers_ErrorResponse_503_AnyOf); err != nil {
+		return fmt.Errorf("GetEmailWorkMembers_ErrorResponse_503_AnyOf unmarshal: %w", err)
+	}
+
+	return nil
+}
+
+type PrepareEmailWorkResponse = EmailWorkPrepareResponse
+
+type PrepareEmailWorkErrorResponse = ErrorResponse
+
+type PreviewEmailWorkActionResponse = EmailWorkActionPreview
+
+type PreviewEmailWorkActionErrorResponse = ErrorResponse
+
+type PreviewEmailWorkActionErrorResponseJSON = ErrorResponse
+
+type PreviewEmailWorkActionErrorResponseJSON503 struct {
+	PreviewEmailWorkAction_ErrorResponse_503_AnyOf *PreviewEmailWorkAction_ErrorResponse_503_AnyOf `json:"-"`
+}
+
+func (p PreviewEmailWorkActionErrorResponseJSON503) MarshalJSON() ([]byte, error) {
+	var parts []json.RawMessage
+
+	{
+		b, err := runtime.MarshalJSON(p.PreviewEmailWorkAction_ErrorResponse_503_AnyOf)
+		if err != nil {
+			return nil, fmt.Errorf("PreviewEmailWorkAction_ErrorResponse_503_AnyOf marshal: %w", err)
+		}
+		parts = append(parts, b)
+	}
+
+	return runtime.CoalesceOrMerge(parts...)
+}
+
+func (p *PreviewEmailWorkActionErrorResponseJSON503) UnmarshalJSON(data []byte) error {
+	trim := bytes.TrimSpace(data)
+	if bytes.Equal(trim, []byte("null")) {
+		return nil
+	}
+	if len(trim) == 0 {
+		return fmt.Errorf("empty JSON input")
+	}
+
+	if p.PreviewEmailWorkAction_ErrorResponse_503_AnyOf == nil {
+		p.PreviewEmailWorkAction_ErrorResponse_503_AnyOf = &PreviewEmailWorkAction_ErrorResponse_503_AnyOf{}
+	}
+
+	if err := runtime.UnmarshalJSON(data, p.PreviewEmailWorkAction_ErrorResponse_503_AnyOf); err != nil {
+		return fmt.Errorf("PreviewEmailWorkAction_ErrorResponse_503_AnyOf unmarshal: %w", err)
+	}
+
+	return nil
+}
+
+type UndoEmailWorkActionResponse = EmailWorkActionResponse
+
+type UndoEmailWorkActionErrorResponse = ErrorResponse
+
 type ListExploreFilesResponse = ExploreFilesHTTPResponse
 
 type ListExploreFilesErrorResponse = ErrorResponse
@@ -3755,6 +3861,55 @@ type ExploreResp struct {
 	JSON400      *ExploreErrorResponse
 	JSON409      *ExploreErrorResponseJSON
 	JSON503      *ExploreErrorResponseJSON503
+}
+
+type ApplyEmailWorkActionResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *ApplyEmailWorkActionResponse
+}
+
+type ExportEmailWorkItemResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON409      *ExportEmailWorkItemErrorResponse
+	JSON503      *ExportEmailWorkItemErrorResponseJSON
+}
+
+type GetEmailWorkMembersResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *GetEmailWorkMembersResponse
+	JSON400      *GetEmailWorkMembersErrorResponse
+	JSON409      *GetEmailWorkMembersErrorResponseJSON
+	JSON503      *GetEmailWorkMembersErrorResponseJSON503
+}
+
+type PrepareEmailWorkResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *PrepareEmailWorkResponse
+}
+
+type PreviewEmailWorkActionResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *PreviewEmailWorkActionResponse
+	JSON400      *PreviewEmailWorkActionErrorResponse
+	JSON409      *PreviewEmailWorkActionErrorResponseJSON
+	JSON503      *PreviewEmailWorkActionErrorResponseJSON503
+}
+
+type UndoEmailWorkActionResp struct {
+	HTTPResponse *http.Response
+	Body         []byte
+	StatusCode   int
+	JSON200      *UndoEmailWorkActionResponse
 }
 
 type ListExploreFilesResp struct {

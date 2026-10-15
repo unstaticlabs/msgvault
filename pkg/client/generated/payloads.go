@@ -80,6 +80,18 @@ type PatchEmploymentBody = EmploymentBody
 
 type ExploreBody = ExploreHTTPRequest
 
+type ApplyEmailWorkActionBody = EmailWorkActionRequest
+
+type ExportEmailWorkItemBody = EmailWorkExportRequest
+
+type GetEmailWorkMembersBody = EmailWorkMembersHTTPRequest
+
+type PrepareEmailWorkBody = EmailWorkPrepareRequest
+
+type PreviewEmailWorkActionBody = EmailWorkActionRequest
+
+type UndoEmailWorkActionBody = EmailWorkUndoRequest
+
 type ListExploreFilesBody = ExploreFilesHTTPRequest
 
 type ExploreGroupsBody = ExploreGroupsHTTPRequest

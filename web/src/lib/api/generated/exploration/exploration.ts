@@ -4,6 +4,11 @@
 import type {
   DomainContextSummaryHTTPResponse,
   DomainSearchHTTPResponse,
+  EmailWorkActionPreview,
+  EmailWorkActionRequest,
+  EmailWorkExportRequest,
+  EmailWorkMembersHTTPRequest,
+  EmailWorkMembersResponse,
   ExploreFilesHTTPRequest,
   ExploreFilesHTTPResponse,
   ExploreGroupsHTTPRequest,
@@ -136,6 +141,58 @@ export const explore = (
       method: "POST",
       headers: { "Content-Type": "application/json" },
       data: exploreHTTPRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Export every permitted archived copy and its provenance
+ */
+export const exportEmailWorkItem = (
+  emailWorkExportRequest: EmailWorkExportRequest,
+  options?: SecondParameter<typeof orvalFetch<Blob>>,
+) => {
+  return orvalFetch<Blob>(
+    {
+      url: `/api/v1/explore/email-work/export`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: emailWorkExportRequest,
+      responseType: "blob",
+    },
+    options,
+  );
+};
+/**
+ * @summary Read every permitted source copy and link evidence in an email work item
+ */
+export const getEmailWorkMembers = (
+  emailWorkMembersHTTPRequest: EmailWorkMembersHTTPRequest,
+  options?: SecondParameter<typeof orvalFetch<EmailWorkMembersResponse>>,
+) => {
+  return orvalFetch<EmailWorkMembersResponse>(
+    {
+      url: `/api/v1/explore/email-work/members`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: emailWorkMembersHTTPRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Review a fixed-target local link or handled confirmation
+ */
+export const previewEmailWorkAction = (
+  emailWorkActionRequest: EmailWorkActionRequest,
+  options?: SecondParameter<typeof orvalFetch<EmailWorkActionPreview>>,
+) => {
+  return orvalFetch<EmailWorkActionPreview>(
+    {
+      url: `/api/v1/explore/email-work/preview`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: emailWorkActionRequest,
     },
     options,
   );

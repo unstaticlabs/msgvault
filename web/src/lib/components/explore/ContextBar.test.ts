@@ -24,3 +24,33 @@ describe('ContextBar presentation control', () => {
     expect(onPresentationChange).toHaveBeenCalledWith('timeline');
   });
 });
+
+describe('Mailbox filters', () => {
+  it('adds Inbox while retaining the account union and participant context', async () => {
+    const onFiltersChange = vi.fn();
+    render(ContextBar, {
+      client: createAPIClient(vi.fn<typeof fetch>()), query: '', searchMode: 'full_text',
+      filters: [{ dimension: 'source', values: ['1', '2', '3'] }, { dimension: 'participant', values: ['7'] }],
+      groupingChain: [], onAddGroup: vi.fn(), onRemoveGroup: vi.fn(), onClearFilters: vi.fn(), onFiltersChange
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+    await chooseSelectOption(screen.getByRole('combobox', { name: 'Inbox: All inbox states' }), 'In inbox');
+    expect(onFiltersChange).toHaveBeenCalledWith([
+      { dimension: 'source', values: ['1', '2', '3'] }, { dimension: 'participant', values: ['7'] },
+      { dimension: 'inbox_state', values: ['inbox'] }
+    ]);
+  });
+  it('opens persisted Inbox+Unread with readable labels and clears only read status', async () => {
+    const onFiltersChange = vi.fn();
+    render(ContextBar, {
+      client: createAPIClient(vi.fn<typeof fetch>()), query: '', searchMode: 'full_text',
+      filters: [{ dimension: 'inbox_state', values: ['inbox'] }, { dimension: 'read_state', values: ['unread'] }],
+      groupingChain: [], onAddGroup: vi.fn(), onRemoveGroup: vi.fn(), onClearFilters: vi.fn(), onFiltersChange
+    });
+    expect(screen.getByText('In inbox')).toBeTruthy();
+    expect(screen.getByText('Unread')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Filters' }));
+    await chooseSelectOption(screen.getByRole('combobox', { name: 'Read status: Unread' }), 'All read states');
+    expect(onFiltersChange).toHaveBeenCalledWith([{ dimension: 'inbox_state', values: ['inbox'] }]);
+  });
+});

@@ -15,9 +15,12 @@
   import {
     DEFAULT_EXPLORE_COLUMNS,
     isFilterDimension,
+    isValidFilterID,
     type ExploreColumn,
     type ExploreURLState,
   } from '../../explore/models';
+  import { emailWorkFilterProblem } from '../../explore/email-work';
+  import { filterCaption } from '../../explore/mailbox-state';
   import { isGroupingDimension } from '../../grouping/catalog';
   type SavedView = GeneratedSavedView;
   type CanonicalState = GeneratedSavedViewStateEnvelope;
@@ -45,6 +48,7 @@
   let name = $state('');
   let description = $state('');
   let editing = $state<SavedView>();
+  let repairingFilters = $state(false);
   let editName = $state('');
   let editDescription = $state('');
   let deleting = $state<SavedView>();
@@ -102,9 +106,19 @@
     }
   }
   function beginEdit(view: SavedView): void {
+    repairingFilters = false;
     editing = view;
     editName = view.name;
     editDescription = view.description ?? '';
+  }
+  function beginFilterRepair(view: SavedView): void {
+    beginEdit(view);
+    repairingFilters = true;
+  }
+  function canRepairFilters(view: SavedView): boolean {
+    return view.schema_version === CURRENT_SCHEMA_VERSION && !incompatibilityFor({
+      ...view, canonical_state: { ...view.canonical_state, filters: canonicalState().filters }
+    });
   }
   async function saveEdit(): Promise<void> {
     if (!editing || !editName.trim()) return;
@@ -121,6 +135,7 @@
         {
           name: editName.trim(),
           description: editDescription.trim(),
+          ...(repairingFilters ? { canonical_state: { ...target.canonical_state, filters: canonicalState().filters } } : {}),
         },
         {
           ...client,
@@ -174,6 +189,7 @@
     }));
     onOpen({
       workspace: 'everything',
+      savedViewID: view.id, savedViewRevision: view.revision,
       query: saved.query ?? '',
       searchMode: saved.search_mode === 'semantic' || saved.search_mode === 'hybrid' ? saved.search_mode : 'full_text',
       filters,
@@ -192,6 +208,9 @@
       return `This view uses schema version ${view.schema_version}. Automatic migration is not supported; remove it and save the current view again.`;
     }
     const saved = view.canonical_state;
+    const seen = new Set<string>();
+    let sourceValues: string[] | undefined;
+    let identityValues: string[] | undefined;
     for (const filter of saved.filters ?? []) {
       if (!isFilterDimension(filter.field) && !FILTER_ALIASES.has(filter.field)) {
         return `This view has an unsupported v1 filter field: ${filter.field}.`;
@@ -199,9 +218,45 @@
       if (filter.operator !== 'eq' && filter.operator !== 'in') {
         return `This view has an unsupported v1 filter operator: ${filter.operator}.`;
       }
-      if (!Array.isArray(filter.values) || filter.values.length === 0 || filter.values.some((value) => !value)) {
+      const dimension = FILTER_ALIASES.get(filter.field) ?? filter.field;
+      if (!Array.isArray(filter.values) || filter.values.length === 0 || filter.values.some((value, index) =>
+        typeof value !== 'string' || (!value.trim() && !(dimension === 'identity' && index === 2 && value === '')))) {
         return `This view has an unsupported v1 filter value for ${filter.field}.`;
       }
+      if (!['participant', 'domain', 'mailing_list'].includes(dimension)) {
+        if (seen.has(dimension)) return `This view repeats its ${dimension} filter. Select the filters again in Explore and save a new view. Your saved definition is unchanged.`;
+        seen.add(dimension);
+      }
+      if (dimension === 'participant' && filter.values.some((value) => !isValidFilterID(value))) {
+        return 'This saved people filter does not identify selected people. Select the people again in Explore and save a new view, or repair it with the current filters. Your saved definition is unchanged.';
+      }
+      if (dimension === 'source') {
+        if (filter.values.some((value) => !isValidFilterID(value))) return 'This saved source filter does not identify selected sources. Select the sources again in Explore and save a new view. Your saved definition is unchanged.';
+        sourceValues = filter.values;
+      }
+      if (dimension === 'identity') {
+        if (filter.values.length !== 3 || !isValidFilterID(filter.values[0]!) || !['', 'any', 'sender', 'recipient'].includes(filter.values[2]!)) {
+          return 'This saved identity filter has incomplete values or an unsupported direction. Select the identity again in Explore and save a new view. Your saved definition is unchanged.';
+        }
+        identityValues = filter.values;
+      }
+      if (dimension === 'after' || dimension === 'before') {
+        if (filter.values.length !== 1 || !rfc3339Timestamp(filter.values[0]!)) {
+          return 'This saved date filter needs one valid timestamp. Select the date again in Explore and save a new view. Your saved definition is unchanged.';
+        }
+      }
+      if (dimension === 'deletion' && (filter.values.length !== 1 || !['active', 'deleted'].includes(filter.values[0]!))) {
+        return 'This saved deletion filter needs one recognized status. Select the deletion status again in Explore and save a new view. Your saved definition is unchanged.';
+      }
+      const mailboxValues = dimension === 'inbox_state' ? ['inbox', 'outside', 'unknown'] : dimension === 'read_state' ? ['read', 'unread', 'unknown'] : undefined;
+      if (mailboxValues && filter.values.some((value) => !mailboxValues.includes(value))) {
+        return 'This saved mailbox filter has an unrecognized status. Select the mailbox status again in Explore and save a new view. Your saved definition is unchanged.';
+      }
+    }
+    const workProblem = emailWorkFilterProblem((saved.filters ?? []).map((filter) => ({dimension: FILTER_ALIASES.get(filter.field) ?? filter.field, values: filter.values})));
+    if (workProblem) return workProblem;
+    if (identityValues && (sourceValues?.length !== 1 || BigInt(sourceValues[0]!) !== BigInt(identityValues[0]!))) {
+      return 'This identity view needs its matching source. Select the source and identity again in Explore and save a new view. Your saved definition is unchanged.';
     }
     if (saved.search_mode && !['full_text', 'semantic', 'hybrid'].includes(saved.search_mode)) {
       return `This view has an unsupported v1 search mode: ${saved.search_mode}.`;
@@ -209,6 +264,7 @@
     if ((saved.grouping ?? []).some((dimension) => !isGroupingDimension(dimension))) {
       return 'This view has an unsupported v1 grouping dimension.';
     }
+    if (saved.presentation && !['table', 'timeline', 'files'].includes(saved.presentation)) return 'This view has an unsupported v1 presentation.';
     if ((saved.sort ?? []).some((sort) => sort.field !== 'occurred_at' || sort.direction !== 'desc')) {
       return 'This view has an unsupported v1 sort.';
     }
@@ -217,6 +273,19 @@
       return 'This view has an unsupported v1 column.';
     }
     return '';
+  }
+  function rfc3339Timestamp(value: string): boolean {
+    // Match the native time.Parse(RFC3339) contract, including fractional
+    // seconds and its accepted numeric zone range, without Date.parse's
+    // normalization of invalid calendar dates.
+    const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{1,2}):(\d{2}):(\d{2})(?:[.,]\d+)?(Z|[+-](\d{2}):(\d{2}))$/.exec(value);
+    if (!parts) return false;
+    const [year, month, day, hour, minute, second] = parts.slice(1, 7).map(Number);
+    const leap = year! % 4 === 0 && (year! % 100 !== 0 || year! % 400 === 0);
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return month! >= 1 && month! <= 12 && day! >= 1 && day! <= days[month! - 1]! &&
+      hour! <= 23 && minute! <= 59 && second! <= 59 &&
+      (parts[7] === 'Z' || (Number(parts[8]) <= 24 && Number(parts[9]) <= 60));
   }
   function messageFor(value: unknown, fallback: string): string {
     return typeof value === 'object' && value !== null && 'message' in value && typeof value.message === 'string'
@@ -263,16 +332,22 @@
     <section class="view-list" aria-label="Saved View library">
       {#each views as view (view.id)}
         {@const incompatibility = incompatibilityFor(view)}
-        <article>
+        <article class:needs-attention={Boolean(incompatibility)} class:repairing={editing?.id === view.id && repairingFilters}>
           {#if editing?.id === view.id}
             <label>Edit name<TextInput ariaLabel="Edit name" bind:value={editName} /></label>
             <label>Edit description<TextInput ariaLabel="Edit description" bind:value={editDescription} /></label>
+            {#if repairingFilters}
+              <p class="notice">Replace this view’s filters with the current Explore filters below. The saved definition stays unchanged until you select Save repaired filters.</p>
+              <ul aria-label="Replacement filters">
+                {#each currentState.filters as filter}<li>{filterCaption(filter)}</li>{:else}<li>All archive entries</li>{/each}
+              </ul>
+            {/if}
             <div class="actions">
               <Button
                 size="sm"
                 tone="info"
                 surface="solid"
-                label="Save changes"
+                label={repairingFilters ? 'Save repaired filters' : 'Save changes'}
                 onclick={() => void saveEdit()}
                 disabled={saving}
               />
@@ -314,6 +389,9 @@
                   }}
                 />
               {:else}
+                {#if canRepairFilters(view)}
+                  <Button size="sm" surface="soft" label={`Repair filters for ${view.name}`} onclick={() => beginFilterRepair(view)} />
+                {/if}
                 <Button
                   size="sm"
                   tone="danger"
@@ -417,6 +495,11 @@
     padding: var(--space-3);
     border-bottom: 1px solid var(--border-muted);
   }
+  article.needs-attention { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+  article.repairing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; }
+  article.repairing .notice, article.repairing ul, article.repairing .actions { grid-column: 1 / -1; }
+  article.repairing ul { margin: 0; padding-left: var(--space-5); }
+  .actions { flex-wrap: wrap; }
   .view-copy {
     display: grid;
     min-width: 12rem;
@@ -433,7 +516,7 @@
     color: var(--text-danger);
   }
   @media (max-width: 760px) {
-    .create {
+    .create, article.repairing {
       grid-template-columns: 1fr;
     }
     article {

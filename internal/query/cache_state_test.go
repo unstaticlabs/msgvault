@@ -152,8 +152,8 @@ func TestInspectCacheReadiness(t *testing.T) {
 	}
 }
 
-func TestCacheSchemaVersionIncludesPersonDisplayNames(t *testing.T) {
-	assert.Equal(t, 27, CacheSchemaVersion)
+func TestCacheSchemaVersionIncludesProviderMailboxStateAndEmailWorkFacts(t *testing.T) {
+	assert.Equal(t, 29, CacheSchemaVersion)
 }
 
 func TestInspectCacheReadinessNamesStaleSchemaAndDrift(t *testing.T) {

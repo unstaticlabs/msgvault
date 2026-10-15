@@ -52,6 +52,9 @@ func duckDBDateParam(value time.Time) string {
 // appear in aggregates until the next `build-parquet --full-rebuild`. For the full deletion
 // index solution, see beads issue msgvault-ozj.
 type DuckDBEngine struct {
+	emailWorkMu   sync.Mutex
+	emailWorkMemo []*emailWorkPopulation
+
 	db               *sql.DB
 	analyticsDir     string
 	sqlitePath       string        // Path to SQLite database for sqlite_scan queries
@@ -66,7 +69,8 @@ type DuckDBEngine struct {
 	// duckDBQueryConcurrency). Acquired at the top of each expensive public
 	// method via acquireQuerySlot; cheap PK/detail lookups are not gated so
 	// they are never starved behind a slow aggregate.
-	querySem *semaphore.Weighted
+	querySem     *semaphore.Weighted
+	querySemInit sync.Once
 
 	// optionalCols tracks which columns exist in each Parquet table's schema.
 	// Used to gracefully handle stale cache files that lack newer columns
@@ -265,6 +269,22 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 
 // Close releases DuckDB resources, including any cached search temp table.
 func (e *DuckDBEngine) Close() error {
+	e.querySemInit.Do(func() {
+		if e.querySem == nil {
+			e.querySem = semaphore.NewWeighted(duckDBQueryConcurrency)
+		}
+	})
+	if err := e.querySem.Acquire(context.Background(), 1); err != nil {
+		return fmt.Errorf("close work-item projections: %w", err)
+	}
+	defer e.querySem.Release(1)
+	e.emailWorkMu.Lock()
+	var workCleanupErr error
+	for _, p := range e.emailWorkMemo {
+		workCleanupErr = errors.Join(workCleanupErr, e.dropEmailWorkRelations(p))
+	}
+	e.emailWorkMemo = nil
+	e.emailWorkMu.Unlock()
 	e.searchCacheMu.Lock()
 	e.dropSearchCache()
 	e.searchCacheMu.Unlock()
@@ -273,7 +293,7 @@ func (e *DuckDBEngine) Close() error {
 	if e.ownTempDirectory && e.tempDirectory != "" {
 		cleanupErr = os.RemoveAll(e.tempDirectory)
 	}
-	return errors.Join(closeErr, cleanupErr)
+	return errors.Join(closeErr, cleanupErr, workCleanupErr)
 }
 
 // QuerySQL executes an arbitrary SQL query against the DuckDB engine
@@ -338,9 +358,11 @@ func (e *DuckDBEngine) QuerySQL(
 // entry point that does not call another gated method, so the slots cannot
 // deadlock (the shared cache lock itself nests freely).
 func (e *DuckDBEngine) acquireQuerySlot(ctx context.Context) (func(), error) {
-	if e.querySem == nil {
-		return e.acquireCacheRead(ctx)
-	}
+	e.querySemInit.Do(func() {
+		if e.querySem == nil {
+			e.querySem = semaphore.NewWeighted(duckDBQueryConcurrency)
+		}
+	})
 	if err := e.querySem.Acquire(ctx, 1); err != nil {
 		return nil, fmt.Errorf("acquire query slot: %w", err)
 	}
@@ -2017,6 +2039,14 @@ func parseLabelsJSON(s string) []string {
 // fetchLabelsForMessages adds labels to message summaries.
 // Uses DuckDB's sqlite_scanner when available, otherwise direct SQLite.
 func (e *DuckDBEngine) fetchLabelsForMessages(ctx context.Context, messages []MessageSummary) error {
+	for i := range messages {
+		if messages[i].InboxState == "" {
+			messages[i].InboxState = "unknown"
+		}
+		if messages[i].ReadState == "" {
+			messages[i].ReadState = "unknown"
+		}
+	}
 	if len(messages) == 0 {
 		return nil
 	}
@@ -2031,7 +2061,10 @@ func (e *DuckDBEngine) fetchLabelsForMessages(ctx context.Context, messages []Me
 		return nil
 	}
 
-	return fetchLabelsForMessageList(ctx, e.db, noopRebind, "sqlite_db.", messages)
+	if err := fetchLabelsForMessageList(ctx, e.db, noopRebind, "sqlite_db.", messages); err != nil {
+		return err
+	}
+	return fetchProviderStateForMessageList(ctx, e.db, noopRebind, "sqlite_db.", "duckdb", messages)
 }
 
 // GetMessageSummariesByIDs delegates to the SQLite engine — the
@@ -2104,7 +2137,17 @@ func (e *DuckDBEngine) GetMessageRaw(ctx context.Context, id int64) ([]byte, err
 }
 
 func (e *DuckDBEngine) getMessageByQuery(ctx context.Context, whereClause string, args ...any) (*MessageDetail, error) {
-	return getMessageByQueryShared(ctx, e.db, noopRebind, "sqlite_db.", whereClause, args...)
+	message, err := getMessageByQueryShared(ctx, e.db, noopRebind, "sqlite_db.", whereClause, args...)
+	if err != nil || message == nil {
+		return message, err
+	}
+	rows := []MessageSummary{{ID: message.ID}}
+	if err := fetchProviderStateForMessageList(ctx, e.db, noopRebind, "sqlite_db.", "duckdb", rows); err != nil {
+		return nil, err
+	}
+	message.InboxState = rows[0].InboxState
+	message.ReadState = rows[0].ReadState
+	return message, nil
 }
 
 // Search performs a Gmail-style search query.
@@ -2491,6 +2534,7 @@ func (e *DuckDBEngine) deletionTargetsForMessageIDChunk(ctx context.Context, ids
 // contain at least one .parquet file for the cache to be considered complete.
 // Shared between the cache builder, TUI, and MCP startup paths.
 var RequiredParquetDirs = []string{
+	DatasetEmailWorkFacts, DatasetEmailWorkSeeds, DatasetEmailWorkIdentities, DatasetEmailWorkDelivery, DatasetEmailWorkActions,
 	datasetMessages,
 	"sources",
 	datasetParticipants,

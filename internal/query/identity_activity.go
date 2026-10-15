@@ -11,7 +11,10 @@ import (
 
 func identityRequestIsUnfiltered(request ExploreRequest) bool {
 	context := request.Context
-	return len(context.SourceIDs) == 0 &&
+	return context.RowUnit == RowUnitDefault &&
+		len(context.HandlingStates) == 0 && len(context.InboxStates) == 0 && len(context.ReadStates) == 0 &&
+		len(context.MailingLists) == 0 && len(context.AdditionalMailingListGroups) == 0 &&
+		len(context.SourceIDs) == 0 &&
 		context.Identity == nil &&
 		len(context.ParticipantIDs) == 0 &&
 		len(context.Domains) == 0 &&
@@ -59,13 +62,17 @@ func (e *DuckDBEngine) buildIdentityLogicalSQL(
 	ctx context.Context,
 	request ExploreRequest,
 	identityCandidateSQL string,
-) (string, []any, error) {
+) (string, []any, func(), error) {
 	var err error
 	request, err = e.narrowIdentityFactCandidates(ctx, request)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	conditions, args := buildExploreConditions(request)
+	logical, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, request, conditions, "NULL::BIGINT", false)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	activityScan := `read_parquet('` + e.identityActivityPath() + `',
 		hive_partitioning=true, union_by_name=true)`
 	// entry_num is a numeric logical-entry key: the anchor message ID for
@@ -80,19 +87,24 @@ func (e *DuckDBEngine) buildIdentityLogicalSQL(
 	// that previously sat on the interactive memory limit and failed
 	// intermittently. person_flags then attaches payload with one
 	// streaming join per branch.
-	sql := buildExploreLogicalSQLNoLists(conditions) + `
+
+	messageIDExpr := "a.message_id"
+	messageJoin := `JOIN (SELECT DISTINCT anchor_message_id FROM logical_entries WHERE entry_kind<>'conversation') m ON m.anchor_message_id=a.message_id`
+	if request.Context.RowUnit == RowUnitEmailWork {
+		messageIDExpr = "le.anchor_message_id"
+		messageJoin = `JOIN classified f ON f.message_id=a.message_id
+ JOIN logical_entries le ON ((le.entry_kind='email_work_item' AND f.work_key=le.entry_key) OR (le.entry_kind<>'email_work_item' AND le.anchor_message_id=f.message_id)) AND le.entry_kind<>'conversation'`
+	}
+	sql := logical + `
 ), message_person AS (
-	SELECT a.message_id, a.canonical_id,
+	SELECT ` + messageIDExpr + ` AS message_id, a.canonical_id,
 	       bool_or(a.is_author) AS is_author,
 	       bool_or(a.is_owner) AS is_owner
 	FROM ` + activityScan + ` a
-	JOIN (
-		SELECT DISTINCT anchor_message_id FROM logical_entries
-		WHERE entry_kind <> 'conversation'
-	) m ON m.anchor_message_id = a.message_id
+	` + messageJoin + `
 	WHERE a.canonical_id IS NOT NULL
 	  AND a.is_direct
-	GROUP BY a.message_id, a.canonical_id
+	GROUP BY ` + messageIDExpr + `, a.canonical_id
 ), chat_person AS (
 	SELECT f.conversation_id, a.canonical_id,
 	       bool_or(a.is_author AND a.message_id = anchors.anchor_message_id) AS is_author,
@@ -135,7 +147,7 @@ func (e *DuckDBEngine) buildIdentityLogicalSQL(
 	if strings.TrimSpace(identityCandidateSQL) != "" {
 		sql += ", identity_candidates AS (" + identityCandidateSQL + ")"
 	}
-	return sql, args, nil
+	return sql, args, cleanup, nil
 }
 
 // buildIdentityDomainLogicalSQL is the domain-search counterpart of
@@ -149,25 +161,34 @@ func (e *DuckDBEngine) buildIdentityLogicalSQL(
 func (e *DuckDBEngine) buildIdentityDomainLogicalSQL(
 	ctx context.Context,
 	request ExploreRequest,
-) (string, []any, error) {
+) (string, []any, func(), error) {
 	var err error
 	request, err = e.narrowIdentityFactCandidates(ctx, request)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 	conditions, args := buildExploreConditions(request)
+	logical, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, request, conditions, "NULL::BIGINT", false)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	activityGlob := e.identityActivityPath()
 	activityScan := `read_parquet('` + activityGlob + `',
 		hive_partitioning=true, union_by_name=true)`
 	// entry_num mirrors buildIdentityLogicalSQL: the per-(entry, domain)
 	// dedup hash stays numeric-keyed so a broad filter fits the interactive
 	// memory budget.
-	sql := buildExploreLogicalSQLNoLists(conditions) + `
+
+	messageJoin := `JOIN ` + activityScan + ` a ON a.message_id=le.anchor_message_id`
+	if request.Context.RowUnit == RowUnitEmailWork {
+		messageJoin = `JOIN classified f ON ((le.entry_kind='email_work_item' AND f.work_key=le.entry_key) OR (le.entry_kind<>'email_work_item' AND le.anchor_message_id=f.message_id)) JOIN ` + activityScan + ` a ON a.message_id=f.message_id`
+	}
+	sql := logical + `
 ), logical_domains AS (
 	SELECT le.anchor_message_id AS entry_num, a.participant_domain AS domain,
 	       le.occurred_at, le.attachment_count, le.source_type
 	FROM logical_entries le
-	JOIN ` + activityScan + ` a ON a.message_id = le.anchor_message_id
+	` + messageJoin + `
 	WHERE le.entry_kind <> 'conversation'
 	  AND a.canonical_id IS NOT NULL
 	  AND a.participant_domain <> ''
@@ -183,7 +204,7 @@ func (e *DuckDBEngine) buildIdentityDomainLogicalSQL(
 ), logical_person_domains AS (
 	SELECT DISTINCT a.participant_domain AS domain, a.canonical_id
 	FROM logical_entries le
-	JOIN ` + activityScan + ` a ON a.message_id = le.anchor_message_id
+	` + messageJoin + `
 	WHERE le.entry_kind <> 'conversation'
 	  AND a.canonical_id IS NOT NULL
 	  AND a.participant_domain <> '' AND a.is_direct
@@ -196,7 +217,7 @@ func (e *DuckDBEngine) buildIdentityDomainLogicalSQL(
 	  AND a.canonical_id IS NOT NULL
 	  AND a.participant_domain <> ''
 )`
-	return sql, args, nil
+	return sql, args, cleanup, nil
 }
 
 func identityRequestHasEdgeFilters(request ExploreRequest) bool {
@@ -415,7 +436,7 @@ func (e *DuckDBEngine) searchPeople(
 			args = append(args, sourceID)
 		}
 	} else {
-		logicalSQL, logicalArgs, logicalErr := e.buildIdentityLogicalSQL(
+		logicalSQL, logicalArgs, cleanup, logicalErr := e.buildIdentityLogicalSQL(
 			ctx,
 			request.Explore,
 			candidates,
@@ -423,6 +444,7 @@ func (e *DuckDBEngine) searchPeople(
 		if logicalErr != nil {
 			return nil, logicalErr
 		}
+		defer cleanup()
 		queryText = e.filteredPeopleSQL(logicalSQL, order)
 		args = append(args, logicalArgs...)
 		args = append(args, candidateArgs...)
@@ -721,13 +743,14 @@ func (e *DuckDBEngine) searchDomains(
 		queryText = e.unfilteredDomainsSQL(domainWhere, order)
 		args = append(args, domainArgs...)
 	} else {
-		logicalSQL, logicalArgs, logicalErr := e.buildIdentityDomainLogicalSQL(
+		logicalSQL, logicalArgs, cleanup, logicalErr := e.buildIdentityDomainLogicalSQL(
 			ctx,
 			request.Explore,
 		)
 		if logicalErr != nil {
 			return nil, logicalErr
 		}
+		defer cleanup()
 		queryText = filteredDomainsSQL(logicalSQL, domainWhere, order)
 		args = append(args, logicalArgs...)
 		args = append(args, domainArgs...)

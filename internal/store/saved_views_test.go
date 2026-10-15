@@ -17,8 +17,8 @@ var savedViewState = json.RawMessage(`{
 	"filters":[{"field":"source_id","operator":"in","values":["1"]}],
 	"grouping":["source"],
 	"presentation":"table",
-	"sort":[{"field":"count","direction":"desc"}],
-	"columns":["sender"],
+	"sort":[{"field":"occurred_at","direction":"desc"}],
+	"columns":["people"],
 	"inspector_pinned":true
 }`)
 

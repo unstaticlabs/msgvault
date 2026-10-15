@@ -7,10 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
-	"strings"
 
-	"go.kenn.io/msgvault/internal/explorecatalog"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 )
@@ -78,18 +75,14 @@ type RunPage struct {
 // the same rules before opening a view, so a definition the Web UI can open is
 // one the daemon client can execute, and vice versa.
 var (
-	// FilterFields are the Explore filter dimensions a v1 definition may name.
-	// The legacy aliases source_id and participant_id are also accepted and
-	// normalized by FilterDimension.
-	FilterFields = []string{"source", "participant", "domain", "message_type", "after", "before", "deletion"}
-	// FilterAliases map legacy v1 filter field names onto Explore dimensions.
-	FilterAliases   = map[string]string{"source_id": "source", "participant_id": "participant"}
-	FilterOperators = []string{"eq", "in"}
-	SearchModes     = []string{"full_text", "semantic", "hybrid"}
-	Presentations   = []string{"table", "timeline", "files"}
-	SortFields      = []string{"occurred_at"}
-	SortDirections  = []string{"desc"}
-	Columns         = []string{"kind", "people", "title", "excerpt", "time", "attachments", "size"}
+	FilterFields    = store.SavedViewFilterFields
+	FilterAliases   = store.SavedViewFilterAliases
+	FilterOperators = store.SavedViewFilterOperators
+	SearchModes     = store.SavedViewSearchModes
+	Presentations   = store.SavedViewPresentations
+	SortFields      = store.SavedViewSortFields
+	SortDirections  = store.SavedViewSortDirections
+	Columns         = store.SavedViewColumns
 )
 
 // DefaultSearchMode applies when a definition carries a query without a mode.
@@ -129,42 +122,37 @@ func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error)
 }
 
 func validateExecutable(state store.SavedViewStateEnvelope) error {
-	for i, filter := range state.Filters {
-		if !slices.Contains(FilterFields, FilterDimension(filter.Field)) {
-			return fmt.Errorf("filters[%d].field %q is not executable", i, filter.Field)
-		}
-		if !slices.Contains(FilterOperators, filter.Operator) {
-			return fmt.Errorf("filters[%d].operator must be eq or in", i)
-		}
-		if len(filter.Values) == 0 {
-			return fmt.Errorf("filters[%d].values must not be empty", i)
-		}
-		for j, value := range filter.Values {
-			if strings.TrimSpace(value) == "" {
-				return fmt.Errorf("filters[%d].values[%d] must not be empty", i, j)
-			}
-		}
-	}
-	if state.SearchMode != "" && !slices.Contains(SearchModes, state.SearchMode) {
-		return fmt.Errorf("search_mode %q is not supported", state.SearchMode)
-	}
-	for i, grouping := range state.Grouping {
-		if !explorecatalog.IsGroupingDimension(grouping) {
-			return fmt.Errorf("grouping[%d] %q is not supported", i, grouping)
-		}
-	}
-	if state.Presentation != "" && !slices.Contains(Presentations, state.Presentation) {
-		return fmt.Errorf("presentation %q is not supported", state.Presentation)
-	}
-	for i, sort := range state.Sort {
-		if !slices.Contains(SortFields, sort.Field) || !slices.Contains(SortDirections, sort.Direction) {
-			return fmt.Errorf("sort[%d] must be occurred_at descending", i)
-		}
-	}
-	for i, column := range state.Columns {
-		if !slices.Contains(Columns, column) {
-			return fmt.Errorf("columns[%d] %q is not supported", i, column)
-		}
-	}
-	return nil
+	return store.ValidateSavedViewState(state)
+}
+
+// EmailWorkReader keeps a work-item read on the exact Saved View and archive
+// revisions that produced its row, rather than silently broadening account scope.
+type EmailWorkReader interface {
+	GetEmailWorkItem(ctx context.Context, viewID, viewRevision int64, uid, cacheRevision string, limit, offset int) (*query.EmailWorkMembersResponse, error)
+}
+
+// EmailWorkRecoveryPlan fixes local intent and optimistic revisions. It grants
+// no authority: the daemon rechecks the current caller and every message copy.
+type EmailWorkRecoveryPlan struct {
+	UID               string                        `json:"uid"`
+	Kind              string                        `json:"kind"`
+	Targets           []store.EmailWorkActionTarget `json:"targets"`
+	Snapshot          string                        `json:"snapshot"`
+	CacheRevision     string                        `json:"cache_revision"`
+	SavedViewID       int64                         `json:"saved_view_id"`
+	SavedViewRevision int64                         `json:"saved_view_revision"`
+	Messages          []query.EmailWorkMemberFact   `json:"messages,omitempty"`
+}
+
+type EmailWorkRecoveryResult struct {
+	Action     *store.EmailWorkAction `json:"action"`
+	CacheState string                 `json:"cache_state"`
+}
+
+// EmailWorkRecovery preserves the native Member curation surface through the
+// revision-pinned Saved View workflow; it never modifies an email provider.
+type EmailWorkRecovery interface {
+	PreviewEmailWorkAction(ctx context.Context, viewID, viewRevision int64, kind string, uids []string, cacheRevision string) (*EmailWorkRecoveryPlan, error)
+	ApplyEmailWorkAction(ctx context.Context, plan EmailWorkRecoveryPlan) (*EmailWorkRecoveryResult, error)
+	UndoEmailWorkAction(ctx context.Context, viewID, viewRevision int64, uid, snapshot, cacheRevision string, actionRevision int64) (*EmailWorkRecoveryResult, error)
 }

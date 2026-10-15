@@ -99,6 +99,11 @@ import type {
   DocumentSearchResponse,
   DocumentVectorOperationsResponse,
   DomainSummary,
+  EmailWorkActionRequest,
+  EmailWorkActionResponse,
+  EmailWorkPrepareRequest,
+  EmailWorkPrepareResponse,
+  EmailWorkUndoRequest,
   Employment,
   EmploymentBody,
   EmploymentsResponse,
@@ -135,6 +140,7 @@ import type {
   GetImportJobPathParameters,
   GetMessageInlinePartParams,
   GetMessageInlinePartPathParameters,
+  GetMessageParams,
   GetMessagePathParameters,
   GetOperationRunPathParameters,
   GetOrganizationHistoryPathParameters,
@@ -1438,6 +1444,57 @@ export const setPrimaryEmployment = (
   );
 };
 /**
+ * @summary Save an undoable local email work assertion
+ */
+export const applyEmailWorkAction = (
+  emailWorkActionRequest: EmailWorkActionRequest,
+  options?: SecondParameter<typeof orvalFetch<EmailWorkActionResponse>>,
+) => {
+  return orvalFetch<EmailWorkActionResponse>(
+    {
+      url: `/api/v1/explore/email-work/actions`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: emailWorkActionRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Prepare one resumable batch of archived email evidence
+ */
+export const prepareEmailWork = (
+  emailWorkPrepareRequest: EmailWorkPrepareRequest,
+  options?: SecondParameter<typeof orvalFetch<EmailWorkPrepareResponse>>,
+) => {
+  return orvalFetch<EmailWorkPrepareResponse>(
+    {
+      url: `/api/v1/explore/email-work/prepare`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: emailWorkPrepareRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Undo one reviewed local email work assertion
+ */
+export const undoEmailWorkAction = (
+  emailWorkUndoRequest: EmailWorkUndoRequest,
+  options?: SecondParameter<typeof orvalFetch<EmailWorkActionResponse>>,
+) => {
+  return orvalFetch<EmailWorkActionResponse>(
+    {
+      url: `/api/v1/explore/email-work/undo`,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      data: emailWorkUndoRequest,
+    },
+    options,
+  );
+};
+/**
  * @summary Get authoritative file metadata
  */
 export const getFile = (
@@ -1742,12 +1799,14 @@ export const getGmailIDsByFilter = (
  */
 export const getMessage = (
   { id }: GetMessagePathParameters,
+  params?: GetMessageParams,
   options?: SecondParameter<typeof orvalFetch<MessageDetail>>,
 ) => {
   return orvalFetch<MessageDetail>(
     {
       url: `/api/v1/messages/${encodeURIComponent(String(id))}`,
       method: "GET",
+      params,
     },
     options,
   );

@@ -1,6 +1,9 @@
 package query
 
-import "time"
+import (
+	"go.kenn.io/msgvault/internal/store"
+	"time"
+)
 
 // ExploreRequest is the canonical modality-neutral analytical request. The
 // API layer validates the finite grouping/sort catalog before constructing it.
@@ -48,12 +51,25 @@ type IdentityPredicate struct {
 	Direction IdentityDirection
 }
 
-// Context narrows the archive before logical chat rows are aggregated.
+// RowUnit chooses native message rows or opt-in cross-account email work items.
+type RowUnit string
+
+const (
+	RowUnitDefault   RowUnit = ""
+	RowUnitEmailWork RowUnit = "email_work_item"
+)
+
+// Context narrows the archive and supplies server-side work-item authority.
 type Context struct {
-	SourceIDs      []int64            `json:"source_ids,omitempty"`
-	ParticipantIDs []int64            `json:"participant_ids,omitempty"`
-	Domains        []string           `json:"domains,omitempty"`
-	Identity       *IdentityPredicate `json:"-"`
+	RowUnit          RowUnit            `json:"row_unit,omitempty"`
+	WorkAuthorityKey string             `json:"-"`
+	HandlingStates   []string           `json:"handling_states,omitempty"`
+	InboxStates      []string           `json:"inbox_states,omitempty"`
+	ReadStates       []string           `json:"read_states,omitempty"`
+	SourceIDs        []int64            `json:"source_ids,omitempty"`
+	ParticipantIDs   []int64            `json:"participant_ids,omitempty"`
+	Domains          []string           `json:"domains,omitempty"`
+	Identity         *IdentityPredicate `json:"-"`
 	// AdditionalParticipantGroups holds extra participant filters beyond the
 	// primary ParticipantIDs group. Each inner slice is OR'd internally (any
 	// member matches) but the groups themselves are AND'd together, and
@@ -143,6 +159,7 @@ type EntryKind string
 
 const (
 	EntryEmail        EntryKind = "email"
+	EntryEmailWork    EntryKind = "email_work_item"
 	EntryConversation EntryKind = "conversation"
 	EntryEvent        EntryKind = "event"
 	EntryMeeting      EntryKind = "meeting"
@@ -160,26 +177,40 @@ type SearchProvenance struct {
 	VectorGeneration     *int64 `json:"vector_generation,omitempty"`
 }
 
+// EmailWorkSummary exposes scoped status without pretending provider unread or
+// local read is handling. Full underlying members are read through drilldown.
+type EmailWorkSummary struct {
+	UID              string   `json:"uid"`
+	State            string   `json:"state"`
+	SourceIDs        []int64  `json:"source_ids"`
+	OutstandingCount int      `json:"outstanding_count"`
+	EvidenceCount    int      `json:"evidence_count"`
+	Reasons          []string `json:"reasons"`
+}
+
 // EntryRow is one logical archive row. Chat/text rows aggregate messages only
 // after Context has been applied; other modalities retain durable item units.
 type EntryRow struct {
-	Key                        string       `json:"key"`
-	Kind                       EntryKind    `json:"kind"`
-	AnchorMessageID            *int64       `json:"anchor_message_id,omitempty"`
-	ConversationID             *int64       `json:"conversation_id,omitempty"`
-	OccurredAt                 time.Time    `json:"occurred_at"`
-	Match                      MatchSummary `json:"match"`
-	SourceID                   int64        `json:"source_id"`
-	SourceType                 string       `json:"source_type"`
-	SourceIdentifier           string       `json:"source_identifier"`
-	MessageType                string       `json:"message_type"`
-	ConversationType           string       `json:"conversation_type"`
-	Title                      string       `json:"title"`
-	Preview                    string       `json:"preview"`
-	ParticipantIDs             []int64      `json:"participant_ids,omitempty"`
-	ParticipantLabels          []string     `json:"participant_labels,omitempty"`
-	MatchedSenderIdentities    []string     `json:"matched_sender_identities" nullable:"false"`
-	MatchedRecipientIdentities []string     `json:"matched_recipient_identities" nullable:"false"`
+	EmailWork                  *EmailWorkSummary `json:"email_work,omitempty"`
+	InboxState                 string            `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState                  string            `json:"read_state,omitempty" enum:"read,unread,unknown"`
+	Key                        string            `json:"key"`
+	Kind                       EntryKind         `json:"kind"`
+	AnchorMessageID            *int64            `json:"anchor_message_id,omitempty"`
+	ConversationID             *int64            `json:"conversation_id,omitempty"`
+	OccurredAt                 time.Time         `json:"occurred_at"`
+	Match                      MatchSummary      `json:"match"`
+	SourceID                   int64             `json:"source_id"`
+	SourceType                 string            `json:"source_type"`
+	SourceIdentifier           string            `json:"source_identifier"`
+	MessageType                string            `json:"message_type"`
+	ConversationType           string            `json:"conversation_type"`
+	Title                      string            `json:"title"`
+	Preview                    string            `json:"preview"`
+	ParticipantIDs             []int64           `json:"participant_ids,omitempty"`
+	ParticipantLabels          []string          `json:"participant_labels,omitempty"`
+	MatchedSenderIdentities    []string          `json:"matched_sender_identities" nullable:"false"`
+	MatchedRecipientIdentities []string          `json:"matched_recipient_identities" nullable:"false"`
 	// StrongestMatchedMessageID is bounded internal semantic-ranking state.
 	// It is never serialized and is nil for no-search and full-text rows.
 	StrongestMatchedMessageID *int64 `json:"-"`
@@ -267,6 +298,56 @@ type ExploreSelectionStats struct {
 	SearchProvenance    SearchProvenance `json:"search_provenance"`
 	DeletableMessageIDs []int64          `json:"-"`
 	RawExportMessageID  *int64           `json:"-"`
+}
+
+type EmailWorkMembersRequest struct {
+	Explore               ExploreRequest `json:"explore"`
+	UID                   string         `json:"uid"`
+	ExpectedCacheRevision string         `json:"expected_cache_revision,omitempty"`
+	Page                  PageSpec       `json:"page"`
+}
+
+type EmailWorkMemberFact struct {
+	MessageID             int64     `json:"message_id"`
+	MessageUID            string    `json:"message_uid,omitempty"`
+	SourceID              int64     `json:"source_id"`
+	SourceType            string    `json:"source_type"`
+	SourceIdentifier      string    `json:"source_identifier"`
+	SourceMessageID       string    `json:"source_message_id"`
+	ConversationID        int64     `json:"conversation_id"`
+	ProviderThreadID      string    `json:"provider_thread_id,omitempty"`
+	OccurredAt            time.Time `json:"occurred_at"`
+	Title                 string    `json:"title"`
+	Preview               string    `json:"preview"`
+	InboxState            string    `json:"inbox_state"`
+	ReadState             string    `json:"read_state"`
+	LocalReadState        string    `json:"local_read_state" enum:"read,unread,unknown"`
+	LinkageOutcome        string    `json:"linkage_outcome"`
+	RFCMessageID          string    `json:"rfc_message_id,omitempty"`
+	ReplyIDs              []string  `json:"reply_ids,omitempty"`
+	ReferenceIDs          []string  `json:"reference_ids,omitempty"`
+	AttachedOriginalIDs   []string  `json:"attached_original_ids,omitempty"`
+	UnavailableReasons    []string  `json:"unavailable_reasons,omitempty"`
+	Labels                []string  `json:"labels" nullable:"false"`
+	NativeSent            bool      `json:"native_sent"`
+	NativeDraft           bool      `json:"native_draft"`
+	Incoming              bool      `json:"incoming"`
+	AttributionComplete   bool      `json:"attribution_complete"`
+	ConfirmedSourceSender bool      `json:"confirmed_source_sender"`
+}
+
+type EmailWorkMembersResponse struct {
+	UID                   string                  `json:"uid"`
+	RequestedUID          string                  `json:"requested_uid"`
+	CacheRevision         string                  `json:"cache_revision"`
+	Members               []EmailWorkMemberFact   `json:"members"`
+	TotalCount            int                     `json:"total_count"`
+	Summary               EmailWorkSummary        `json:"summary"`
+	OutstandingMessageIDs []int64                 `json:"outstanding_message_ids"`
+	EvidenceMessageIDs    []int64                 `json:"evidence_message_ids"`
+	LocalActions          []store.EmailWorkAction `json:"local_actions"`
+	RecoverySnapshot      string                  `json:"recovery_snapshot"`
+	RequestedAnchor       *EmailWorkMemberFact    `json:"requested_anchor,omitempty"`
 }
 
 type ExploreFilesRequest struct {

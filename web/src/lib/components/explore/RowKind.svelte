@@ -3,6 +3,7 @@
 
   const presentation = $derived.by(() => {
     const normalizedKind = kind.toLowerCase();
+    if (normalizedKind === 'email_work_item') return { icon: '✉', label: 'Related email' };
     if (normalizedKind === 'email') return { icon: '✉', label: 'Email item' };
     if (normalizedKind === 'conversation') return { icon: '◌', label: 'Conversation item' };
     if (normalizedKind === 'event') return { icon: '□', label: 'Calendar event' };

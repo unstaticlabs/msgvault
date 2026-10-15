@@ -1170,16 +1170,13 @@ func (s *Store) UpsertMessage(msg *Message) (int64, error) {
 		return 0, err
 	}
 	if !isBodylessMessageJournalCandidate(msg) {
-		if s.syncGeneration != nil {
-			var id int64
-			err := s.withTx(func(tx *loggedTx) error {
-				var err error
-				id, err = upsertMessageWith(tx, s.dialect, msg)
-				return err
-			})
-			return id, err
-		}
-		return upsertMessageWith(s.db, s.dialect, msg)
+		var id int64
+		err := s.withTx(func(tx *loggedTx) error {
+			var err error
+			id, err = upsertMessageWith(tx, s.dialect, msg)
+			return err
+		})
+		return id, err
 	}
 	var id int64
 	err := s.withTx(func(tx *loggedTx) error {
@@ -1296,6 +1293,11 @@ func upsertMessageWith(q querier, d Dialect, msg *Message) (int64, error) {
 	}
 	if journalCandidate && !prior.found && d.DriverName() != postgresDriverName {
 		if err := appendPersonSweepMessageInsert(q, d, id); err != nil {
+			return 0, err
+		}
+	}
+	if msg.MessageType == MessageTypeEmail || msg.MessageType == "" {
+		if _, err := ensureEmailWorkSeed(q, id); err != nil {
 			return 0, err
 		}
 	}
@@ -1485,11 +1487,7 @@ func nullStringValue(ns sql.NullString) string {
 
 // UpsertMessageRaw stores the compressed raw MIME data for a message.
 func (s *Store) UpsertMessageRaw(messageID int64, rawData []byte) error {
-	return upsertMessageRaw(s.db, messageID, rawData)
-}
-
-func upsertMessageRaw(q querier, messageID int64, rawData []byte) error {
-	return upsertMessageRawWithFormat(q, messageID, rawData, "mime")
+	return s.UpsertMessageRawWithFormat(messageID, rawData, "mime")
 }
 
 func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, format string) error {
@@ -1503,15 +1501,25 @@ func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, form
 		return fmt.Errorf("close compressor: %w", err)
 	}
 
-	_, err := q.Exec(`
+	result, err := q.Exec(`
 		INSERT INTO message_raw (message_id, raw_data, raw_format, compression)
 		VALUES (?, ?, ?, 'zlib')
 		ON CONFLICT(message_id) DO UPDATE SET
 			raw_data = excluded.raw_data,
 			raw_format = excluded.raw_format,
 			compression = excluded.compression
+		WHERE message_raw.raw_data IS DISTINCT FROM excluded.raw_data
+		   OR message_raw.raw_format IS DISTINCT FROM excluded.raw_format
+		   OR message_raw.compression IS DISTINCT FROM excluded.compression
 	`, messageID, compressed.Bytes(), format)
-	return err
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed == 0 {
+		return err
+	}
+	return bumpMessageRawRevisionWith(q)
 }
 
 // ErrInvalidMessageRaw marks raw message data that cannot be decompressed.
@@ -2012,6 +2020,9 @@ func (s *Store) persistMessageWith(
 		if err := upsertMessageRawWithFormat(q, messageID, data.RawMIME, rawFormat); err != nil {
 			return 0, fmt.Errorf("upsert raw: %w", err)
 		}
+		if err := s.extractEmailLinkageTx(ctx, tx, messageID, data.RawMIME, rawFormat); err != nil {
+			return 0, fmt.Errorf("store email linkage: %w", err)
+		}
 	}
 
 	for _, rs := range data.Recipients {
@@ -2315,6 +2326,9 @@ type Label struct {
 // represents sent mail. It is deliberately independent of the display name.
 const LabelSystemRoleSent = "sent"
 
+// LabelSystemRoleDraft identifies provider-confirmed draft membership.
+const LabelSystemRoleDraft = "draft"
+
 // EnsureLabel gets or creates a label, handling renames and ID changes.
 // For batch operations prefer EnsureLabelsBatch which runs in a single
 // transaction.
@@ -2348,7 +2362,13 @@ func ensureLabelWith(
 	sourceID int64,
 	sourceLabelID, name, labelType string,
 	systemRole *string,
-) (int64, error) {
+) (resolvedID int64, resultErr error) {
+	roleChanged := false
+	defer func() {
+		if resultErr == nil && roleChanged {
+			resultErr = bumpDerivedDataRevisionWith(q)
+		}
+	}()
 	// Look up by canonical identifier (Gmail label ID).
 	var id int64
 	var existingName string
@@ -2358,6 +2378,20 @@ func ensureLabelWith(
 		SELECT id, name, label_type, system_role FROM labels
 		WHERE source_id = ? AND source_label_id = ?
 	`, sourceID, sourceLabelID).Scan(&id, &existingName, &existingType, &existingRole)
+
+	if systemRole != nil {
+		switch {
+		case err == nil:
+			roleChanged = !labelSystemRoleMatches(existingRole, *systemRole)
+		case errors.Is(err, sql.ErrNoRows):
+			var priorRole sql.NullString
+			priorErr := q.QueryRow(`SELECT system_role FROM labels WHERE source_id = ? AND name = ?`, sourceID, name).Scan(&priorRole)
+			if priorErr != nil && !errors.Is(priorErr, sql.ErrNoRows) {
+				return 0, priorErr
+			}
+			roleChanged = !labelSystemRoleMatches(priorRole, *systemRole)
+		}
+	}
 
 	if err == nil {
 		if existingName == name {
@@ -5188,15 +5222,25 @@ func (s *Store) ReplaceReactions(messageID int64, reactions []ReactionRef) error
 // UpsertMessageRawWithFormat stores compressed raw data with an explicit format.
 // Unlike UpsertMessageRaw (which hardcodes 'mime'), this accepts the format as a parameter.
 func (s *Store) UpsertMessageRawWithFormat(messageID int64, rawData []byte, format string) error {
-	if s.syncGeneration != nil {
-		return s.withTx(func(tx *loggedTx) error {
+	return s.withTx(func(tx *loggedTx) error {
+		if s.syncGeneration != nil {
 			if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
 				return err
 			}
-			return upsertMessageRawWithFormat(tx, messageID, rawData, format)
-		})
-	}
-	return upsertMessageRawWithFormat(s.db, messageID, rawData, format)
+		}
+		// Match ordinary persistence/backfill: message before raw, then seeds/facts.
+		// This also conflicts with maintenance before taking later table locks.
+		if s.IsPostgreSQL() {
+			if err := s.lockMessageForRecipientWrite(tx, messageID); err != nil {
+				return err
+			}
+		}
+		if err := upsertMessageRawWithFormat(tx, messageID, rawData, format); err != nil {
+			return err
+		}
+		err := s.extractEmailLinkageTx(context.Background(), tx, messageID, rawData, format)
+		return err
+	})
 }
 
 // AttachmentPathsUniqueToSource returns local content and thumbnail paths for

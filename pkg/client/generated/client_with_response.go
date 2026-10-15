@@ -8190,6 +8190,414 @@ func (c *Client) ExploreWithResponse(ctx context.Context, options *ExploreReques
 	}
 }
 
+// ApplyEmailWorkAction Save an undoable local email work assertion
+func (c *Client) ApplyEmailWorkActionWithResponse(ctx context.Context, options *ApplyEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ApplyEmailWorkActionResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/actions",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/actions")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &ApplyEmailWorkActionResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		out.JSON200 = new(ApplyEmailWorkActionResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON200); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "ApplyEmailWorkActionResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, nil
+	case 500:
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
+// ExportEmailWorkItem Export every permitted archived copy and its provenance
+func (c *Client) ExportEmailWorkItemWithResponse(ctx context.Context, options *ExportEmailWorkItemRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ExportEmailWorkItemResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/export",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/export")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &ExportEmailWorkItemResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		return out, nil
+	case 409:
+		out.JSON409 = new(ExportEmailWorkItemErrorResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON409); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "ExportEmailWorkItemErrorResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	case 503:
+		out.JSON503 = new(ExportEmailWorkItemErrorResponseJSON)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON503); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "ExportEmailWorkItemErrorResponseJSON",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
+// GetEmailWorkMembers Read every permitted source copy and link evidence in an email work item
+func (c *Client) GetEmailWorkMembersWithResponse(ctx context.Context, options *GetEmailWorkMembersRequestOptions, reqEditors ...runtime.RequestEditorFn) (*GetEmailWorkMembersResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/members",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/members")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &GetEmailWorkMembersResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		out.JSON200 = new(GetEmailWorkMembersResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON200); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "GetEmailWorkMembersResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, nil
+	case 400:
+		out.JSON400 = new(GetEmailWorkMembersErrorResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON400); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "GetEmailWorkMembersErrorResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	case 409:
+		out.JSON409 = new(GetEmailWorkMembersErrorResponseJSON)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON409); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "GetEmailWorkMembersErrorResponseJSON",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	case 503:
+		out.JSON503 = new(GetEmailWorkMembersErrorResponseJSON503)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON503); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "GetEmailWorkMembersErrorResponseJSON503",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
+// PrepareEmailWork Prepare one resumable batch of archived email evidence
+func (c *Client) PrepareEmailWorkWithResponse(ctx context.Context, options *PrepareEmailWorkRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PrepareEmailWorkResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/prepare",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/prepare")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &PrepareEmailWorkResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		out.JSON200 = new(PrepareEmailWorkResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON200); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "PrepareEmailWorkResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, nil
+	case 500:
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
+// PreviewEmailWorkAction Review a fixed-target local link or handled confirmation
+func (c *Client) PreviewEmailWorkActionWithResponse(ctx context.Context, options *PreviewEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*PreviewEmailWorkActionResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/preview",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/preview")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &PreviewEmailWorkActionResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		out.JSON200 = new(PreviewEmailWorkActionResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON200); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "PreviewEmailWorkActionResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, nil
+	case 400:
+		out.JSON400 = new(PreviewEmailWorkActionErrorResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON400); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "PreviewEmailWorkActionErrorResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	case 409:
+		out.JSON409 = new(PreviewEmailWorkActionErrorResponseJSON)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON409); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "PreviewEmailWorkActionErrorResponseJSON",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	case 503:
+		out.JSON503 = new(PreviewEmailWorkActionErrorResponseJSON503)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON503); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "PreviewEmailWorkActionErrorResponseJSON503",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
+// UndoEmailWorkAction Undo one reviewed local email work assertion
+func (c *Client) UndoEmailWorkActionWithResponse(ctx context.Context, options *UndoEmailWorkActionRequestOptions, reqEditors ...runtime.RequestEditorFn) (*UndoEmailWorkActionResp, error) {
+	var err error
+	reqParams := runtime.RequestOptionsParameters{
+		RequestURL:  c.apiClient.GetBaseURL() + "/api/v1/explore/email-work/undo",
+		Method:      "POST",
+		Options:     options,
+		ContentType: "application/json",
+	}
+
+	req, err := c.apiClient.CreateRequest(ctx, reqParams, reqEditors...)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := c.apiClient.ExecuteRequest(ctx, req, "/api/v1/explore/email-work/undo")
+	if err != nil {
+		return nil, fmt.Errorf("error executing request: %w", err)
+	}
+
+	out := &UndoEmailWorkActionResp{
+		HTTPResponse: resp.Raw,
+		Body:         resp.Content,
+		StatusCode:   resp.StatusCode,
+	}
+
+	switch resp.StatusCode {
+	case 200:
+		out.JSON200 = new(UndoEmailWorkActionResponse)
+		bodyBytes := resp.Content
+		if len(bodyBytes) > 0 {
+			if err := json.Unmarshal(bodyBytes, out.JSON200); err != nil {
+				return out, &runtime.ResponseDecodeError{
+					StatusCode:    resp.StatusCode,
+					ContentType:   resp.Headers.Get("Content-Type"),
+					ContentLength: len(bodyBytes),
+					TargetType:    "UndoEmailWorkActionResponse",
+					Body:          bodyBytes,
+					Err:           err,
+				}
+			}
+		}
+		return out, nil
+	case 500:
+		return out, runtime.NewClientAPIError(fmt.Errorf("API error (status %d)", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	default:
+		return out, runtime.NewClientAPIError(fmt.Errorf("unexpected status code: %d", resp.StatusCode), runtime.WithStatusCode(resp.StatusCode))
+	}
+}
+
 // ListExploreFiles List bounded chronological attachment facts
 func (c *Client) ListExploreFilesWithResponse(ctx context.Context, options *ListExploreFilesRequestOptions, reqEditors ...runtime.RequestEditorFn) (*ListExploreFilesResp, error) {
 	var err error

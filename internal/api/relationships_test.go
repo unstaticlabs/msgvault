@@ -179,6 +179,7 @@ func newRelationshipsDuckDBFixtureWithDir(t *testing.T, now time.Time) (*query.D
 		requirementsForTest.NoError(err, "write %s", table.dir)
 	}
 
+	ensureEmailWorkCacheFixtureDatasets(t, db, analyticsDir)
 	derived, err := identityindex.Build(
 		context.Background(),
 		db,

@@ -322,7 +322,8 @@ func savedViewHandlerError(operation string, err error) (*toolResult, error) {
 	var coded daemonAPIErrorCoder
 	if errors.As(err, &coded) {
 		switch coded.APIErrorCode() {
-		case "invalid_cursor", "invalid_filter", "invalid_grouping", "invalid_limit",
+		case "work_item_unavailable", "work_item_revision_changed", "work_recovery_changed", "work_recovery_unavailable", "invalid_work_recovery", "saved_view_revision_conflict", "cache_unavailable",
+			"invalid_cursor", "invalid_filter", "invalid_grouping", "invalid_limit",
 			"invalid_presentation", "invalid_query", "invalid_search", "invalid_search_mode", "invalid_sort":
 			return toolErrorResult(coded.APIErrorCode() + ": Saved View execution failed: " + err.Error()), nil
 		}

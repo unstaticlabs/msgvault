@@ -1013,3 +1013,36 @@ func TestApplyIMAPMailboxDeltas_ResetPersistsFlagChange(t *testing.T) {
 	_, gotSteadyFlags := membershipMessageAndFlags(t, f.store, f.source.ID, 5, 2)
 	assert.JSONEq(`["\\Seen"]`, gotSteadyFlags)
 }
+
+func TestIMAPFlagAndMembershipChangesAdvanceCacheRevision(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("imap", "flags@example.com")
+	requirements.NoError(err)
+	conv, err := st.EnsureConversation(source.ID, "flags-thread", "[QA] flags")
+	requirements.NoError(err)
+	f := imapMembershipFixture{store: st, source: source, convID: conv}
+	id := f.createMessage(t, "INBOX|1", "<flags@example.com>")
+	delta := store.IMAPMailboxDelta{Mailbox: "INBOX", Reset: true, State: store.IMAPFolderState{Mailbox: "INBOX", UIDValidity: 1, UIDNext: 2}, Memberships: []store.IMAPMembershipObservation{{UID: 1, SourceMessageID: "INBOX|1", Flags: []string{"\\Seen"}}}}
+	requirements.NoError(st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	before, err := st.DerivedDataRevision()
+	requirements.NoError(err)
+	delta.Memberships[0].Flags = []string{}
+	requirements.NoError(st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	after, err := st.DerivedDataRevision()
+	requirements.NoError(err)
+	assertions.Greater(after, before, "a flag-only change must invalidate already exported message facts")
+	got, _ := membershipMessageAndFlags(t, st, source.ID, 1, 1)
+	assertions.Equal(id, got)
+	requirements.NoError(st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	repeated, err := st.DerivedDataRevision()
+	requirements.NoError(err)
+	assertions.Equal(after, repeated, "unchanged authoritative membership must not invalidate the cache")
+	delta.Memberships = nil
+	requirements.NoError(st.ApplyIMAPMailboxDeltas(source.ID, []store.IMAPMailboxDelta{delta}))
+	retired, err := st.DerivedDataRevision()
+	requirements.NoError(err)
+	assertions.Greater(retired, after, "removing the last membership must invalidate cached mailbox state")
+	assertions.True(messageTombstoned(t, st, id))
+}

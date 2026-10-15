@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { PrincipalInfo } from '../../api/generated/models';
   import { getCLIMessageRaw as generatedGetCLIMessageRaw } from '../../api/generated/api/api';
   import { preflightExploreSelection as generatedPreflightExploreSelection } from '../../api/generated/exploration/exploration';
   import {
@@ -75,6 +76,7 @@
   import { bufferedCallback } from '../../util/buffered-callback';
   interface Props {
     client: APIClient;
+    principal?: PrincipalInfo;
     state?: ExploreState;
     enabled?: boolean;
     settings?: Snippet<[
@@ -88,6 +90,7 @@
   }
   let {
     client,
+    principal = undefined,
     state: providedState = undefined,
     enabled = true,
     settings = undefined,
@@ -1322,6 +1325,7 @@
   {:else}
     <EverythingWorkspace
       {client}
+      {principal}
       {exploreState}
       {loader}
       session={everythingSession}
@@ -1446,6 +1450,34 @@
   .appearance-controls {
     display: inline-flex;
     gap: var(--space-2);
+  }
+
+  @media (max-width: 640px) {
+    .app-shell :global(.kit-top-bar) {
+      height: auto;
+      min-height: var(--header-height, 44px);
+      flex-wrap: wrap;
+      row-gap: var(--space-2);
+      padding-block: var(--space-2);
+      padding-inline: var(--space-2);
+    }
+
+    .app-shell :global(.kit-top-bar__nav) {
+      margin-left: auto;
+    }
+
+    .app-shell :global(.kit-top-bar__right) {
+      flex-basis: 100%;
+      min-width: 0;
+      margin-left: 0;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      row-gap: var(--space-2);
+    }
+
+    .archive-state {
+      margin-left: 0;
+    }
   }
 
   .files-shell {

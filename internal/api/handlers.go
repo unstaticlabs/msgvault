@@ -267,6 +267,8 @@ type BodySearchContext struct {
 
 // MessageSummary represents a message in list responses.
 type MessageSummary struct {
+	InboxState      string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState       string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
 	ID              int64    `json:"id"`
 	SourceID        int64    `json:"source_id,omitempty"`
 	SourceMessageID string   `json:"source_message_id,omitempty"`
@@ -497,6 +499,8 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 	return MessageDetail{
 		CalendarState:   qMsg.CalendarState,
 		ID:              qMsg.ID,
+		InboxState:      providerStateValue(qMsg.InboxState),
+		ReadState:       providerStateValue(qMsg.ReadState),
 		SourceID:        qMsg.SourceID,
 		SourceMessageID: qMsg.SourceMessageID,
 		ConversationID:  qMsg.ConversationID,
@@ -533,6 +537,8 @@ func toMessageSummary(m APIMessage) MessageSummary {
 	}
 	return MessageSummary{
 		ID:              m.ID,
+		InboxState:      providerStateValue(m.InboxState),
+		ReadState:       providerStateValue(m.ReadState),
 		SourceID:        m.SourceID,
 		SourceMessageID: m.SourceMessageID,
 		ConversationID:  m.ConversationID,
@@ -692,6 +698,9 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Message not found")
 			return
 		case err == nil:
+			if !s.validateExpectedMessageUID(w, r, id) {
+				return
+			}
 			writeJSON(w, http.StatusOK, messageDetailFromQuery(qMsg))
 			return
 		}
@@ -737,6 +746,9 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	detail.Attachments = attachments
 
+	if !s.validateExpectedMessageUID(w, r, id) {
+		return
+	}
 	writeJSON(w, http.StatusOK, detail)
 }
 
@@ -2698,6 +2710,8 @@ func toMessageSummaryFromQuery(m query.MessageSummary) MessageSummary {
 	}
 	return MessageSummary{
 		ID:              m.ID,
+		InboxState:      providerStateValue(m.InboxState),
+		ReadState:       providerStateValue(m.ReadState),
 		SourceID:        m.SourceID,
 		SourceMessageID: m.SourceMessageID,
 		ConversationID:  m.ConversationID,
@@ -4269,4 +4283,11 @@ func (s *Server) handleMessageInline(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write(part.content)
+}
+
+func providerStateValue(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }

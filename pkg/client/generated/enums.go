@@ -63,6 +63,42 @@ func (c CLIDeduplicatePlanRequestPlanProtocol) Validate() error {
 	}
 }
 
+type CLIQueryMessageSummaryInboxState string
+
+const (
+	Inbox   CLIQueryMessageSummaryInboxState = "inbox"
+	Outside CLIQueryMessageSummaryInboxState = "outside"
+	Unknown CLIQueryMessageSummaryInboxState = "unknown"
+)
+
+// Validate checks if the CLIQueryMessageSummaryInboxState value is valid
+func (c CLIQueryMessageSummaryInboxState) Validate() error {
+	switch c {
+	case Inbox, Outside, Unknown:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CLIQueryMessageSummaryInboxState value, got: %v", c))
+	}
+}
+
+type CLIQueryMessageSummaryReadState string
+
+const (
+	CLIQueryMessageSummaryReadStateUnknown CLIQueryMessageSummaryReadState = "unknown"
+	Read                                   CLIQueryMessageSummaryReadState = "read"
+	Unread                                 CLIQueryMessageSummaryReadState = "unread"
+)
+
+// Validate checks if the CLIQueryMessageSummaryReadState value is valid
+func (c CLIQueryMessageSummaryReadState) Validate() error {
+	switch c {
+	case CLIQueryMessageSummaryReadStateUnknown, Read, Unread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CLIQueryMessageSummaryReadState value, got: %v", c))
+	}
+}
+
 type CandidateClassification string
 
 const (
@@ -387,6 +423,42 @@ func (c CardDAVStatusResponseRepairReason) Validate() error {
 	}
 }
 
+type CliMessageResponseInboxState string
+
+const (
+	CliMessageResponseInboxStateInbox   CliMessageResponseInboxState = "inbox"
+	CliMessageResponseInboxStateOutside CliMessageResponseInboxState = "outside"
+	CliMessageResponseInboxStateUnknown CliMessageResponseInboxState = "unknown"
+)
+
+// Validate checks if the CliMessageResponseInboxState value is valid
+func (c CliMessageResponseInboxState) Validate() error {
+	switch c {
+	case CliMessageResponseInboxStateInbox, CliMessageResponseInboxStateOutside, CliMessageResponseInboxStateUnknown:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CliMessageResponseInboxState value, got: %v", c))
+	}
+}
+
+type CliMessageResponseReadState string
+
+const (
+	CliMessageResponseReadStateRead    CliMessageResponseReadState = "read"
+	CliMessageResponseReadStateUnknown CliMessageResponseReadState = "unknown"
+	CliMessageResponseReadStateUnread  CliMessageResponseReadState = "unread"
+)
+
+// Validate checks if the CliMessageResponseReadState value is valid
+func (c CliMessageResponseReadState) Validate() error {
+	switch c {
+	case CliMessageResponseReadStateRead, CliMessageResponseReadStateUnknown, CliMessageResponseReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CliMessageResponseReadState value, got: %v", c))
+	}
+}
+
 type CreateAttributeDefinitionRequestCardinality string
 
 const (
@@ -495,6 +567,92 @@ func (d DiscoverEventType) Validate() error {
 	}
 }
 
+type EmailWorkActionPreviewKind string
+
+const (
+	Handled EmailWorkActionPreviewKind = "handled"
+	Link    EmailWorkActionPreviewKind = "link"
+)
+
+// Validate checks if the EmailWorkActionPreviewKind value is valid
+func (e EmailWorkActionPreviewKind) Validate() error {
+	switch e {
+	case Handled, Link:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionPreviewKind value, got: %v", e))
+	}
+}
+
+type EmailWorkActionRequestKind string
+
+const (
+	EmailWorkActionRequestKindHandled EmailWorkActionRequestKind = "handled"
+	EmailWorkActionRequestKindLink    EmailWorkActionRequestKind = "link"
+)
+
+// Validate checks if the EmailWorkActionRequestKind value is valid
+func (e EmailWorkActionRequestKind) Validate() error {
+	switch e {
+	case EmailWorkActionRequestKindHandled, EmailWorkActionRequestKindLink:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionRequestKind value, got: %v", e))
+	}
+}
+
+type EmailWorkActionResponseCacheState string
+
+const (
+	EmailWorkActionResponseCacheStateReady EmailWorkActionResponseCacheState = "ready"
+	EmailWorkActionResponseCacheStateStale EmailWorkActionResponseCacheState = "stale"
+)
+
+// Validate checks if the EmailWorkActionResponseCacheState value is valid
+func (e EmailWorkActionResponseCacheState) Validate() error {
+	switch e {
+	case EmailWorkActionResponseCacheStateReady, EmailWorkActionResponseCacheStateStale:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionResponseCacheState value, got: %v", e))
+	}
+}
+
+type EmailWorkMemberFactLocalReadState string
+
+const (
+	EmailWorkMemberFactLocalReadStateRead    EmailWorkMemberFactLocalReadState = "read"
+	EmailWorkMemberFactLocalReadStateUnknown EmailWorkMemberFactLocalReadState = "unknown"
+	EmailWorkMemberFactLocalReadStateUnread  EmailWorkMemberFactLocalReadState = "unread"
+)
+
+// Validate checks if the EmailWorkMemberFactLocalReadState value is valid
+func (e EmailWorkMemberFactLocalReadState) Validate() error {
+	switch e {
+	case EmailWorkMemberFactLocalReadStateRead, EmailWorkMemberFactLocalReadStateUnknown, EmailWorkMemberFactLocalReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkMemberFactLocalReadState value, got: %v", e))
+	}
+}
+
+type EmailWorkPrepareResponseCacheState string
+
+const (
+	EmailWorkPrepareResponseCacheStateReady EmailWorkPrepareResponseCacheState = "ready"
+	EmailWorkPrepareResponseCacheStateStale EmailWorkPrepareResponseCacheState = "stale"
+)
+
+// Validate checks if the EmailWorkPrepareResponseCacheState value is valid
+func (e EmailWorkPrepareResponseCacheState) Validate() error {
+	switch e {
+	case EmailWorkPrepareResponseCacheStateReady, EmailWorkPrepareResponseCacheStateStale:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkPrepareResponseCacheState value, got: %v", e))
+	}
+}
+
 type EmploymentBodySource string
 
 const (
@@ -514,6 +672,42 @@ func (e EmploymentBodySource) Validate() error {
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmploymentBodySource value, got: %v", e))
+	}
+}
+
+type EntryRowInboxState string
+
+const (
+	EntryRowInboxStateInbox   EntryRowInboxState = "inbox"
+	EntryRowInboxStateOutside EntryRowInboxState = "outside"
+	EntryRowInboxStateUnknown EntryRowInboxState = "unknown"
+)
+
+// Validate checks if the EntryRowInboxState value is valid
+func (e EntryRowInboxState) Validate() error {
+	switch e {
+	case EntryRowInboxStateInbox, EntryRowInboxStateOutside, EntryRowInboxStateUnknown:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EntryRowInboxState value, got: %v", e))
+	}
+}
+
+type EntryRowReadState string
+
+const (
+	EntryRowReadStateRead    EntryRowReadState = "read"
+	EntryRowReadStateUnknown EntryRowReadState = "unknown"
+	EntryRowReadStateUnread  EntryRowReadState = "unread"
+)
+
+// Validate checks if the EntryRowReadState value is valid
+func (e EntryRowReadState) Validate() error {
+	switch e {
+	case EntryRowReadStateRead, EntryRowReadStateUnknown, EntryRowReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EntryRowReadState value, got: %v", e))
 	}
 }
 
@@ -545,16 +739,20 @@ const (
 	ExploreFilterDimensionDeletion    ExploreFilterDimension = "deletion"
 	ExploreFilterDimensionDomain      ExploreFilterDimension = "domain"
 	ExploreFilterDimensionIdentity    ExploreFilterDimension = "identity"
+	ExploreFilterDimensionInboxState  ExploreFilterDimension = "inbox_state"
 	ExploreFilterDimensionMailingList ExploreFilterDimension = "mailing_list"
 	ExploreFilterDimensionMessageType ExploreFilterDimension = "message_type"
 	ExploreFilterDimensionParticipant ExploreFilterDimension = "participant"
+	ExploreFilterDimensionReadState   ExploreFilterDimension = "read_state"
 	ExploreFilterDimensionSource      ExploreFilterDimension = "source"
+	HandlingState                     ExploreFilterDimension = "handling_state"
+	RowUnit                           ExploreFilterDimension = "row_unit"
 )
 
 // Validate checks if the ExploreFilterDimension value is valid
 func (e ExploreFilterDimension) Validate() error {
 	switch e {
-	case ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionSource:
+	case ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionInboxState, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionReadState, ExploreFilterDimensionSource, HandlingState, RowUnit:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ExploreFilterDimension value, got: %v", e))
@@ -777,6 +975,42 @@ func (f FileSearchRowContentState) Validate() error {
 	}
 }
 
+type HybridSearchItemInboxState string
+
+const (
+	HybridSearchItemInboxStateInbox   HybridSearchItemInboxState = "inbox"
+	HybridSearchItemInboxStateOutside HybridSearchItemInboxState = "outside"
+	HybridSearchItemInboxStateUnknown HybridSearchItemInboxState = "unknown"
+)
+
+// Validate checks if the HybridSearchItemInboxState value is valid
+func (h HybridSearchItemInboxState) Validate() error {
+	switch h {
+	case HybridSearchItemInboxStateInbox, HybridSearchItemInboxStateOutside, HybridSearchItemInboxStateUnknown:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid HybridSearchItemInboxState value, got: %v", h))
+	}
+}
+
+type HybridSearchItemReadState string
+
+const (
+	HybridSearchItemReadStateRead    HybridSearchItemReadState = "read"
+	HybridSearchItemReadStateUnknown HybridSearchItemReadState = "unknown"
+	HybridSearchItemReadStateUnread  HybridSearchItemReadState = "unread"
+)
+
+// Validate checks if the HybridSearchItemReadState value is valid
+func (h HybridSearchItemReadState) Validate() error {
+	switch h {
+	case HybridSearchItemReadStateRead, HybridSearchItemReadStateUnknown, HybridSearchItemReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid HybridSearchItemReadState value, got: %v", h))
+	}
+}
+
 type IdentityLinkResponseCacheState string
 
 const (
@@ -896,6 +1130,78 @@ func (m MeetingImportResponseStatus) Validate() error {
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MeetingImportResponseStatus value, got: %v", m))
+	}
+}
+
+type MessageDetailInboxState string
+
+const (
+	MessageDetailInboxStateInbox   MessageDetailInboxState = "inbox"
+	MessageDetailInboxStateOutside MessageDetailInboxState = "outside"
+	MessageDetailInboxStateUnknown MessageDetailInboxState = "unknown"
+)
+
+// Validate checks if the MessageDetailInboxState value is valid
+func (m MessageDetailInboxState) Validate() error {
+	switch m {
+	case MessageDetailInboxStateInbox, MessageDetailInboxStateOutside, MessageDetailInboxStateUnknown:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageDetailInboxState value, got: %v", m))
+	}
+}
+
+type MessageDetailReadState string
+
+const (
+	MessageDetailReadStateRead    MessageDetailReadState = "read"
+	MessageDetailReadStateUnknown MessageDetailReadState = "unknown"
+	MessageDetailReadStateUnread  MessageDetailReadState = "unread"
+)
+
+// Validate checks if the MessageDetailReadState value is valid
+func (m MessageDetailReadState) Validate() error {
+	switch m {
+	case MessageDetailReadStateRead, MessageDetailReadStateUnknown, MessageDetailReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageDetailReadState value, got: %v", m))
+	}
+}
+
+type MessageSummaryInboxState string
+
+const (
+	MessageSummaryInboxStateInbox   MessageSummaryInboxState = "inbox"
+	MessageSummaryInboxStateOutside MessageSummaryInboxState = "outside"
+	MessageSummaryInboxStateUnknown MessageSummaryInboxState = "unknown"
+)
+
+// Validate checks if the MessageSummaryInboxState value is valid
+func (m MessageSummaryInboxState) Validate() error {
+	switch m {
+	case MessageSummaryInboxStateInbox, MessageSummaryInboxStateOutside, MessageSummaryInboxStateUnknown:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageSummaryInboxState value, got: %v", m))
+	}
+}
+
+type MessageSummaryReadState string
+
+const (
+	MessageSummaryReadStateRead    MessageSummaryReadState = "read"
+	MessageSummaryReadStateUnknown MessageSummaryReadState = "unknown"
+	MessageSummaryReadStateUnread  MessageSummaryReadState = "unread"
+)
+
+// Validate checks if the MessageSummaryReadState value is valid
+func (m MessageSummaryReadState) Validate() error {
+	switch m {
+	case MessageSummaryReadStateRead, MessageSummaryReadStateUnknown, MessageSummaryReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageSummaryReadState value, got: %v", m))
 	}
 }
 

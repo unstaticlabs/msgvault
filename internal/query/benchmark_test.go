@@ -276,6 +276,11 @@ func buildBenchData(tb testing.TB) *DuckDBEngine {
 		OutputRoot:     tmpDir,
 	})
 	requirements.NoError(err, "derive benchmark identity datasets")
+	for _, spec := range emailWorkFixtureSpecs() {
+		dir := filepath.Join(tmpDir, spec.name)
+		requirements.NoError(os.MkdirAll(dir, 0o755))
+		writeTableParquet(tb, db, escapePath(filepath.Join(dir, spec.name+".parquet")), spec.cols, spec.dummy, true)
+	}
 	fingerprint, err := CacheDatasetFingerprint(tmpDir)
 	requirements.NoError(err, "fingerprint benchmark cache")
 	state, err := json.Marshal(CacheSyncState{

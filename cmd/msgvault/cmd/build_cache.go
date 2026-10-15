@@ -1050,8 +1050,13 @@ func buildCacheLocked(
 	}
 	var expectedBatchCount, expectedTotalCount int64
 	expectedCountQuery := "SELECT COUNT(*) FROM messages WHERE " +
-		exportableMessageWhere("") + " AND id <= ? AND id > ?"
-	if err := sourceSnapshot.QueryRow(expectedCountQuery, maxID, lastMessageID).Scan(&expectedBatchCount); err != nil {
+		exportableMessageWhere("") + " AND id <= ?"
+	expectedCountArgs := []any{maxID}
+	if !replaceAll {
+		expectedCountQuery += " AND id > ?"
+		expectedCountArgs = append(expectedCountArgs, lastMessageID)
+	}
+	if err := sourceSnapshot.QueryRow(expectedCountQuery, expectedCountArgs...).Scan(&expectedBatchCount); err != nil {
 		return nil, fmt.Errorf("count expected staged messages: %w", err)
 	}
 	expectedTotalQuery := "SELECT COUNT(*) FROM messages WHERE " +
@@ -1088,6 +1093,41 @@ func buildCacheLocked(
 		messageSourceAttribution = "COALESCE(m.source_is_from_me, FALSE)"
 	}
 	sourceSnapshot.hasMessageSourceAttribution = messageSourceAttributionColumnCount > 0
+	var membershipColumns int
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('imap_message_memberships') WHERE name = 'flags'`).Scan(&membershipColumns); err != nil {
+		return nil, fmt.Errorf("inspect IMAP membership metadata: %w", err)
+	}
+	sourceSnapshot.hasIMAPMembership = membershipColumns > 0
+	var providerLabelColumns int
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('labels') WHERE name IN ('source_id','source_label_id','label_type')`).Scan(&providerLabelColumns); err != nil {
+		return nil, fmt.Errorf("inspect provider label metadata: %w", err)
+	}
+	sourceSnapshot.hasProviderLabels = providerLabelColumns == 3
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('labels') WHERE name='system_role'`).Scan(&providerLabelColumns); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasLabelRole = providerLabelColumns > 0
+	var workTables int
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='email_linkage_facts'`).Scan(&workTables); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasEmailWorkFacts = workTables > 0
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='email_work_seeds'`).Scan(&workTables); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasEmailWorkSeeds = workTables > 0
+	if err := sourceSnapshot.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('email_work_actions','email_work_action_targets')`).Scan(&workTables); err != nil {
+		return nil, err
+	}
+	sourceSnapshot.hasEmailWorkActions = workTables == 2
+	var recoverySnapshot string
+	if sourceSnapshot.hasEmailWorkActions {
+		recoverySnapshot, err = store.EmailWorkRecoverySnapshotFor(sourceSnapshot)
+		if err != nil {
+			return nil, fmt.Errorf("stamp local recovery snapshot: %w", err)
+		}
+	}
+
 	var recipientEnvelopeColumnCount int
 	if err := sourceSnapshot.QueryRow(`
 		SELECT COUNT(*) FROM pragma_table_info('message_recipients')
@@ -1119,7 +1159,7 @@ func buildCacheLocked(
 
 	// Build WHERE clause for incremental exports
 	idFilter := fmt.Sprintf(" AND TRY_CAST(m.id AS BIGINT) <= %d", maxID)
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		idFilter += fmt.Sprintf(" AND TRY_CAST(m.id AS BIGINT) > %d", lastMessageID)
 	}
 
@@ -1167,7 +1207,7 @@ func buildCacheLocked(
 	// qualified and the incremental predicate names mr.message_id rather
 	// than the bare column the shared junctionFilter helper produces.
 	recipientsFilter := ""
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		recipientsFilter = fmt.Sprintf(" WHERE mr.message_id > %d", lastMessageID)
 	}
 	recipientsFilter = junctionFilterFor("mr.message_id", recipientsFilter)
@@ -1207,7 +1247,7 @@ func buildCacheLocked(
 	messageLabelsDir := filepath.Join(staging.root, "message_labels")
 	escapedMessageLabelsDir := strings.ReplaceAll(messageLabelsDir, "'", "''")
 	messageLabelsFilter := ""
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		messageLabelsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
 	messageLabelsFilter = junctionFilter(messageLabelsFilter)
@@ -1229,7 +1269,7 @@ func buildCacheLocked(
 	attachmentsDir := filepath.Join(staging.root, tableAttachments)
 	escapedAttachmentsDir := strings.ReplaceAll(attachmentsDir, "'", "''")
 	attachmentsFilter := ""
-	if !replaceAll && lastMessageID > 0 {
+	if !replaceAll {
 		attachmentsFilter = fmt.Sprintf(" WHERE message_id > %d", lastMessageID)
 	}
 	attachmentsFilter = junctionFilter(attachmentsFilter)
@@ -1426,6 +1466,10 @@ func buildCacheLocked(
 		}
 	}
 
+	if err := exportEmailWorkDatasets(sourceSnapshot, runExport, staging.root, maxID); err != nil {
+		return nil, err
+	}
+
 	// 8. Export messages (partitioned by year) into staging.
 	messagesDir := filepath.Join(staging.root, tableMessages)
 	escapedMessagesDir := strings.ReplaceAll(messagesDir, "'", "''")
@@ -1436,6 +1480,10 @@ func buildCacheLocked(
 		sourceSnapshot.hasRecipientEnvelope,
 	)
 
+	inboxState, readState := "'unknown'", "'unknown'"
+	if sourceSnapshot.hasProviderLabels {
+		inboxState, readState = store.MailboxStateExpressions("m", "sqlite_db.", "duckdb", sourceSnapshot.hasIMAPMembership)
+	}
 	if err := runExport(tableMessages, fmt.Sprintf(`
 	COPY (
 		SELECT
@@ -1455,6 +1503,8 @@ func buildCacheLocked(
 			COALESCE(TRY_CAST(m.message_type AS VARCHAR), '') as message_type,
 			TRY_CAST(m.list_id AS VARCHAR) AS list_id,
 			%s AS is_from_me,
+ %s AS inbox_state,
+ %s AS read_state,
 			CAST(EXTRACT(YEAR FROM m.sent_at) AS INTEGER) as year,
 			CAST(EXTRACT(MONTH FROM m.sent_at) AS INTEGER) as month
 		FROM sqlite_db.messages m
@@ -1465,7 +1515,7 @@ func buildCacheLocked(
 		OVERWRITE_OR_IGNORE,
 		COMPRESSION 'zstd'
 	)
-	`, messageOwnerParticipant, messageAttribution, idFilter, escapedMessagesDir)); err != nil {
+	`, messageOwnerParticipant, messageAttribution, inboxState, readState, idFilter, escapedMessagesDir)); err != nil {
 		return nil, fmt.Errorf("export messages: %w", err)
 	}
 
@@ -1504,11 +1554,13 @@ func buildCacheLocked(
 				COALESCE(TRY_CAST(m.message_type AS VARCHAR), '') as message_type,
 				TRY_CAST(m.list_id AS VARCHAR) AS list_id,
 				%s AS is_from_me,
+ %s AS inbox_state,
+ %s AS read_state,
 				CAST(EXTRACT(MONTH FROM m.sent_at) AS INTEGER) as month
 			FROM sqlite_db.messages m
 			WHERE 1 = 0
 		) TO '%s' (FORMAT PARQUET, COMPRESSION 'zstd')
-		`, messageOwnerParticipant, messageAttribution, escapedEmptyShard)); err != nil {
+		`, messageOwnerParticipant, messageAttribution, inboxState, readState, escapedEmptyShard)); err != nil {
 			return nil, fmt.Errorf("export empty messages shard: %w", err)
 		}
 	}
@@ -1598,6 +1650,7 @@ func buildCacheLocked(
 		LastFailedSyncRunIDSum:              syncCounters.failedRunIDSum,
 		IdentityRevision:                    identityRevision,
 		DerivedDataRevision:                 derivedDataRevision,
+		RecoverySnapshot:                    recoverySnapshot,
 		AccountIdentityRevision:             accountIdentityRevision,
 		ParticipantIdentifierRevision:       participantIdentifierRevision,
 		ParticipantDisplayNameRevision:      participantDisplayNameRevision,
@@ -1826,6 +1879,12 @@ type cacheSourceSnapshot struct {
 	hasAttachmentMetadata       bool
 	hasMessageSourceAttribution bool
 	hasRecipientEnvelope        bool
+	hasIMAPMembership           bool
+	hasProviderLabels           bool
+	hasLabelRole                bool
+	hasEmailWorkFacts           bool
+	hasEmailWorkSeeds           bool
+	hasEmailWorkActions         bool
 }
 
 type cacheSnapshotTable struct {
@@ -1972,7 +2031,15 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 	// depends on the data: read_csv_auto sniffs empty or all-NULL columns as
 	// VARCHAR, which breaks downstream SQL that binds these columns against
 	// typed Parquet (e.g. COALESCE(BIGINT, VARCHAR) is a binder error).
-	return []cacheSnapshotTable{
+	providerLabelColumns := "NULL AS source_id, NULL AS source_label_id, NULL AS label_type"
+	if s.hasProviderLabels {
+		providerLabelColumns = "source_id, source_label_id, label_type"
+	}
+	roleColumn := "NULL AS system_role"
+	if s.hasLabelRole {
+		roleColumn = "system_role"
+	}
+	tables := []cacheSnapshotTable{
 		// deleted_at is exported so the main COPY query can apply the
 		// `deleted_at IS NULL` filter on this path the same way it does
 		// on the sqlite_scanner path; otherwise DuckDB binds against a
@@ -1992,8 +2059,8 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 			"types={'source_id': 'BIGINT', 'address': 'VARCHAR'}"},
 		{tableParticipantIdentifiers, "SELECT participant_id, identifier_type, identifier_value, display_value, is_primary FROM participant_identifiers",
 			"types={'participant_id': 'BIGINT', 'identifier_type': 'VARCHAR', 'identifier_value': 'VARCHAR', 'display_value': 'VARCHAR', 'is_primary': 'BOOLEAN'}"},
-		{tableLabels, "SELECT id, name FROM labels",
-			"types={'id': 'BIGINT', 'name': 'VARCHAR'}"},
+		{tableLabels, "SELECT id, name, " + providerLabelColumns + ", " + roleColumn + " FROM labels",
+			"types={'id': 'BIGINT', 'name': 'VARCHAR','source_id':'BIGINT','source_label_id':'VARCHAR','label_type':'VARCHAR','system_role':'VARCHAR'}"},
 		{"sources", "SELECT id, identifier, source_type FROM sources",
 			"types={'id': 'BIGINT', 'identifier': 'VARCHAR', 'source_type': 'VARCHAR'}"},
 		{tableConversations, "SELECT id, source_conversation_id, title, COALESCE(conversation_type, 'email_thread') AS conversation_type FROM conversations",
@@ -2001,6 +2068,11 @@ func (s *cacheSourceSnapshot) tables() []cacheSnapshotTable {
 		{tableConversationParticipants, "SELECT conversation_id, participant_id FROM conversation_participants",
 			"types={'conversation_id': 'BIGINT', 'participant_id': 'BIGINT'}"},
 	}
+	tables = append(tables, emailWorkSnapshotTables(s)...)
+	if s.hasIMAPMembership {
+		tables = append(tables, cacheSnapshotTable{"imap_message_memberships", "SELECT source_id,message_id,mailbox,flags FROM imap_message_memberships", "types={'source_id':'BIGINT','message_id':'BIGINT','mailbox':'VARCHAR','flags':'VARCHAR'}"})
+	}
+	return tables
 }
 
 func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
@@ -2017,7 +2089,7 @@ func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
 		return fmt.Errorf("close SQLite cache snapshot after CSV export: %w", err)
 	}
 
-	// Create sqlite_db schema with views pointing to CSV files.
+	// Create sqlite_db schema over the pinned CSV snapshot.
 	// This lets the existing COPY queries reference sqlite_db.tablename unchanged.
 	if _, err := s.duckDB.Exec("CREATE SCHEMA sqlite_db"); err != nil {
 		return fmt.Errorf("create sqlite_db schema: %w", err)
@@ -2031,9 +2103,16 @@ func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
 		if t.typeOverrides != "" {
 			csvOpts += ", " + t.typeOverrides
 		}
+		kind := "VIEW"
+		if t.name == "sources" || t.name == tableLabels {
+			// Source/label rosters are reused by many provider-state and owner
+			// predicates. Scan these small lookup tables once: each aliased
+			// CSV reader otherwise reserves a buffer, even for a one-row vault.
+			kind = "TABLE"
+		}
 		viewSQL := fmt.Sprintf(
-			`CREATE VIEW sqlite_db."%s" AS SELECT * FROM read_csv_auto('%s', %s)`,
-			t.name, escaped, csvOpts,
+			`CREATE %s sqlite_db."%s" AS SELECT * FROM read_csv_auto('%s', %s)`,
+			kind, t.name, escaped, csvOpts,
 		)
 		if _, err := s.duckDB.Exec(viewSQL); err != nil {
 			return query.HintRepairEncoding(
