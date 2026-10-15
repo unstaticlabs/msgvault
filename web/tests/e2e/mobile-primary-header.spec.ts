@@ -52,3 +52,55 @@ test('Desktop header retains one row and direct navigation', async ({ page }) =>
   expect(headerBox!.height).toBeLessThan(64);
   expect(densityBox!.y + densityBox!.height).toBeLessThanOrEqual(headerBox!.y + headerBox!.height);
 });
+
+for (const width of [320, 390]) {
+  test(`Related email filters and full account identities stay reachable at ${width}px`, async ({ page }) => {
+    const fixture = await installMixedArchive(page);
+    const email = fixture.logicalRows.find((row) => row.kind === 'email')!;
+    const account = 'qa-field-team-with-a-deliberately-long-account-name@example.test';
+    const identity = 'long.synthetic.recipient.identity@disposable-mailbox.example.test';
+    await page.route('**/api/v1/explore', (route) => route.fulfill({ json: {
+      ...fixture.firstPage,
+      rows: [{ ...email, source_identifier: account, matched_recipient_identities: [identity],
+        email_work: { state: 'actionable', source_ids: [email.source_id], uid: 'synthetic-work',
+          evidence_count: 1, outstanding_count: 1, reasons: [] } }],
+      total_count: 1, next_cursor: undefined
+    } }));
+    await page.setViewportSize({ width, height: 844 });
+    const filters = [
+      { dimension: 'inbox_state', values: ['inbox'] },
+      { dimension: 'read_state', values: ['unread'] },
+      { dimension: 'row_unit', values: ['email_work_item'] }
+    ];
+    await page.goto('/?explore=' + encodeURIComponent(JSON.stringify({ workspace: 'everything', filters })));
+    const chips = page.locator('.context-chips .chip');
+    await expect(chips).toHaveCount(3);
+    for (const chip of await chips.all()) {
+      const bounds = await chip.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+      const buttonBounds = await chip.getByRole('button').boundingBox();
+      expect(buttonBounds!.x + buttonBounds!.width).toBeLessThanOrEqual(width);
+    }
+    const row = page.locator('[data-row-key]').first();
+    await expect(row.locator('.work-account')).toHaveText(account);
+    await expect(row.getByTestId('identity-badge')).toHaveText(`Via: ${identity}`);
+    for (const label of [row.locator('.work-account'), row.getByTestId('identity-badge')]) {
+      const geometry = await label.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const rowRect = element.closest('[data-row-key]')!.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, rowTop: rowRect.top, rowBottom: rowRect.bottom,
+          scrollWidth: element.scrollWidth, clientWidth: element.clientWidth };
+      });
+      expect(geometry.left).toBeGreaterThanOrEqual(0);
+      expect(geometry.right).toBeLessThanOrEqual(width);
+      expect(geometry.top).toBeGreaterThanOrEqual(geometry.rowTop);
+      expect(geometry.bottom).toBeLessThanOrEqual(geometry.rowBottom);
+      expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth);
+    }
+    await chips.filter({ hasText: 'Related email' }).getByRole('button').click();
+    await expect(chips).toHaveCount(2);
+    await expect(page.getByRole('checkbox', { name: 'Group related email' })).not.toBeChecked();
+  });
+}

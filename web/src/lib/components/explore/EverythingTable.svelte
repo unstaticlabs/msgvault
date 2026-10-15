@@ -74,7 +74,9 @@
   const geometry = new RowGeometry();
   let narrow = $state(false);
   const workRows = $derived(rows.some((row) => row.email_work !== undefined));
-  const rowHeight = $derived(geometry.height === undefined ? undefined : narrow && workRows ? Math.max(72, geometry.height) : geometry.height);
+  // Mobile work rows show the full account and identity on separate wrapped lines.
+  // Keep the virtualizer stride and rendered row height in agreement.
+  const rowHeight = $derived(geometry.height === undefined ? undefined : narrow && workRows ? Math.max(112, geometry.height) : geometry.height);
   onMount(() => {
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia('(max-width: 640px)');
@@ -906,7 +908,9 @@
     .everything-table--work .table-header { display: none; }
     .everything-table--work .data-row { grid-template-columns: minmax(0, 1fr) !important; align-content: center; }
     .everything-table--work .cell--title { order: 1; padding: 0 var(--space-3); overflow: visible; }
-    .everything-table--work .cell--people { order: 2; padding: 0 var(--space-3); line-height: 1.3; }
+    .everything-table--work .cell--people { order: 2; display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-1); padding: 0 var(--space-3); line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
+    .everything-table--work .work-account { min-width: 0; max-width: 100%; }
+    .everything-table--work .cell--people :global(.identity-badge) { min-width: 0; white-space: normal; overflow-wrap: anywhere; overflow: visible; }
     .everything-table--work .cell--kind, .everything-table--work .cell--excerpt, .everything-table--work .cell--time, .everything-table--work .cell--attachments, .everything-table--work .cell--size { display: none; }
     .everything-table--work .mailbox-state { flex: auto; }
   }

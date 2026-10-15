@@ -144,14 +144,14 @@
     <div class="context-chips">
       {#if query}
         <span class="chip">
-          {searchModeLabel(searchMode)}: “{query}”
+          <span class="chip-label">{searchModeLabel(searchMode)}: “{query}”</span>
           <IconButton size="sm" ariaLabel="Remove search" onclick={() => onRemoveQuery?.()}
           ><XIcon size="12" aria-hidden="true" /></IconButton>
         </span>
       {/if}
       {#each filters as filter, index (`${filter.dimension}:${filter.values.join('\u0000')}`)}
         <span class="chip chip--filter">
-          {#if ['inbox_state', 'read_state', 'row_unit', 'handling_state'].includes(filter.dimension)}{filterCaption(filter)}{:else}{filterDimensionLabel(filter.dimension)}: {filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}{/if}
+          <span class="chip-label">{#if ['inbox_state', 'read_state', 'row_unit', 'handling_state'].includes(filter.dimension)}{filterCaption(filter)}{:else}{filterDimensionLabel(filter.dimension)}: {filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}{/if}</span>
           <IconButton
             size="sm"
             ariaLabel={`Remove ${filterDimensionLabel(filter.dimension)} filter`}
@@ -161,14 +161,14 @@
       {/each}
       {#each extraChips as chip (chip.key)}
         <span class="chip chip--filter">
-          {chip.label}
+          <span class="chip-label">{chip.label}</span>
           <IconButton size="sm" ariaLabel={chip.removeLabel} onclick={chip.onRemove}
           ><XIcon size="12" aria-hidden="true" /></IconButton>
         </span>
       {/each}
       {#each groupingChain as dimension, index (`${dimension}:${index}`)}
         <span class="chip chip--group">
-          {groupedByLabel([dimension])}
+          <span class="chip-label">{groupedByLabel([dimension])}</span>
           <IconButton
             size="sm"
             ariaLabel={`Remove ${filterDimensionLabel(dimension)} grouping`}
@@ -244,6 +244,15 @@
     overflow-wrap: anywhere;
   }
 
+  .chip-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .chip :global(button) {
+    flex-shrink: 0;
+  }
+
   .chip--filter {
     border: 1px solid color-mix(in srgb, var(--accent-amber) 35%, var(--border-muted));
     background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-surface));
@@ -295,11 +304,5 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-  }
-  @media (max-width: 640px) {
-    .context-bar { flex-wrap: wrap; }
-    .context-controls { flex: 1 1 100%; flex-wrap: wrap; }
-    .context-chips { flex: 1 1 calc(100% - 80px); flex-wrap: wrap; overflow: visible; }
-    .context-count { margin-left: auto; }
   }
 </style>
