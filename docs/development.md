@@ -217,8 +217,9 @@ CI's explicit `test-unsharded` and package-shard jobs keep their existing layout
 Windows CI also runs the store package through `scripts/test-package-shards.ps1`.
 The runner starts from four shards and adds more when needed to keep test-name
 patterns within the Windows command-line limit. The complete store suite can
-exceed its one-hour package budget on a hosted runner; sharding keeps every test
-and the existing timeout while sharing the work across processes.
+exceed its one-hour package budget on a hosted runner. Sharding keeps every test
+and gives each shard a 60-minute timeout; it increases the aggregate allowance
+while sharing the work across processes.
 
 ## Lint & Format
 
