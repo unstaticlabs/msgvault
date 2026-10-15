@@ -1,0 +1,7 @@
+Captured 15 October 2026 at 12:11 Europe/Paris (10:11 UTC).
+Native build from qualified source 42b4a9caa8e415cf7ffb1aa87c1e48cde101b0a9; application tree equals merged main f14e1446104783ff43fb5ec8fc2cf2d66d15a849.
+Ten invented messages, reserved example.test identities, synthetic Member. No configured provider accounts; telemetry disabled; loopback-only disposable fixture.
+After explicit user approval, the lead used the actual browser UI to select the exact outstanding copy, review the fixed target, confirm handled, then Undo. Observed outstanding count 1 -> 0 -> 1, four archived copies throughout, preserved reply evidence. The UI confirmed both save and Undo.
+These images capture the resulting states. The executed journey supplies functional evidence; still images alone do not prove behavior.
+Lead personally inspected both images and parsed JPEG metadata before publication. Only the standard 14-byte JFIF APP0 segment is present; no EXIF, XMP, comments, credentials, private content, real contacts, browser address bars or local paths.
+The QA server was stopped and localhost port verified closed after the journey. No application source changes.
