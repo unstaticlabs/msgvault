@@ -2602,7 +2602,9 @@ func TestBuildCacheInvalidIdentifiersDoNotMatchValidKeys(t *testing.T) {
 			var buildErr error
 			stderr := captureStderrDuring(t, func() { _, buildErr = buildCache(dbPath, analyticsDir, true) })
 			require.NoError(buildErr)
-			assert.Contains(stderr, "8 identity value(s) exported as unknown")
+			// The related-email delivery projection also exports the damaged
+			// provider conversation key for each of its three message copies.
+			assert.Contains(stderr, "11 identity value(s) exported as unknown")
 			assert.NotContains(stderr, "repair(s) applied")
 
 			engine, err := query.NewDuckDBEngine(analyticsDir, "", nil)
@@ -2688,7 +2690,8 @@ func TestBuildCacheCountsOnlyRepairedExportValues(t *testing.T) {
 			require.NoError(buildErr)
 			assert.Contains(stderr, "Warning: 3 invalid UTF-8 repair(s) applied while building the analytics cache",
 				"count each exported display value, including the two joined person-name rows")
-			assert.Contains(stderr, "3 identity value(s) exported as unknown")
+			// Account identity addresses also appear in the email-work dataset.
+			assert.Contains(stderr, "4 identity value(s) exported as unknown")
 
 			duckDB, err := sql.Open("duckdb", "")
 			require.NoError(err)
