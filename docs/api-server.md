@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-12"
+last_edited: "2026-10-14"
 title: Web UI & API Server
 description: Daemon-served analytical Web UI and REST API for your msgvault archive, with optional background sync scheduling.
 ---
@@ -184,6 +184,11 @@ This schema also adds consented identity scoring. See
 Schema 3.14.0 adds `paused` source syncs to operation history and its state filter.
 
 Schema 3.15.0 adds [native email tags](#native-email-tags).
+
+Schema 3.18.0 adds optional `related_message_id` to message detail,
+conversation windows, and `show-message --json`. It links a
+[Chatwoot](guides/chatwoot.md) call and its meeting. Other messages and
+unavailable counterparts omit it.
 
 Schema 3.13.0 adds the `docbank_rendition` evidence kind, which
 [cites a Docbank transcript](usage/kata-issues.md#cite-a-docbank-transcript).
@@ -1948,7 +1953,7 @@ to `mode=fts` instead.
 | `explain` | 0/1 | `0` | When `1` and `mode=vector|hybrid`, include per-signal scores |
 
 `message_type` uses the same values as local search: `email`,
-`calendar_event`, `meeting_transcript`, `beeper`, `teams`, `discord`, `sms`,
+`calendar_event`, `meeting_transcript`, `beeper`, `chatwoot`, `teams`, `discord`, `sms`,
 `mms`, `whatsapp`, `imessage`, `fbmessenger`, `synctech_sms_call`,
 `google_voice_text`, `google_voice_call`, and `google_voice_voicemail`. The
 query string can also carry `message_type:` / `message_type=` operators inside

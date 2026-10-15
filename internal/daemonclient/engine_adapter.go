@@ -815,6 +815,7 @@ func queryDetailFromAPIMessage(msg *store.APIMessage) *query.MessageDetail {
 	}
 	detail := &query.MessageDetail{
 		CalendarState:        msg.CalendarState,
+		RelatedMessageID:     msg.RelatedMessageID,
 		ID:                   msg.ID,
 		InboxState:           providerStateFromString(msg.InboxState),
 		ReadState:            providerStateFromString(msg.ReadState),

@@ -418,6 +418,7 @@ func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query
 	}
 	return &query.MessageDetail{
 		CalendarState:        calendarStateFromGenerated(resp.CalendarState),
+		RelatedMessageID:     resp.RelatedMessageID,
 		ID:                   resp.ID,
 		SourceID:             int64Value(resp.SourceID),
 		InboxState:           providerStateFromEnum(resp.InboxState),

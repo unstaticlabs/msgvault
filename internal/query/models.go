@@ -70,6 +70,7 @@ type DeletionTarget struct {
 
 // MessageDetail represents a full message with body and attachments.
 type MessageDetail struct {
+	RelatedMessageID  *int64                    `json:"related_message_id,omitempty"`
 	CalendarState     *store.CalendarEventState `json:"calendar_state,omitempty"`
 	InboxState        string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
 	ReadState         string                    `json:"read_state,omitempty" enum:"read,unread,unknown"`

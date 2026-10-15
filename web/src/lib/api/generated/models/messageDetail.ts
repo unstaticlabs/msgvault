@@ -29,6 +29,7 @@ export interface MessageDetail {
   labels: string[];
   message_type?: string;
   read_state?: MessageDetailReadState;
+  related_message_id?: number;
   sent_at: string;
   size_bytes: number;
   snippet: string;

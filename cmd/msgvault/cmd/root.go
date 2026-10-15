@@ -37,7 +37,7 @@ Start here:
   msgvault search 'from:alice@example.com newer_than:30d' --json
   # Use the returned "id" below
   msgvault show-message <id> --json  # body_text, attachments
-  msgvault export-eml <id> -o msg.eml  # export-attachments <id> -o DIR
+  msgvault export-eml <id> -o msg.eml
   msgvault export-messages --start 2026-09-01T00:00:00Z --end 2026-10-01T00:00:00Z
   msgvault list-senders -n 20 --json  # list-domains, list-labels
   msgvault stats

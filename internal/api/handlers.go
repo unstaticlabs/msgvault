@@ -332,6 +332,7 @@ type MessageSummary struct {
 type MessageDetail struct {
 	MessageSummary
 
+	RelatedMessageID  *int64                    `json:"related_message_id,omitempty"`
 	CalendarState     *store.CalendarEventState `json:"calendar_state,omitempty"`
 	ConversationTitle string                    `json:"conversation_title,omitempty" doc:"Conversation title, when available."`
 
@@ -561,6 +562,7 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 
 	return MessageDetail{
 		CalendarState:     qMsg.CalendarState,
+		RelatedMessageID:  qMsg.RelatedMessageID,
 		ConversationTitle: qMsg.ConversationTitle,
 
 		ID:              qMsg.ID,
@@ -816,6 +818,7 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	detail := MessageDetail{
 		CalendarState:     msg.CalendarState,
+		RelatedMessageID:  msg.RelatedMessageID,
 		MessageSummary:    toMessageSummary(*msg),
 		ConversationTitle: msg.ConversationTitle,
 		Body:              msg.Body,
