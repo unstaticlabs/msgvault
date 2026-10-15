@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,7 +12,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/mattn/go-sqlite3"
 	"go.kenn.io/msgvault/internal/sqliteutil"
 )
 
@@ -88,6 +87,11 @@ func (d *SQLiteDialect) TimestampParam(t time.Time) any {
 // keeps coming back — not by shortening the interval, which buys nothing but
 // lock contention.
 const sqliteQuiescentProbeTimeout = 250 * time.Millisecond
+
+// sqliteCheckpointBusyTimeout caps one scheduled WAL checkpoint attempt. The
+// busy handler cannot always be interrupted promptly by sqlite3_interrupt, so
+// the attempt must not inherit the connection's normal 30-second timeout.
+const sqliteCheckpointBusyTimeout = time.Second
 
 // ReadWatermarkBounds implements Dialect.
 //
@@ -402,6 +406,24 @@ func (d *SQLiteDialect) FTSUpsert(q querier, doc FTSDoc) error {
 	return err
 }
 
+// FTSMatches compares the stored FTS5 columns with doc.
+func (d *SQLiteDialect) FTSMatches(q querier, doc FTSDoc) (bool, error) {
+	var subject, body, fromAddr, toAddrs, ccAddrs sql.NullString
+	err := q.QueryRow(
+		`SELECT subject, body, from_addr, to_addr, cc_addr FROM messages_fts WHERE rowid = ?`,
+		doc.MessageID,
+	).Scan(&subject, &body, &fromAddr, &toAddrs, &ccAddrs)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return subject.String == doc.Subject && body.String == doc.Body &&
+		fromAddr.String == doc.FromAddr && toAddrs.String == doc.ToAddrs &&
+		ccAddrs.String == doc.CcAddrs, nil
+}
+
 // FTSSearchClause returns SQL fragments for FTS5 full-text search.
 //
 // The bm25 weights approximate PostgreSQL's setweight field-priority
@@ -484,34 +506,35 @@ func (d *SQLiteDialect) FTSAvailable(ctx context.Context, db *sql.DB) (bool, err
 	return err == nil || errors.Is(err, sql.ErrNoRows), nil
 }
 
-// FTSNeedsBackfill reports whether the FTS5 table needs population.
-// Probes for the existence of ANY message lacking an FTS entry, matching the
-// PostgreSQL EXISTS(search_fts IS NULL) semantics. The previous MAX(rowid)
-// vs MAX(id) heuristic missed a hole left at a LOW id while later ids were
-// indexed — reachable because UpsertFTS failures during sync are
-// warn-and-continue (sync.go) while the message row still commits, so id N can
-// be unindexed while N+1.. are indexed. messages_fts.rowid == messages.id and
-// there are no triggers, so the NOT EXISTS join is rowid-served and cheap on
-// FTS5 (no full body scan).
+const sqliteFTSNeedsBackfillDocsizeSQL = `SELECT EXISTS (SELECT 1 FROM messages m WHERE NOT EXISTS (SELECT 1 FROM messages_fts_docsize d WHERE d.id = m.id))`
+const sqliteFTSNeedsBackfillVirtualSQL = `SELECT EXISTS (SELECT 1 FROM messages m WHERE NOT EXISTS (SELECT 1 FROM messages_fts f WHERE f.rowid = m.id))`
+
+// FTSNeedsBackfill reports whether any message lacks an FTS5 entry. Probe
+// indexed row IDs through the docsize shadow table's integer primary key to
+// avoid reading stored FTS content. columnsize=0 indices have no docsize table
+// and fall back to the virtual table. Checking every message catches interior
+// holes left when indexing fails during sync but later messages are indexed.
 func (d *SQLiteDialect) FTSNeedsBackfill(db *sql.DB) bool {
+	needs, _ := d.FTSNeedsBackfillContext(context.Background(), db)
+	return needs
+}
+func (d *SQLiteDialect) FTSNeedsBackfillContext(ctx context.Context, db *sql.DB) (bool, error) {
 	var exists bool
-	if err := db.QueryRowContext(context.Background(),
-		`SELECT EXISTS (
-			SELECT 1 FROM messages m
-			 WHERE NOT EXISTS (
-			     SELECT 1 FROM messages_fts f WHERE f.rowid = m.id
-			 )
-		)`,
-	).Scan(&exists); err != nil {
-		return false
+	err := ReadDBContext(ctx, db).QueryRowContext(ctx, sqliteFTSNeedsBackfillDocsizeSQL).Scan(&exists)
+	if d.IsNoSuchTableError(err) {
+		err = ReadDBContext(ctx, db).QueryRowContext(ctx, sqliteFTSNeedsBackfillVirtualSQL).Scan(&exists)
 	}
-	return exists
+	if err != nil {
+		return false, fmt.Errorf("probe FTS completeness: %w", err)
+	}
+	return exists, nil
 }
 
-// FTSNeedsBackfillQuick compares MAX(id) against MAX(rowid) — two B-tree
-// lookups, instant at any archive size. It catches the dominant staleness
-// (tail of the messages table not yet indexed: fresh import, interrupted
-// backfill) but misses interior holes; FTSNeedsBackfill stays authoritative.
+// FTSNeedsBackfillQuick compares maximum message and indexed row IDs. The
+// docsize shadow table avoids stored-content reads; columnsize=0 indices fall
+// back to the virtual table. This catches unindexed tails after imports or
+// interrupted backfills but misses interior holes; FTSNeedsBackfill remains
+// authoritative.
 func (d *SQLiteDialect) FTSNeedsBackfillQuick(ctx context.Context, db *sql.DB) bool {
 	var msgMax int64
 	if err := db.QueryRowContext(ctx,
@@ -520,12 +543,15 @@ func (d *SQLiteDialect) FTSNeedsBackfillQuick(ctx context.Context, db *sql.DB) b
 		return false
 	}
 	var ftsMax int64
-	if err := db.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(rowid), 0) FROM messages_fts",
-	).Scan(&ftsMax); err != nil {
-		return false
+	err := db.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(id), 0) FROM messages_fts_docsize",
+	).Scan(&ftsMax)
+	if d.IsNoSuchTableError(err) {
+		err = db.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(rowid), 0) FROM messages_fts",
+		).Scan(&ftsMax)
 	}
-	return ftsMax < msgMax
+	return err == nil && ftsMax < msgMax
 }
 
 // FTSClearSQL returns the SQL to clear all FTS5 data.
@@ -1922,6 +1948,12 @@ func (d *SQLiteDialect) contentChangedAtDefaultStamps(q querier) (bool, error) {
 // silences these when the column already exists (idempotent migrations).
 func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 	return []ColumnMigration{
+		{`ALTER TABLE carddav_resources ADD COLUMN owns_display_name BOOLEAN NOT NULL DEFAULT FALSE`, "carddav_resources.owns_display_name"},
+		{`ALTER TABLE person_match_judgment_cursor ADD COLUMN started_at_zero BOOLEAN NOT NULL DEFAULT FALSE`, "person_match_judgment_cursor.started_at_zero"},
+		{`ALTER TABLE carddav_publications ADD COLUMN outgoing_envelope_metadata BLOB`, "carddav_publications.outgoing_envelope_metadata"},
+		{`ALTER TABLE carddav_publications ADD COLUMN approved_body_sha256 TEXT`, "carddav_publications.approved_body_sha256"},
+		{`ALTER TABLE carddav_publications ADD COLUMN approved_inference_revision INTEGER`, "carddav_publications.approved_inference_revision"},
+		{`ALTER TABLE carddav_publications ADD COLUMN approved_mutation_revision INTEGER`, "carddav_publications.approved_mutation_revision"},
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN backstop_upper_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.backstop_upper_key"},
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN backstop_after_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.backstop_after_key"},
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN optimistic_document_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.optimistic_document_key"},
@@ -1929,6 +1961,13 @@ func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN backstop_document_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.backstop_document_key"},
 		{`ALTER TABLE carddav_address_books ADD COLUMN needs_full_reconcile BOOLEAN NOT NULL DEFAULT FALSE`, "carddav_address_books.needs_full_reconcile"},
 		{`ALTER TABLE carddav_address_books ADD COLUMN sync_token TEXT NOT NULL DEFAULT ''`, "carddav_address_books.sync_token"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN review_revision INTEGER NOT NULL DEFAULT 1`, "carddav_conflicts.review_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN local_inference_revision INTEGER`, "carddav_conflicts.local_inference_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN approved_local_body_sha256 TEXT`, "carddav_conflicts.approved_local_body_sha256"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN approved_local_inference_revision INTEGER`, "carddav_conflicts.approved_local_inference_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN approved_conflict_revision INTEGER`, "carddav_conflicts.approved_conflict_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN local_envelope_metadata BLOB`, "carddav_conflicts.local_envelope_metadata"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN local_mutation_intent BLOB`, "carddav_conflicts.local_mutation_intent"},
 		{`ALTER TABLE carddav_conflicts ADD COLUMN pending_operation TEXT CHECK (pending_operation IN ('delete'))`, "carddav_conflicts.pending_operation"},
 		{`ALTER TABLE carddav_conflicts ADD COLUMN connection_generation INTEGER`, "carddav_conflicts.connection_generation"},
 		{`ALTER TABLE carddav_conflicts ADD COLUMN book_sync_revision INTEGER`, "carddav_conflicts.book_sync_revision"},
@@ -1941,6 +1980,9 @@ func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE imap_folder_state ADD COLUMN highest_modseq TEXT NOT NULL DEFAULT '0'`, "imap_folder_state.highest_modseq"},
 		{`ALTER TABLE messages ADD COLUMN rfc822_message_id TEXT`, "rfc822_message_id"},
 		{`ALTER TABLE messages ADD COLUMN list_id TEXT`, "list_id"},
+		{`ALTER TABLE messages ADD COLUMN account_address TEXT`, "account_address"},
+		{`ALTER TABLE messages ADD COLUMN account_path TEXT`, "account_path"},
+		{`ALTER TABLE messages ADD COLUMN draft_authored BOOLEAN NOT NULL DEFAULT FALSE`, "draft_authored"},
 		{`ALTER TABLE sources ADD COLUMN oauth_app TEXT`, "oauth_app"},
 		{`ALTER TABLE participants ADD COLUMN phone_number TEXT`, "phone_number"},
 		{`ALTER TABLE participants ADD COLUMN canonical_id TEXT`, "canonical_id"},
@@ -2000,6 +2042,9 @@ func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE attachments ADD COLUMN role_source TEXT NOT NULL DEFAULT 'unknown' CHECK (role_source IN ('mime_disposition', 'provider_explicit', 'importer_semantics', 'legacy_api', 'raw_mime_repair', 'unknown'))`, "attachments.role_source"},
 		{`ALTER TABLE attachments ADD COLUMN source_part_key TEXT CHECK (source_part_key IS NULL OR source_part_key != '')`, "attachments.source_part_key"},
 		{`ALTER TABLE attachments ADD COLUMN content_id TEXT`, "attachments.content_id"},
+		{`ALTER TABLE document_extraction_profiles ADD COLUMN include_inline BOOLEAN NOT NULL DEFAULT FALSE`, "document_extraction_profiles.include_inline"},
+		{`ALTER TABLE document_extractions ADD COLUMN failure_reason TEXT`, "document_extractions.failure_reason"},
+		{`ALTER TABLE document_extractions ADD COLUMN failure_detail TEXT`, "document_extractions.failure_detail"},
 		{`ALTER TABLE document_extractions ADD COLUMN rebuild_id TEXT REFERENCES document_extraction_rebuilds(id) ON DELETE SET NULL`, "document_extractions.rebuild_id"},
 		{`ALTER TABLE document_extractions ADD COLUMN request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0)`, "document_extractions.request_count"},
 		{`ALTER TABLE document_extractions ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0 AND retry_count <= request_count)`, "document_extractions.retry_count"},
@@ -2008,6 +2053,7 @@ func (d *SQLiteDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE document_extractions ADD COLUMN document_family TEXT`, "document_extractions.document_family"},
 		{`ALTER TABLE document_extractions ADD COLUMN unit_kind TEXT`, "document_extractions.unit_kind"},
 		{`ALTER TABLE document_extractions ADD COLUMN normalized_truncated BOOLEAN NOT NULL DEFAULT FALSE`, "document_extractions.normalized_truncated"},
+		{`ALTER TABLE document_extractions ADD COLUMN source_media_type TEXT`, "document_extractions.source_media_type"},
 		{`ALTER TABLE document_units ADD COLUMN heading_marks JSON NOT NULL DEFAULT '[]'`, "document_units.heading_marks"},
 		{`ALTER TABLE document_index_state ADD COLUMN target_profile_id TEXT`, "document_index_state.target_profile_id"},
 		{`ALTER TABLE attachments ADD COLUMN attachment_state TEXT`, "attachments.attachment_state"},
@@ -2075,10 +2121,75 @@ func (d *SQLiteDialect) SchemaFiles() []string {
 	return []string{"schema.sql"}
 }
 
+// CheckpointWALPassive checkpoints in PASSIVE mode, which never waits on
+// readers or writers. ctx also bounds waiting for a pooled connection, and
+// frames it could not copy are reported as an error.
+func (d *SQLiteDialect) CheckpointWALPassive(ctx context.Context, db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(ctx, sqliteCheckpointBusyTimeout)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire SQLite connection for passive WAL checkpoint: %w", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			slog.Warn("SQLite passive WAL checkpoint could not release connection", "error", err)
+		}
+	}()
+	var busy, log, checkpointed int
+	err = conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").Scan(&busy, &log, &checkpointed)
+	if err != nil {
+		return fmt.Errorf("run SQLite passive WAL checkpoint: %w", err)
+	}
+	if log >= 0 && checkpointed < log {
+		return fmt.Errorf("WAL checkpoint incomplete (log=%d, checkpointed=%d)", log, checkpointed)
+	}
+	return nil
+}
+
 // CheckpointWAL forces a WAL checkpoint using TRUNCATE mode.
 func (d *SQLiteDialect) CheckpointWAL(db *sql.DB) error {
+	return d.CheckpointWALContext(context.Background(), db)
+}
+
+// CheckpointWALContext forces a WAL checkpoint using TRUNCATE mode and honors
+// ctx while waiting for SQLite's busy handler and while stepping the PRAGMA.
+func (d *SQLiteDialect) CheckpointWALContext(ctx context.Context, db *sql.DB) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire SQLite connection for WAL checkpoint: %w", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			slog.Warn("SQLite WAL checkpoint could not release connection", "error", err)
+		}
+	}()
+	var configuredBusyTimeout int64
+	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&configuredBusyTimeout); err != nil {
+		return fmt.Errorf("read SQLite busy timeout for WAL checkpoint: %w", err)
+	}
+	busyTimeout := min(configuredBusyTimeout, sqliteCheckpointBusyTimeout.Milliseconds())
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline).Milliseconds()
+		busyTimeout = min(busyTimeout, max(remaining, int64(0)))
+	}
+	// Restore this pooled connection even if the checkpoint or its context
+	// fails, or a later unrelated query would inherit the shortened timeout.
+	defer func() {
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx),
+			fmt.Sprintf("PRAGMA busy_timeout = %d", configuredBusyTimeout)); err != nil {
+			slog.Warn("SQLite WAL checkpoint could not restore connection busy timeout",
+				"configured_ms", configuredBusyTimeout, "error", err)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout)); err != nil {
+		return fmt.Errorf("bound SQLite busy timeout for WAL checkpoint: %w", err)
+	}
 	var busy, log, checkpointed int
-	err := db.QueryRowContext(context.Background(), "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &log, &checkpointed)
+	err = conn.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &log, &checkpointed)
 	if err != nil {
 		return err
 	}
@@ -2147,24 +2258,6 @@ func (d *SQLiteDialect) RowWriterLockSQL(table, column string) string {
 // so Store.runMaintenance issues no reset statement and SQLite's
 // transactional behavior is unchanged.
 func (d *SQLiteDialect) MaintenanceTimeoutResetSQL() string { return "" }
-
-// IsBusyError returns true for SQLITE_BUSY and SQLITE_LOCKED. Matching on
-// the result code is more robust than substring matching: BUSY surfaces as
-// "database is locked" but LOCKED surfaces as "database table is locked",
-// so a single substring cannot catch both.
-func (d *SQLiteDialect) IsBusyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if serr, ok := errors.AsType[sqlite3.Error](err); ok {
-		return serr.Code == sqlite3.ErrBusy || serr.Code == sqlite3.ErrLocked
-	}
-	var serrPtr *sqlite3.Error
-	if errors.As(err, &serrPtr) && serrPtr != nil {
-		return serrPtr.Code == sqlite3.ErrBusy || serrPtr.Code == sqlite3.ErrLocked
-	}
-	return false
-}
 
 // IsSerializationFailureError always returns false for SQLite. Only one write
 // transaction runs at a time, so a locked row can never have been changed and

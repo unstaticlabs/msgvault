@@ -137,6 +137,13 @@ func (s *Store) SetAttributeSeedReadHookForTest(fn func(slug string)) func() {
 	return func() { s.attributeSeedReadHook = nil }
 }
 
+// SetOrganizationProfileRootReadHookForTest installs a hook between the profile
+// root read and its child reads. Returns a restore func that clears the hook.
+func (s *Store) SetOrganizationProfileRootReadHookForTest(fn func()) func() {
+	s.organizationProfileRootReadHook = fn
+	return func() { s.organizationProfileRootReadHook = nil }
+}
+
 // SetAttachmentRoleRepairPreparedHookForTest installs a hook after historical
 // MIME evidence has been prepared but before the repair transaction begins.
 // Tests use it to reproduce a concurrent resync that changes attachment bytes.
@@ -218,6 +225,11 @@ func (s *Store) SetIdentityMatchAcceptBeforeDecisionHookForTest(fn func()) func(
 	return func() { s.identityMatchAcceptBeforeDecisionHook = nil }
 }
 
+func (s *Store) SetIdentityMatchReviewAfterDecisionHookForTest(fn func()) func() {
+	s.identityMatchReviewAfterDecisionHook = fn
+	return func() { s.identityMatchReviewAfterDecisionHook = nil }
+}
+
 // SetPersonOperationBeforeIdentityLockHookForTest installs a per-Store barrier
 // immediately before merge and split transactions acquire the identity lock.
 // Concurrency tests use it to prove every competing transaction is open and at
@@ -225,6 +237,13 @@ func (s *Store) SetIdentityMatchAcceptBeforeDecisionHookForTest(fn func()) func(
 func (s *Store) SetPersonOperationBeforeIdentityLockHookForTest(fn func()) func() {
 	s.personOperationBeforeIdentityLockHook = fn
 	return func() { s.personOperationBeforeIdentityLockHook = nil }
+}
+
+// SetPersonMatchBlockingBeforeLockHookForTest runs fn after scoring candidate
+// discovery has chosen its pairs and before each pair takes the identity lock.
+func (s *Store) SetPersonMatchBlockingBeforeLockHookForTest(fn func()) func() {
+	s.personMatchBlockingBeforeLockHook = fn
+	return func() { s.personMatchBlockingBeforeLockHook = nil }
 }
 
 // SetPersonMergeAfterSnapshotHookForTest installs a barrier after a merge has
@@ -323,3 +342,21 @@ func (s *Store) SetPersonNetworkSourceReadHookForTest(fn func(limit, count int))
 	s.personNetworkSourceReadHook = fn
 	return func() { s.personNetworkSourceReadHook = nil }
 }
+
+func (s *Store) SetCardDAVPublicationReviewBeforePersonLockHookForTest(fn func()) {
+	s.cardDAVReviewPersonLockHook = fn
+}
+
+// RefreshSourceMessageAttributionForTest is the full-refresh oracle for targeted attribution.
+func RefreshSourceMessageAttributionForTest(s *Store, sourceID int64) error {
+	return s.withTxContext(context.Background(), func(tx *loggedTx) error {
+		return refreshSourceMessageAttributionContext(context.Background(), tx, sourceID)
+	})
+}
+
+// Owner-address SQL builders, exported for their isolation test.
+var (
+	OwnerEmailMatch      = ownerEmailMatch
+	OwnerIdentifierMatch = ownerIdentifierMatch
+	SenderOwnerFallback  = senderOwnerFallback
+)

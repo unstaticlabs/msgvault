@@ -37,7 +37,7 @@ func ClassifyActivityCandidate(
 
 	owningSenderIndex := -1
 	for index, counterpart := range counterparts {
-		if counterpart.RecipientType == "from" && counterpart.IsOwner {
+		if counterpart.RecipientType == messageSenderRole && counterpart.IsOwner {
 			owningSenderIndex = index
 			break
 		}
@@ -104,7 +104,7 @@ func ClassifyActivityCandidate(
 		if ownerLinked(counterpart) || counterpart.PersonID == nil {
 			continue
 		}
-		isSender := counterpart.RecipientType == "from"
+		isSender := counterpart.RecipientType == messageSenderRole
 		result.Persons = append(result.Persons, ActivityEventPerson{
 			PersonID: *counterpart.PersonID,
 			Role:     classifiedActivityRole(counterpart.RecipientType, isSender, meeting),

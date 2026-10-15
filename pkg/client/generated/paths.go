@@ -6,6 +6,15 @@ import (
 	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
 )
 
+type RevokeAgentTokenPath struct {
+	// ID Agent grant ID to revoke
+	ID string `json:"id" validate:"required"`
+}
+
+func (r RevokeAgentTokenPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
+}
+
 type GetAttachmentContentPath struct {
 	// Hash Attachment SHA-256 content hash
 	Hash string `json:"hash" validate:"required"`
@@ -42,6 +51,15 @@ type UploadTokenPath struct {
 
 func (u UploadTokenPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(u))
+}
+
+type GetCacheBuildStatusPath struct {
+	// JobID Analytics cache build job ID
+	JobID string `json:"job_id" validate:"required"`
+}
+
+func (g GetCacheBuildStatusPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(g))
 }
 
 type UpdateCardDAVBookRolesPath struct {
@@ -89,6 +107,22 @@ type PublishCardDAVPersonPath struct {
 }
 
 func (p PublishCardDAVPersonPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(p))
+}
+
+type ApproveCardDAVPublicationPath struct {
+	PersonID int64 `json:"person_id" validate:"gte=1"`
+}
+
+func (a ApproveCardDAVPublicationPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(a))
+}
+
+type PreviewCardDAVPublicationPath struct {
+	PersonID int64 `json:"person_id" validate:"gte=1"`
+}
+
+func (p PreviewCardDAVPublicationPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(p))
 }
 
@@ -249,12 +283,17 @@ type GetFileContentPath struct {
 	ID int64 `json:"id"`
 }
 
-type AcceptIdentityMatchCandidatePath struct {
+type GetIdentityMatchCandidatePath struct {
 	// ID Identity match candidate ID
 	ID int64 `json:"id"`
 }
 
-type RejectIdentityMatchCandidatePath struct {
+type ReviewAcceptIdentityMatchCandidatePath struct {
+	// ID Identity match candidate ID
+	ID int64 `json:"id"`
+}
+
+type ReviewRejectIdentityMatchCandidatePath struct {
 	// ID Identity match candidate ID
 	ID int64 `json:"id"`
 }
@@ -268,6 +307,24 @@ func (g GetImportJobPath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(g))
 }
 
+type GetKataIssueContextPath struct {
+	// Ref Kata issue ref, qualified ref or UID
+	Ref string `json:"ref" validate:"required"`
+}
+
+func (g GetKataIssueContextPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(g))
+}
+
+type LinkKataEvidencePath struct {
+	// Ref Kata issue ref, qualified ref or UID
+	Ref string `json:"ref" validate:"required"`
+}
+
+func (l LinkKataEvidencePath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(l))
+}
+
 type GetMessagePath struct {
 	// ID Message ID
 	ID int64 `json:"id"`
@@ -276,6 +333,21 @@ type GetMessagePath struct {
 type GetMessageInlinePartPath struct {
 	// ID Message ID
 	ID int64 `json:"id"`
+}
+
+type ListMessageRecordingsPath struct {
+	// ID Message ID
+	ID int64 `json:"id"`
+}
+
+type GetMessageTagsPath struct {
+	// ID Archived message ID
+	ID int `json:"id"`
+}
+
+type UpdateMessageTagsPath struct {
+	// ID Archived message ID
+	ID int `json:"id"`
 }
 
 type ListMessageTasksPath struct {
@@ -414,6 +486,45 @@ type PatchPersonPath struct {
 	ID int64 `json:"id"`
 }
 
+type ListPersonAgendaPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type CreatePersonAgendaItemPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type LinkPersonAgendaItemPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type UnlinkPersonAgendaItemPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+
+	// Ref Kata issue ref or canonical UID
+	Ref string `json:"ref" validate:"required"`
+}
+
+func (u UnlinkPersonAgendaItemPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(u))
+}
+
+type UpdatePersonAgendaItemPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+
+	// Ref Kata issue ref or canonical UID
+	Ref string `json:"ref" validate:"required"`
+}
+
+func (u UpdatePersonAgendaItemPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(u))
+}
+
 type ListPersonAttributesPath struct {
 	// ID Durable person ID
 	ID int64 `json:"id"`
@@ -441,6 +552,36 @@ type SetPersonAttributePath struct {
 
 func (s SetPersonAttributePath) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
+type GetPersonBriefPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type GetPersonBriefEnrollmentPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type SetPersonBriefEnrollmentPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type GeneratePersonBriefPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type RejectPersonBriefPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type ListPersonBriefVersionsPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
 }
 
 type GetPersonContactStatePath struct {
@@ -531,6 +672,16 @@ func (s SetPersonFactPinPath) Validate() error {
 }
 
 type SearchPersonFilesPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type SuggestPersonFilesPath struct {
+	// ID Durable person ID
+	ID int64 `json:"id"`
+}
+
+type ListPersonIdentitiesPath struct {
 	// ID Durable person ID
 	ID int64 `json:"id"`
 }
@@ -678,6 +829,99 @@ type GetSavedViewPath struct {
 type PatchSavedViewPath struct {
 	// ID Saved View ID
 	ID int64 `json:"id"`
+}
+
+type RunSavedViewPath struct {
+	// ID Saved View ID
+	ID int64 `json:"id"`
+}
+
+type CancelSettingsPeopleCodexLoginPath struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func (c CancelSettingsPeopleCodexLoginPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
+type GetSettingsPeopleCodexLoginPath struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func (g GetSettingsPeopleCodexLoginPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(g))
+}
+
+type GetSettingsPeopleCodexModelsPath struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func (g GetSettingsPeopleCodexModelsPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(g))
+}
+
+type PutSettingsPeopleCodexProfilePath struct {
+	ID string `json:"id" validate:"required"`
+}
+
+func (p PutSettingsPeopleCodexProfilePath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(p))
+}
+
+type DeleteSettingsPeopleInferenceProviderPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (d DeleteSettingsPeopleInferenceProviderPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(d))
+}
+
+type PutSettingsPeopleInferencePresetPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (p PutSettingsPeopleInferencePresetPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(p))
+}
+
+type CheckSettingsPeopleInferenceProviderPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (c CheckSettingsPeopleInferenceProviderPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
+type ConsentSettingsPeopleInferenceProviderPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (c ConsentSettingsPeopleInferenceProviderPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(c))
+}
+
+type DeleteSettingsPeopleInferenceKeyPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (d DeleteSettingsPeopleInferenceKeyPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(d))
+}
+
+type PutSettingsPeopleInferenceKeyPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (p PutSettingsPeopleInferenceKeyPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(p))
+}
+
+type RevokeSettingsPeopleInferenceProviderPath struct {
+	Name string `json:"name" validate:"required"`
+}
+
+func (r RevokeSettingsPeopleInferenceProviderPath) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(r))
 }
 
 type PutSettingsPersonEnrichmentProviderPath struct {

@@ -5,7 +5,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -439,9 +440,8 @@ func (s *Server) inboxArchiveEnabled() bool {
 // would otherwise be silently dropped, and this request names messages that are
 // about to be moved.
 func decodeInboxArchiveRequest(w http.ResponseWriter, r *http.Request, target any) bool {
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(target); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, target, json.RejectUnknownMembers(true)); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request",
 			fmt.Sprintf("invalid JSON request body: %v", err))
 		return false

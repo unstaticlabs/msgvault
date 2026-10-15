@@ -55,7 +55,7 @@ func (a *EmailWorkAttributor) Attribute(activity EmailWorkActivity, envelopes []
 	for _, envelope := range envelopes {
 		address := emailWorkAddress(envelope.Address)
 		switch envelope.Kind {
-		case "from":
+		case messageSenderRole:
 			fromCount++
 			sender = address
 			unavailable = unavailable || address == ""

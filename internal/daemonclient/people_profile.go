@@ -3,8 +3,10 @@ package daemonclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"go.kenn.io/msgvault/internal/peoplebrowser"
 	"go.kenn.io/msgvault/internal/store"
@@ -13,6 +15,11 @@ import (
 )
 
 var _ peoplebrowser.ProfileReader = (*PeopleBrowser)(nil)
+var _ peoplebrowser.ProfileUIDReader = (*PeopleBrowser)(nil)
+
+// PersonUIDLookupMinAPISchemaVersion is the first daemon schema that supports
+// resolving a person profile by current or CardDAV UID.
+const PersonUIDLookupMinAPISchemaVersion = "3.10.0"
 
 // maxProfileOrganizationLookups bounds the per-organization name resolution
 // a single profile read may perform beyond the primary-employment projection.
@@ -73,6 +80,17 @@ func (b *PeopleBrowser) GetPersonProfile(
 		return nil, err
 	}
 
+	profile.Brief, err = b.GetPersonBrief(ctx, personID)
+	switch {
+	case err == nil:
+	case absentAPIResource(err):
+		// A daemon without the brief store degrades like the other optional
+		// sub-resources; a missing version already came back as a nil brief.
+		profile.Brief = nil
+	default:
+		return nil, err
+	}
+
 	attributes, err := b.ListAttributes(ctx, personID)
 	switch {
 	case err == nil:
@@ -118,6 +136,37 @@ func (b *PeopleBrowser) GetPersonProfile(
 		return nil, err
 	}
 	return profile, nil
+}
+
+// GetPersonProfileByUID resolves either the profile's vCard UID or a UID on a
+// bound CardDAV resource, then assembles the same overview returned by the ID
+// lookup.
+func (b *PeopleBrowser) GetPersonProfileByUID(
+	ctx context.Context, uid string,
+) (*peoplebrowser.PersonProfile, error) {
+	uid = strings.TrimSpace(uid)
+	if uid == "" {
+		return nil, errors.New("vCard UID must not be empty")
+	}
+	supported, err := b.engine.store.SupportsAPISchemaVersion(ctx, PersonUIDLookupMinAPISchemaVersion)
+	if err != nil {
+		return nil, fmt.Errorf("check person UID lookup capability: %w", err)
+	}
+	if !supported {
+		return nil, fmt.Errorf("person UID lookup requires daemon API schema %s or newer; upgrade the daemon",
+			PersonUIDLookupMinAPISchemaVersion)
+	}
+	resp, err := APIResponse(b.engine.store,
+		func(client *apiclient.Client) (*generated.GetPersonByUIDResp, error) {
+			return client.GetPersonByUIDWithResponse(ctx,
+				&generated.GetPersonByUIDRequestOptions{
+					Query: &generated.GetPersonByUIDQuery{UID: uid},
+				})
+		})
+	if err != nil {
+		return nil, err
+	}
+	return b.GetPersonProfile(ctx, resp.JSON200.ID)
 }
 
 // currentEmployments lists current employments and resolves organization
@@ -232,10 +281,10 @@ func relationshipSummaryFromGenerated(view generated.PersonRelationshipView) peo
 	}
 }
 
-// applyStructuredProfile copies the current contact points, dates, and
-// categories. Addresses, names, and media stay out of the overview: the
-// display name already comes from the person record, and addresses and media
-// are not needed to answer who a person is or how to reach them.
+// applyStructuredProfile copies the current contact points, addresses, dates,
+// and categories. Names and media stay out of the overview: the display name
+// already comes from the person record, and media is not needed to answer who
+// a person is or how to reach them.
 func applyStructuredProfile(profile *peoplebrowser.PersonProfile, structured generated.StructuredPersonProfile) {
 	profile.ContactPoints = make([]peoplebrowser.PersonContactPointSummary, 0, len(structured.ContactPoints))
 	for _, point := range structured.ContactPoints {
@@ -244,10 +293,32 @@ func applyStructuredProfile(profile *peoplebrowser.PersonProfile, structured gen
 		}
 		profile.ContactPoints = append(profile.ContactPoints, peoplebrowser.PersonContactPointSummary{
 			Kind: point.AddressKind, Value: point.OriginalValue,
-			ServiceSlug: stringValue(point.ServiceSlug), URI: stringValue(point.URI),
+			NormalizedValue: point.NormalizedValue,
+			ServiceSlug:     stringValue(point.ServiceSlug), URI: stringValue(point.URI),
 			TypeLabel: stringValue(point.Envelope.TypeLabel),
 			Preferred: point.Envelope.Pref != nil && *point.Envelope.Pref == 1,
 			Source:    store.Provenance(point.Envelope.Source),
+		})
+	}
+	profile.Addresses = make([]peoplebrowser.PersonAddressSummary, 0, len(structured.Addresses))
+	for _, address := range structured.Addresses {
+		if !currentEnvelope(address.Envelope) {
+			continue
+		}
+		profile.Addresses = append(profile.Addresses, peoplebrowser.PersonAddressSummary{
+			Kind: address.AddressKind, Label: stringValue(address.Label),
+			PostOfficeBox:   stringValue(address.PostOfficeBox),
+			ExtendedAddress: stringValue(address.ExtendedAddress),
+			StreetAddress:   stringValue(address.StreetAddress),
+			Locality:        stringValue(address.Locality),
+			Region:          stringValue(address.Region),
+			PostalCode:      stringValue(address.PostalCode),
+			CountryName:     stringValue(address.CountryName),
+			CountryCode:     stringValue(address.CountryCode),
+			FreeText:        stringValue(address.FreeText),
+			OriginalValue:   address.OriginalValue,
+			Preferred:       address.Envelope.Pref != nil && *address.Envelope.Pref == 1,
+			Source:          store.Provenance(address.Envelope.Source),
 		})
 	}
 	profile.Dates = make([]peoplebrowser.PersonDateSummary, 0, len(structured.Dates))

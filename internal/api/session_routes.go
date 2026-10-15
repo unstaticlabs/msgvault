@@ -1,7 +1,8 @@
 package api
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"net/http"
 	"time"
 
@@ -26,6 +27,12 @@ const (
 	// identity provider.
 	AuthModeToken    AuthMode = "token"
 	AuthModeRequired AuthMode = "required"
+	// AuthModeCaller marks an operation admitted by the library handler's caller.
+	AuthModeCaller AuthMode = "caller"
+	// AuthModeDelegated marks a caller authenticated by a restricted agent grant. Never an owner mode: see apiRequestAuthorized.
+	AuthModeDelegated AuthMode = "delegated"
+	// AuthModeRemoteClient marks a read-only [[server.remote_clients]] key. Never an owner mode.
+	AuthModeRemoteClient AuthMode = "remote_client"
 )
 
 // SessionLoginRequest exchanges the active daemon API key for an in-memory
@@ -38,7 +45,7 @@ type SessionLoginRequest struct {
 // token is returned only for a valid browser session so mutation middleware
 // can enforce session-bound requests without exposing it to other auth modes.
 type SessionStatus struct {
-	AuthMode         AuthMode `json:"auth_mode" enum:"loopback,api_key,session,token,required"`
+	AuthMode         AuthMode `json:"auth_mode" enum:"loopback,api_key,session,token,required,delegated,remote_client,caller"`
 	CSRFToken        string   `json:"csrf_token,omitempty"`
 	HTTPS            bool     `json:"https"`
 	PlainHTTPWarning bool     `json:"plain_http_warning"`
@@ -135,9 +142,9 @@ func (s *Server) registerSessionRoutes(api huma.API) {
 
 func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	var input SessionLoginRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
+	decoder := jsontext.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20), json.RejectUnknownMembers(true))
+
+	if err := json.UnmarshalDecode(decoder, &input); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid session login request")
 		return
 	}

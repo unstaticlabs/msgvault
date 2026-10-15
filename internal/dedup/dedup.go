@@ -132,7 +132,7 @@ type Config struct {
 
 // DefaultSourcePreference is the default source-type authority order.
 var DefaultSourcePreference = []string{
-	"gmail", "imap", "mbox", "emlx", "hey",
+	"gmail", "imap", "msmail", "mbox", "emlx", "hey",
 }
 
 // remoteSourceTypes lists source types whose messages can be deleted
@@ -183,6 +183,7 @@ type DuplicateMessage struct {
 	SourceType       string
 	SourceIdentifier string
 	SourceMessageID  string
+	MetadataQuality  int
 	Subject          string
 	SentAt           time.Time
 	HasRawMIME       bool
@@ -195,7 +196,9 @@ type DuplicateMessage struct {
 	HasSentLabel     bool
 	FromEmail        string
 	MatchedIdentity  bool
-	normalizedHash   string
+
+	normalizedHash string
+	appleParts     []msgmime.PartFingerprint
 }
 
 // IsSentCopy reports whether this message appears to be the sender-side
@@ -357,6 +360,9 @@ func (e *Engine) loadScanData(ctx context.Context) (scanData, error) {
 	if err != nil {
 		return scanData{}, fmt.Errorf("fingerprint duplicate raw MIME: %w", err)
 	}
+	if err := e.fingerprintApplePlaceholderGroups(data); err != nil {
+		return scanData{}, fmt.Errorf("fingerprint Apple Mail placeholder groups: %w", err)
+	}
 	return data, nil
 }
 
@@ -434,12 +440,14 @@ func (e *Engine) duplicateMessage(
 	return DuplicateMessage{
 		ID: row.ID, SourceID: row.SourceID, SourceType: row.SourceType,
 		SourceIdentifier: row.SourceIdentifier, SourceMessageID: row.SourceMessageID,
-		Subject: row.Subject, SentAt: row.SentAt, HasRawMIME: row.HasRawMIME,
+		MetadataQuality: row.MetadataQuality,
+		Subject:         row.Subject, SentAt: row.SentAt, HasRawMIME: row.HasRawMIME,
 		PayloadBytes: row.PayloadBytes, AttachmentCount: row.AttachmentCount,
 		HasAttachments: row.HasAttachments, LabelCount: row.LabelCount,
 		ArchivedAt: row.ArchivedAt, IsFromMe: row.IsFromMe,
 		HasSentLabel: row.HasSentLabel, FromEmail: row.FromEmail,
 		MatchedIdentity: matched, normalizedHash: rawInfo.normalizedHash,
+		appleParts: rawInfo.appleParts,
 	}
 }
 
@@ -595,6 +603,7 @@ func (e *Engine) scanNormalizedHashGroups(
 						SourceType:       item.candidate.SourceType,
 						SourceIdentifier: item.candidate.SourceIdentifier,
 						SourceMessageID:  item.candidate.SourceMessageID,
+						MetadataQuality:  item.candidate.MetadataQuality,
 						Subject:          item.candidate.Subject,
 						SentAt:           item.candidate.SentAt,
 						HasRawMIME:       true,
@@ -797,6 +806,10 @@ func decodeRawMIME(raw []byte, compression string) ([]byte, error) {
 type duplicateRawMIMEInfo struct {
 	normalizedHash  string
 	rfc822MessageID string
+	// hasApplePlaceholder selects the rows whose groups need appleParts.
+	// Fingerprints are kept only for those groups to bound scan memory.
+	hasApplePlaceholder bool
+	appleParts          []msgmime.PartFingerprint
 	// messageIDChecked is true whenever raw MIME exists. An empty ID means
 	// the raw message could not confirm the stored value.
 	messageIDChecked bool
@@ -818,10 +831,11 @@ func (e *Engine) inspectDuplicateRawMIME(
 				return
 			}
 			info.normalizedHash = sha256Hex(normalizeRawMIME(raw))
-			parsed, _ := msgmime.ParseWithRecovery(raw, "")
+			parsed, parts, _ := msgmime.ParseWithRecoveryAndPartFingerprints(raw, "")
 			if parsed != nil {
 				info.rfc822MessageID = msgmime.NormalizeMessageID(parsed.MessageID)
 			}
+			info.hasApplePlaceholder = applePlaceholderCount(parts) > 0
 			infoByID[messageID] = info
 		},
 	)
@@ -829,6 +843,50 @@ func (e *Engine) inspectDuplicateRawMIME(
 		return nil, err
 	}
 	return infoByID, nil
+}
+
+// fingerprintApplePlaceholderGroups records MIME part fingerprints for every
+// raw copy in Message-ID groups where some copy has an Apple Mail placeholder.
+func (e *Engine) fingerprintApplePlaceholderGroups(data scanData) error {
+	var ids []int64
+	for _, rows := range data.messages {
+		if !slices.ContainsFunc(rows, func(row store.DuplicateMessageRow) bool {
+			return data.rawMIME[row.ID].hasApplePlaceholder
+		}) {
+			continue
+		}
+		for _, row := range rows {
+			if row.HasRawMIME {
+				ids = append(ids, row.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	slices.Sort(ids)
+	return e.store.StreamMessageRaw(ids, func(messageID int64, rawData []byte, compression string) {
+		raw, err := decodeRawMIME(rawData, compression)
+		if err != nil {
+			e.logger.Warn("dedup: raw MIME part fingerprint failed",
+				"message_id", messageID, "err", err)
+			return
+		}
+		_, parts, _ := msgmime.ParseWithRecoveryAndPartFingerprints(raw, "")
+		info := data.rawMIME[messageID]
+		info.appleParts = parts
+		data.rawMIME[messageID] = info
+	})
+}
+
+func applePlaceholderCount(parts []msgmime.PartFingerprint) int {
+	count := 0
+	for _, part := range parts {
+		if part.HasAppleContentLength {
+			count++
+		}
+	}
+	return count
 }
 
 // selectSurvivor picks the best message to keep in a duplicate group.
@@ -854,6 +912,14 @@ func (e *Engine) selectSurvivor(group *DuplicateGroup) {
 		candidates = sentIdxs
 	}
 
+	// Restored MIME may differ only at placeholder positions. Gate the entire
+	// group so unrelated same-ID collisions retain the deterministic fallback
+	// and pairwise comparisons cannot introduce ordering cycles. Only copies
+	// of the preferred source can survive, so only they must match. Content-hash
+	// groups carry no part fingerprints, so the gate stays off for them.
+	useAppleCompleteness := appleCopiesMatch(
+		group.Messages, preferredSourceCandidates(group.Messages, candidates, priorityMap))
+
 	// Pairwise content checks can create a comparison cycle in mixed-hash
 	// groups. Enable completeness as one group-wide ordering tier instead.
 	contentHash := group.Messages[candidates[0]].normalizedHash
@@ -869,12 +935,70 @@ func (e *Engine) selectSurvivor(group *DuplicateGroup) {
 	for _, i := range candidates[1:] {
 		if e.isBetter(
 			group.Messages[i], group.Messages[best], priorityMap,
-			usePayloadCompleteness,
+			usePayloadCompleteness, useAppleCompleteness,
 		) {
 			best = i
 		}
 	}
 	group.Survivor = best
+}
+
+func preferredSourceCandidates(
+	messages []DuplicateMessage, candidates []int, priorityMap map[string]int,
+) []int {
+	best := sourcePriority(messages[candidates[0]].SourceType, priorityMap)
+	for _, i := range candidates[1:] {
+		best = min(best, sourcePriority(messages[i].SourceType, priorityMap))
+	}
+	var preferred []int
+	for _, i := range candidates {
+		if sourcePriority(messages[i].SourceType, priorityMap) == best {
+			preferred = append(preferred, i)
+		}
+	}
+	return preferred
+}
+
+func appleCopiesMatch(messages []DuplicateMessage, candidates []int) bool {
+	first := messages[candidates[0]].appleParts
+	if len(first) == 0 {
+		return false
+	}
+	placeholderAt := make([]bool, len(first))
+	for _, i := range candidates {
+		m := messages[i]
+		if len(m.appleParts) != len(first) {
+			return false
+		}
+		for p, part := range m.appleParts {
+			if part.PartID != first[p].PartID || part.PreambleHash != first[p].PreambleHash ||
+				part.EpilogueHash != first[p].EpilogueHash {
+				return false
+			}
+			placeholderAt[p] = placeholderAt[p] || part.HasAppleContentLength
+		}
+	}
+	for p, placeholder := range placeholderAt {
+		var restored *msgmime.PartFingerprint
+		for _, i := range candidates {
+			part := &messages[i].appleParts[p]
+			if placeholder {
+				if part.RestorableHeaderHash != first[p].RestorableHeaderHash {
+					return false
+				}
+				// Multiple restored copies must agree on what was restored.
+				if !part.HasAppleContentLength {
+					if restored != nil && (part.HeaderHash != restored.HeaderHash || part.ContentHash != restored.ContentHash) {
+						return false
+					}
+					restored = part
+				}
+			} else if part.HeaderHash != first[p].HeaderHash || part.ContentHash != first[p].ContentHash {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func allIndexes(n int) []int {
@@ -891,7 +1015,7 @@ func allIndexes(n int) []int {
 func (e *Engine) isBetter(
 	candidate, current DuplicateMessage,
 	priorityMap map[string]int,
-	usePayloadCompleteness bool,
+	usePayloadCompleteness, useAppleCompleteness bool,
 ) bool {
 	candPri := sourcePriority(candidate.SourceType, priorityMap)
 	currPri := sourcePriority(current.SourceType, priorityMap)
@@ -901,10 +1025,20 @@ func (e *Engine) isBetter(
 	if candidate.HasRawMIME != current.HasRawMIME {
 		return candidate.HasRawMIME
 	}
+	if useAppleCompleteness {
+		candPlaceholders := applePlaceholderCount(candidate.appleParts)
+		currPlaceholders := applePlaceholderCount(current.appleParts)
+		if candPlaceholders != currPlaceholders {
+			return candPlaceholders < currPlaceholders
+		}
+	}
 	if usePayloadCompleteness {
 		if better, decided := payloadCompletenessPreference(candidate, current); decided {
 			return better
 		}
+	}
+	if candidate.MetadataQuality != current.MetadataQuality {
+		return candidate.MetadataQuality > current.MetadataQuality
 	}
 	if candidate.LabelCount != current.LabelCount {
 		return candidate.LabelCount > current.LabelCount
@@ -1634,9 +1768,11 @@ func (e *Engine) formatSurvivorMethodology(sb *strings.Builder) {
 	for i, sourceType := range e.config.SourcePreference {
 		fmt.Fprintf(sb, "  %d. %s\n", i+1, sourceType)
 	}
-	sb.WriteString("  Tiebreakers: has raw MIME > when all eligible copies have matching normalized MIME, " +
-		"more attachments > attachment signal > larger payload > more labels > " +
-		"earlier archived_at > lower id.\n\n")
+	sb.WriteString("  Tiebreakers: has raw MIME > for Message-ID groups whose preferred-source copies parse and match " +
+		"outside placeholders, fewer X-Apple-Content-Length placeholders > when all eligible copies have matching normalized MIME, " +
+		"more attachments > attachment signal > larger payload; then metadata quality > more labels > " +
+		"earlier archived_at > lower id.\n")
+	sb.WriteString("  Metadata quality: one point each for native provider message ID, threading evidence, and Message-ID.\n\n")
 }
 
 func (e *Engine) formatSentMethodology(sb *strings.Builder) {

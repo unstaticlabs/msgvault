@@ -20,7 +20,7 @@ func TestListLabelsPreservesAuthoritativeLocalizedDraftRole(t *testing.T) {
 	for _, label := range labels {
 		roles[label.Name] = label.SystemRole
 	}
-	assertions.Equal("draft", roles["Brouillons"])
+	assertions.Equal("drafts", roles["Brouillons"])
 	assertions.Empty(roles["User Drafts"], "a display name cannot establish draft evidence")
-	assertions.Equal("draft", systemRoleForMailbox([]imapv2.MailboxAttr{imapv2.MailboxAttrDrafts, imapv2.MailboxAttrSent}), "conflicting metadata cannot confidently establish completed Sent")
+	assertions.Equal("drafts", systemRoleForMailbox([]imapv2.MailboxAttr{imapv2.MailboxAttrDrafts, imapv2.MailboxAttrSent}), "conflicting metadata cannot confidently establish completed Sent")
 }

@@ -31,6 +31,7 @@ func completeAPIProvider(keyEnv, model string) peoplesweep.ProviderConfig {
 }
 
 func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -50,6 +51,7 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 		}, want: true},
 		{name: "check", args: []string{"person", "provider", "check", "--json"}, want: true},
 		{name: "named check", args: []string{"person", "provider", "check", "alpha", "--json"}, want: true},
+		{name: "named reverify", args: []string{"person", "provider", "reverify", "alpha", "--yes", "--json"}, want: true},
 		{name: "guarded check", args: []string{
 			"person", "provider", "check", "alpha", "--if-fingerprint", strings.Repeat("a", 64),
 		}, want: true},
@@ -69,6 +71,10 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 			"person", "provider", "revoke", "--if-fingerprint", strings.Repeat("a", 64),
 		}},
 		{name: "extra positional smuggling", args: []string{"person", "provider", "check", "alpha", "beta"}},
+		{name: "active reverify", args: []string{"person", "provider", "reverify", "--yes"}, want: true},
+		{name: "reverify extra positional", args: []string{"person", "provider", "reverify", "alpha", "beta", "--yes"}},
+		{name: "reverify semantic flag", args: []string{"person", "provider", "reverify", "alpha", "--semantic-embeddings", "--yes"}},
+		{name: "reverify credential smuggling", args: []string{"person", "provider", "reverify", "alpha", "--api-key=secret-canary", "--yes"}},
 		{name: "list positional smuggling", args: []string{"person", "provider", "list", "alpha"}},
 		{name: "missing operation", args: []string{"person", "provider"}},
 		{name: "unknown operation", args: []string{"person", "provider", "run"}},
@@ -83,6 +89,7 @@ func TestCLIRunCommandAllowedPermitsExactPersonProviderCommands(t *testing.T) {
 }
 
 func TestCLIRunEnvAllowedPermitsConfiguredPeopleProviderKeyOnly(t *testing.T) {
+	t.Parallel()
 	checks := assert.New(t)
 	srv := &Server{cfg: &config.Config{}}
 	configureAPIProvider(srv.cfg, peoplesweep.ProviderConfig{
@@ -104,6 +111,7 @@ func TestCLIRunEnvAllowedPermitsConfiguredPeopleProviderKeyOnly(t *testing.T) {
 }
 
 func TestCLIAllowlistPermitsExactPersonSweepCommands(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		args []string
 		want bool
@@ -121,6 +129,7 @@ func TestCLIAllowlistPermitsExactPersonSweepCommands(t *testing.T) {
 }
 
 func TestCLIAllowlistRejectsProviderCredentialValuesInDaemonRequest(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	cfg := config.NewDefaultConfig()
@@ -145,6 +154,7 @@ func TestCLIAllowlistRejectsProviderCredentialValuesInDaemonRequest(t *testing.T
 }
 
 func TestCLIAllowlistPersonSweepForwardsExactCredentialOnly(t *testing.T) {
+	t.Parallel()
 	checks := assert.New(t)
 	srv := &Server{cfg: &config.Config{}}
 	configureAPIProvider(srv.cfg, peoplesweep.ProviderConfig{
@@ -169,6 +179,7 @@ func TestCLIAllowlistPersonSweepForwardsExactCredentialOnly(t *testing.T) {
 }
 
 func TestCLIAllowlistCodexProviderOperations(t *testing.T) {
+	t.Parallel()
 	checks := assert.New(t)
 	for _, operation := range []string{"login", "models"} {
 		args := []string{"person", "provider", operation}
@@ -190,6 +201,7 @@ func TestCLIAllowlistCodexProviderOperations(t *testing.T) {
 }
 
 func TestCLIRunCommandAllowedPermitsExactPersonEnrichmentCommandsAndRejectsRawShapes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -223,6 +235,7 @@ func TestCLIRunCommandAllowedPermitsExactPersonEnrichmentCommandsAndRejectsRawSh
 }
 
 func TestCLIRunCommandAllowedRejectsPersonSuppressionMetadataSmuggling(t *testing.T) {
+	t.Parallel()
 	for _, field := range []string{
 		"provider-namespace", "identifier-class", "normalization-version", "key-id", "digest", "actor",
 	} {
@@ -235,6 +248,7 @@ func TestCLIRunCommandAllowedRejectsPersonSuppressionMetadataSmuggling(t *testin
 }
 
 func TestCLIAllowlistPersonEnrichmentForwardsOnlyCommandCredentials(t *testing.T) {
+	t.Parallel()
 	checks := assert.New(t)
 	srv := &Server{cfg: &config.Config{}}
 	srv.cfg.People.Enrichment.SuppressionKeyEnv = "ENRICHMENT_SUPPRESSION_KEY"

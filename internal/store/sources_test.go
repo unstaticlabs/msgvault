@@ -1091,7 +1091,7 @@ func TestStore_RemoveSourceSerialized_PreservesPackedCaseAliasReferences(t *test
 			require.NotNil(entry)
 			assert.Equal(packID, entry.PackID)
 			for _, requested := range []string{hash, uppercase} {
-				loc, err := f.Store.ResolveAttachmentBlob(requested)
+				loc, err := f.Store.ResolveAttachmentBlobContext(t.Context(), requested)
 				require.NoError(err)
 				assert.True(loc.Referenced)
 				require.NotNil(loc.Pack)
@@ -1437,6 +1437,7 @@ func TestInitSchema_AddsDeletedAtToLegacyMessagesTable(t *testing.T) {
 			archived_at DATETIME,
 			rfc822_message_id TEXT,
 			sender_id INTEGER,
+			reply_to_message_id INTEGER REFERENCES messages(id),
 			message_type TEXT NOT NULL DEFAULT 'email',
 			attachment_count INTEGER DEFAULT 0,
 			deleted_from_source_at DATETIME
@@ -1470,4 +1471,10 @@ func TestInitSchema_AddsDeletedAtToLegacyMessagesTable(t *testing.T) {
 		"SELECT COUNT(DISTINCT delete_batch_id) FROM messages",
 	)
 	require.NoError(err, "post-migration delete_batch_id query")
+}
+
+func TestRemoveSourceSerializedReportsMissingSource(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	_, _, err := st.RemoveSourceSerialized(t.Context(), 99999)
+	require.ErrorIs(t, err, store.ErrSourceNotFound)
 }

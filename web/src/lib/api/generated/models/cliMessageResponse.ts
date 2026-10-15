@@ -26,6 +26,7 @@ export interface CliMessageResponse {
   read_state?: CliMessageResponseReadState;
   /** @nullable */
   received_at: string | null;
+  rfc822_message_id?: string;
   sent_at: string;
   size_estimate: number;
   snippet: string;

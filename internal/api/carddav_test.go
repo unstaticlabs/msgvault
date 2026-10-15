@@ -23,11 +23,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/carddav"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/operations"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestCardDAVAccountSaveDiscoversBeforePublishingConfigAndCredential(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -84,6 +86,7 @@ func TestCardDAVAccountSaveDiscoversBeforePublishingConfigAndCredential(t *testi
 }
 
 func TestNewCardDAVControllerLoadsCredentialFromConfiguredDataDir(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -111,6 +114,37 @@ func TestNewCardDAVControllerLoadsCredentialFromConfiguredDataDir(t *testing.T) 
 	assert.NotNil(controller.Current())
 	assert.FileExists(filepath.Join(cfg.TokensDir(), "carddav.json"))
 	assert.NoFileExists(filepath.Join(home, "tokens", "carddav.json"))
+}
+
+func TestCardDAVUnsupportedProviderDoesNotReuseCredential(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	required := require.New(t)
+	cfg, st, _ := savedCardDAVFixture(t)
+	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
+	required.NoError(err)
+	required.NotNil(controller.Current())
+
+	cfg.CardDAV.Provider = "googl"
+	controller, err = NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
+	required.NoError(err)
+	assertions.Nil(controller.Current())
+	_, err = controller.reusableCredential(t.Context(), cfg.CardDAV.BaseURL, cfg.CardDAV.Username)
+	required.ErrorIs(err, carddav.ErrCredentialNotBound)
+}
+
+func TestNewCardDAVControllerIgnoresUnrelatedTrustedOrigin(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	cfg, st, _ := savedCardDAVFixture(t)
+	cfg.CardDAV.TrustedOrigin = "https://contacts.example:8443"
+	cfg.CardDAV.TrustedAddresses = []string{"10.1.2.3"}
+	require.NoError(cfg.Save())
+	loaded, err := config.Load(cfg.ConfigFilePath(), "")
+	require.NoError(err)
+	controller, err := NewCardDAVController(loaded, st, slog.New(slog.DiscardHandler))
+	require.NoError(err)
+	assert.NotNil(t, controller.Current())
 }
 
 type controlledCardDAVCandidate struct {
@@ -168,6 +202,7 @@ func mustURL(t *testing.T, raw string) *url.URL {
 }
 
 func TestCardDAVControllerConfigurationSnapshotsDoNotMixConcurrentPublications(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	first := config.CardDAVConfig{BaseURL: "https://first.example/dav", Username: "first", Enabled: true}
 	second := config.CardDAVConfig{BaseURL: "https://second.example/dav", Username: "second", Schedule: "0 2 * * *"}
@@ -185,12 +220,102 @@ func TestCardDAVControllerConfigurationSnapshotsDoNotMixConcurrentPublications(t
 	}()
 	for range iterations {
 		got := controller.cardDAVConfigSnapshot()
-		assert.True(got == first || got == second, "configuration snapshot was mixed: %+v", got)
+		assert.True(cardDAVConfigEqual(got, first) || cardDAVConfigEqual(got, second), "configuration snapshot was mixed: %+v", got)
 	}
 	<-done
 }
 
+func TestCardDAVTrustedPolicySurvivesAccountSave(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	cfg, st, candidate := savedCardDAVFixture(t)
+	cfg.CardDAV.TrustedOrigin = "https://old.example"
+	cfg.CardDAV.TrustedAddresses = []string{"10.1.2.3"}
+	require.NoError(cfg.Save())
+	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
+	require.NoError(err)
+	controller.factory = func(_ *store.Store, configured config.CardDAVConfig, _ string) (cardDAVCandidate, error) {
+		assert.Equal("https://old.example", configured.TrustedOrigin)
+		assert.Equal([]string{"10.1.2.3"}, configured.TrustedAddresses)
+		return candidate, nil
+	}
+	_, err = controller.Save(t.Context(), CardDAVAccountRequest{
+		BaseURL: cfg.CardDAV.BaseURL, Username: cfg.CardDAV.Username, Password: "new-password", Enabled: new(false),
+	})
+	require.NoError(err)
+	persisted, err := config.Load(cfg.ConfigFilePath(), "")
+	require.NoError(err)
+	assert.Equal([]string{"10.1.2.3"}, persisted.CardDAV.TrustedAddresses)
+	assert.Equal("https://old.example", persisted.CardDAV.TrustedOrigin)
+}
+
+func TestCardDAVTrustedPolicyChangeDuringDiscoveryConflicts(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	cfg, st, candidate := savedCardDAVFixture(t)
+	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
+	require.NoError(err)
+	controller.factory = func(_ *store.Store, configured config.CardDAVConfig, _ string) (cardDAVCandidate, error) {
+		assert.Empty(configured.TrustedOrigin)
+		before, readErr := config.ReadConfigFile(cfg.ConfigFilePath())
+		require.NoError(readErr)
+		_, editErr := config.EditConfigFile(cfg.ConfigFilePath(), before.ETag, []config.Edit{
+			{Key: "carddav.trusted_origin", Value: "https://old.example"},
+			{Key: "carddav.trusted_addresses", Value: []string{"10.1.2.3"}},
+		})
+		require.NoError(editErr)
+		return candidate, nil
+	}
+	_, err = controller.Save(t.Context(), CardDAVAccountRequest{
+		BaseURL: "https://new.example/dav", Username: "new-user", Password: "new-password", Enabled: new(false),
+	})
+	require.ErrorIs(err, config.ErrConfigConflict)
+	assert.NotSame(candidate, controller.Current())
+	persisted, loadErr := config.Load(cfg.ConfigFilePath(), "")
+	require.NoError(loadErr)
+	assert.Equal("https://old.example", persisted.CardDAV.TrustedOrigin)
+	assert.Equal([]string{"10.1.2.3"}, persisted.CardDAV.TrustedAddresses)
+}
+
+func TestCardDAVTrustedPolicyChangeAfterPersistenceDoesNotPublishService(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	cfg, st, candidate := savedCardDAVFixture(t)
+	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
+	require.NoError(err)
+	require.NotNil(controller.Current())
+	var reconciled CardDAVOperations
+	reconciledCalled := false
+	controller.SetScheduleReconciler(func(_ config.CardDAVConfig, service CardDAVOperations) error {
+		reconciledCalled = true
+		reconciled = service
+		return nil
+	})
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error {
+		before, readErr := config.ReadConfigFile(cfg.ConfigFilePath())
+		require.NoError(readErr)
+		_, editErr := config.EditConfigFile(cfg.ConfigFilePath(), before.ETag, []config.Edit{
+			{Key: "carddav.trusted_origin", Value: "https://new.example"},
+			{Key: "carddav.trusted_addresses", Value: []string{"10.1.2.3"}},
+		})
+		return editErr
+	}
+	_, err = controller.Save(t.Context(), CardDAVAccountRequest{
+		BaseURL: "https://new.example/dav", Username: "new-user", Password: "new-password", Enabled: new(false),
+	})
+	require.ErrorIs(err, config.ErrConfigConflict)
+	assert.Nil(controller.Current())
+	assert.True(reconciledCalled)
+	assert.Nil(reconciled)
+	assert.Equal("https://new.example", controller.cardDAVConfigSnapshot().TrustedOrigin)
+}
+
 func TestCardDAVAccountSaveRollsBackPublishedFilesWhenDiscoveryStoreFails(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -198,7 +323,7 @@ func TestCardDAVAccountSaveRollsBackPublishedFilesWhenDiscoveryStoreFails(t *tes
 	newService := &controlledCardDAVCandidate{discovery: oldService.discovery}
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return newService, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return newService, nil }
 	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error {
 		return errors.New("injected database failure")
 	}
@@ -216,11 +341,11 @@ func TestCardDAVAccountSaveRollsBackPublishedFilesWhenDiscoveryStoreFails(t *tes
 	credential, loadErr := carddav.LoadCredential(cfg.TokensDir())
 	require.NoError(loadErr)
 	assert.Equal("old-password", credential.Password)
-	account, accountErr := st.GetCardDAVAccountContext(t.Context())
+	account, accountErr := st.GetCardDAVAccountByIDContext(t.Context(), store.DefaultCardDAVAccountID)
 	require.NoError(accountErr)
 	require.NotNil(account)
 	assert.Equal("https://old.example/dav", account.BaseURL)
-	books, booksErr := st.ListCardDAVAddressBooksContext(t.Context())
+	books, booksErr := st.ListCardDAVAddressBooksContext(t.Context(), store.AllCardDAVAccounts)
 	require.NoError(booksErr)
 	require.Len(books, 1)
 	assert.Equal("Old", books[0].DisplayName)
@@ -228,13 +353,14 @@ func TestCardDAVAccountSaveRollsBackPublishedFilesWhenDiscoveryStoreFails(t *tes
 }
 
 func TestCardDAVAccountSavePreservesOldStateWhenConfigPublicationFails(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
 	cfg, st, candidate := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
 	persisted := false
 	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error {
 		persisted = true
@@ -256,12 +382,13 @@ func TestCardDAVAccountSavePreservesOldStateWhenConfigPublicationFails(t *testin
 }
 
 func TestCardDAVAccountSaveRepublishesPreviousConfigAfterPublishThenError(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	cfg, st, candidate := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
 	persisted := false
 	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error {
 		persisted = true
@@ -298,13 +425,14 @@ func TestCardDAVAccountSaveRepublishesPreviousConfigAfterPublishThenError(t *tes
 }
 
 func TestCardDAVAccountSavePreservesConcurrentNonCardDAVConfigEdits(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
 	cfg, st, candidate := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
 	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error { return nil }
 
 	before, err := config.ReadConfigFile(cfg.ConfigFilePath())
@@ -328,13 +456,14 @@ func TestCardDAVAccountSavePreservesConcurrentNonCardDAVConfigEdits(t *testing.T
 }
 
 func TestCardDAVAccountSavePreservesOldStateWhenCredentialPublicationFails(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
 	cfg, st, candidate := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
 	persisted := false
 	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error {
 		persisted = true
@@ -359,6 +488,7 @@ func TestCardDAVAccountSavePreservesOldStateWhenCredentialPublicationFails(t *te
 }
 
 func TestCardDAVControllerKeepsSetupAvailableForCredentialMismatch(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	cfg, st, _ := savedCardDAVFixture(t)
@@ -374,6 +504,7 @@ func TestCardDAVControllerKeepsSetupAvailableForCredentialMismatch(t *testing.T)
 }
 
 func TestCardDAVControllerMigratesLegacyPasswordWhenDurableIdentityMatches(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -402,6 +533,7 @@ func TestCardDAVControllerMigratesLegacyPasswordWhenDurableIdentityMatches(t *te
 }
 
 func TestCardDAVControllerLeavesLegacyPasswordUnboundWhenIdentityDoesNotMatch(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -423,6 +555,7 @@ func TestCardDAVControllerLeavesLegacyPasswordUnboundWhenIdentityDoesNotMatch(t 
 }
 
 func TestCardDAVAccountSaveRepairsUnboundLegacyCredentialWithExplicitPassword(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -433,7 +566,7 @@ func TestCardDAVAccountSaveRepairsUnboundLegacyCredentialWithExplicitPassword(t 
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
 	require.Nil(controller.Current())
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return candidate, nil
 	}
 
@@ -450,6 +583,7 @@ func TestCardDAVAccountSaveRepairsUnboundLegacyCredentialWithExplicitPassword(t 
 }
 
 func TestCardDAVAccountSaveRestoresUnboundLegacyCredentialOnRollback(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -459,7 +593,7 @@ func TestCardDAVAccountSaveRestoresUnboundLegacyCredentialOnRollback(t *testing.
 	require.NoError(cfg.Save())
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return candidate, nil
 	}
 	controller.persistDiscovery = func(context.Context, cardDAVCandidate, string, string, carddav.Discovery, bool) error {
@@ -479,6 +613,7 @@ func TestCardDAVAccountSaveRestoresUnboundLegacyCredentialOnRollback(t *testing.
 }
 
 func TestCardDAVControllerConstructsManualServiceWhenSchedulingDisabled(t *testing.T) {
+	t.Parallel()
 	cfg, st, _ := savedCardDAVFixture(t)
 	cfg.CardDAV.Enabled = false
 	require.NoError(t, cfg.Save())
@@ -489,6 +624,7 @@ func TestCardDAVControllerConstructsManualServiceWhenSchedulingDisabled(t *testi
 }
 
 func TestCardDAVAccountSaveUpdatesSchedulingWithoutDiscovery(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -498,7 +634,7 @@ func TestCardDAVAccountSaveUpdatesSchedulingWithoutDiscovery(t *testing.T) {
 	candidate.discover = errors.New("injected upstream outage")
 	controller.service = candidate
 	factoryCalled := false
-	controller.factory = func(_ *store.Store, _, _, password string) (cardDAVCandidate, error) {
+	controller.factory = func(_ *store.Store, _ config.CardDAVConfig, password string) (cardDAVCandidate, error) {
 		factoryCalled = true
 		return candidate, nil
 	}
@@ -528,6 +664,7 @@ func TestCardDAVAccountSaveUpdatesSchedulingWithoutDiscovery(t *testing.T) {
 }
 
 func TestCardDAVAccountSaveDisablesUnavailableCredentialWithoutDiscovery(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	cfg, st, candidate := savedCardDAVFixture(t)
@@ -537,7 +674,7 @@ func TestCardDAVAccountSaveDisablesUnavailableCredentialWithoutDiscovery(t *test
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	requirements.NoError(err)
 	requirements.Nil(controller.Current())
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return nil, errors.New("credential-free update must not build a service")
 	}
 	var scheduledConfig config.CardDAVConfig
@@ -566,13 +703,14 @@ func TestCardDAVAccountSaveDisablesUnavailableCredentialWithoutDiscovery(t *test
 }
 
 func TestCardDAVAccountSaveExplicitPasswordRefreshesDiscovery(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
 	cfg, st, candidate := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return candidate, nil
 	}
 
@@ -587,6 +725,7 @@ func TestCardDAVAccountSaveExplicitPasswordRefreshesDiscovery(t *testing.T) {
 }
 
 func TestCardDAVAccountSaveRepairsMissingCredentialAfterStartup(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -595,7 +734,7 @@ func TestCardDAVAccountSaveRepairsMissingCredentialAfterStartup(t *testing.T) {
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
 	assert.Nil(controller.Current())
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return candidate, nil
 	}
 	controller.persistDiscovery = func(
@@ -621,13 +760,14 @@ func TestCardDAVAccountSaveRepairsMissingCredentialAfterStartup(t *testing.T) {
 	assert.Same(candidate, controller.Current())
 	credential, err := carddav.LoadCredential(cfg.TokensDir())
 	require.NoError(err)
-	account, err := st.GetCardDAVAccountContext(t.Context())
+	account, err := st.GetCardDAVAccountByIDContext(t.Context(), store.DefaultCardDAVAccountID)
 	require.NoError(err)
 	require.NotNil(account)
 	assert.Equal(account.ConnectionGeneration, credential.ConnectionGeneration)
 }
 
 func TestCardDAVAccountSaveRepairsCorruptCredentialWithoutLosingItOnRollback(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	cfg, st, candidate := savedCardDAVFixture(t)
@@ -637,7 +777,7 @@ func TestCardDAVAccountSaveRepairsCorruptCredentialWithoutLosingItOnRollback(t *
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	requirements.NoError(err)
 	requirements.Nil(controller.Current())
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return candidate, nil
 	}
 	persistDiscovery := controller.persistDiscovery
@@ -664,16 +804,17 @@ func TestCardDAVAccountSaveRepairsCorruptCredentialWithoutLosingItOnRollback(t *
 }
 
 func TestCardDAVAccountSavePasswordChangeAdvancesConnectionGeneration(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
 	cfg, st, candidate := savedCardDAVFixture(t)
-	before, err := st.GetCardDAVAccountContext(t.Context())
+	before, err := st.GetCardDAVAccountByIDContext(t.Context(), store.DefaultCardDAVAccountID)
 	require.NoError(err)
 	require.NotNil(before)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
 	controller.persistDiscovery = func(ctx context.Context, _ cardDAVCandidate, baseURL, username string, discovery carddav.Discovery, credentialsChanged bool) error {
 		_, _, persistErr := st.ReplaceCardDAVDiscoveryContext(ctx, store.CardDAVDiscoveryInput{
 			BaseURL: baseURL, Username: username, CredentialsChanged: credentialsChanged,
@@ -692,12 +833,12 @@ func TestCardDAVAccountSavePasswordChangeAdvancesConnectionGeneration(t *testing
 	require.NoError(err)
 	saved, err := carddav.LoadCredential(cfg.TokensDir())
 	require.NoError(err)
-	account, err := st.GetCardDAVAccountContext(t.Context())
+	account, err := st.GetCardDAVAccountByIDContext(t.Context(), store.DefaultCardDAVAccountID)
 	require.NoError(err)
 	require.NotNil(account)
 	assert.Equal(int64(2), saved.ConnectionGeneration)
 	assert.Equal(saved.ConnectionGeneration, account.ConnectionGeneration)
-	books, err := st.ListCardDAVAddressBooksContext(t.Context())
+	books, err := st.ListCardDAVAddressBooksContext(t.Context(), store.AllCardDAVAccounts)
 	require.NoError(err)
 	require.Len(books, 1)
 	_, err = st.ApplyCardDAVSyncPlanContext(t.Context(), store.CardDAVSyncPlan{
@@ -709,6 +850,7 @@ func TestCardDAVAccountSavePasswordChangeAdvancesConnectionGeneration(t *testing
 }
 
 func TestCardDAVAccountSaveRejectsCredentialRotationBeforeDiscoveryWhenIntentIsPending(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		seed func(*testing.T, *store.Store, store.CardDAVAddressBook)
@@ -746,14 +888,14 @@ func TestCardDAVAccountSaveRejectsCredentialRotationBeforeDiscoveryWhenIntentIsP
 			require := require.New(t)
 
 			cfg, st, candidate := savedCardDAVFixture(t)
-			books, err := st.ListCardDAVAddressBooksContext(t.Context())
+			books, err := st.ListCardDAVAddressBooksContext(t.Context(), store.AllCardDAVAccounts)
 			require.NoError(err)
 			require.Len(books, 1)
 			tc.seed(t, st, books[0])
 			controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 			require.NoError(err)
 			oldService := controller.Current()
-			controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+			controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 				return candidate, nil
 			}
 			beforeConfig, err := os.ReadFile(cfg.ConfigFilePath())
@@ -772,7 +914,7 @@ func TestCardDAVAccountSaveRejectsCredentialRotationBeforeDiscoveryWhenIntentIsP
 			credential, loadErr := carddav.LoadCredential(cfg.TokensDir())
 			require.NoError(loadErr)
 			assert.Equal("old-password", credential.Password)
-			account, getErr := st.GetCardDAVAccountContext(t.Context())
+			account, getErr := st.GetCardDAVAccountByIDContext(t.Context(), store.DefaultCardDAVAccountID)
 			require.NoError(getErr)
 			require.NotNil(account)
 			assert.Equal(int64(1), account.ConnectionGeneration)
@@ -782,6 +924,7 @@ func TestCardDAVAccountSaveRejectsCredentialRotationBeforeDiscoveryWhenIntentIsP
 }
 
 func TestCardDAVAccountSaveRejectsIdentityChangeBeforeDiscoveryWhenRemoteStateIsOwned(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		seed func(*testing.T, *store.Store, store.CardDAVAddressBook)
@@ -813,14 +956,14 @@ func TestCardDAVAccountSaveRejectsIdentityChangeBeforeDiscoveryWhenRemoteStateIs
 			require := require.New(t)
 
 			cfg, st, candidate := savedCardDAVFixture(t)
-			books, err := st.ListCardDAVAddressBooksContext(t.Context())
+			books, err := st.ListCardDAVAddressBooksContext(t.Context(), store.AllCardDAVAccounts)
 			require.NoError(err)
 			require.Len(books, 1)
 			tc.seed(t, st, books[0])
 			controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 			require.NoError(err)
 			oldService := controller.Current()
-			controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+			controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 				return candidate, nil
 			}
 			beforeConfig, err := os.ReadFile(cfg.ConfigFilePath())
@@ -839,7 +982,7 @@ func TestCardDAVAccountSaveRejectsIdentityChangeBeforeDiscoveryWhenRemoteStateIs
 			afterConfig, readErr := os.ReadFile(cfg.ConfigFilePath())
 			require.NoError(readErr)
 			assert.Equal(beforeConfig, afterConfig)
-			account, getErr := st.GetCardDAVAccountContext(t.Context())
+			account, getErr := st.GetCardDAVAccountByIDContext(t.Context(), store.DefaultCardDAVAccountID)
 			require.NoError(getErr)
 			require.NotNil(account)
 			assert.Equal("old-user", account.Username)
@@ -875,6 +1018,7 @@ func (f *blockingCardDAVCandidate) PersistDiscovery(context.Context, string, str
 }
 
 func TestCardDAVAccountSaveSerializesCompleteCredentialTransition(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -886,7 +1030,7 @@ func TestCardDAVAccountSaveSerializesCompleteCredentialTransition(t *testing.T) 
 	secondFactoryCalled := make(chan struct{}, 1)
 	first := &blockingCardDAVCandidate{discovery: fixture.discovery, started: firstStarted, release: firstRelease}
 	var factoryCalls atomic.Int32
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		if factoryCalls.Add(1) == 1 {
 			return first, nil
 		}
@@ -919,7 +1063,7 @@ func TestCardDAVAccountSaveSerializesCompleteCredentialTransition(t *testing.T) 
 	select {
 	case <-secondFactoryCalled:
 		assert.Fail("second save entered the transition while the first save was in discovery")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond): //nolint:kennlint // absence check: the first save holds the transition in discovery
 	}
 	close(firstRelease)
 	for range 2 {
@@ -931,6 +1075,7 @@ func TestCardDAVAccountSaveSerializesCompleteCredentialTransition(t *testing.T) 
 }
 
 func TestCardDAVAccountRequiresPasswordWhenConnectionIdentityChanges(t *testing.T) {
+	t.Parallel()
 	cfg, st, _ := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
@@ -943,11 +1088,12 @@ func TestCardDAVAccountRequiresPasswordWhenConnectionIdentityChanges(t *testing.
 }
 
 func TestCardDAVAccountTestDoesNotCreateSyncRun(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	cfg, st, candidate := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(err)
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) {
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) {
 		return candidate, nil
 	}
 
@@ -956,7 +1102,7 @@ func TestCardDAVAccountTestDoesNotCreateSyncRun(t *testing.T) {
 		Enabled: new(true),
 	})
 	require.NoError(err)
-	runs, err := st.ListCardDAVSyncRunsContext(t.Context(), 10, nil)
+	runs, err := st.ListCardDAVSyncRunsContext(t.Context(), 10, nil, store.AllCardDAVAccounts)
 	require.NoError(err)
 	assert.Empty(t, runs)
 }
@@ -969,12 +1115,12 @@ func fixtureCardDAVFactory(t *testing.T, target *url.URL) cardDAVServiceFactory 
 	t.Helper()
 	resolver := fixtureCardDAVResolver(t, netip.MustParseAddr("203.0.113.9"))
 	dialer := net.Dialer{}
-	return func(st *store.Store, baseURL, username, password string) (cardDAVCandidate, error) {
-		origin, err := url.Parse(baseURL)
+	return func(st *store.Store, configured config.CardDAVConfig, password string) (cardDAVCandidate, error) {
+		origin, err := url.Parse(configured.BaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("parse fixture CardDAV base URL: %w", err)
 		}
-		client, err := carddav.NewClient(carddav.ClientOptions{CredentialOrigin: origin, Username: username, Password: password, Resolver: resolver, AllowInsecureCredentials: true, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		client, err := carddav.NewClient(carddav.ClientOptions{CredentialOrigin: origin, Username: configured.Username, Password: password, Resolver: resolver, AllowInsecureCredentials: true, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, target.Host)
 		}})
 		if err != nil {
@@ -1040,8 +1186,12 @@ func (f cardDAVListFixture) SetBookRoles(context.Context, int64, carddav.BookRol
 func (f cardDAVListFixture) PublicationView(context.Context, int64) (*carddav.PublicationView, error) {
 	return &carddav.PublicationView{PersonID: 7, State: carddav.PublicationUnpublished}, nil
 }
-func (f cardDAVListFixture) PublishPerson(context.Context, int64) error   { return nil }
-func (f cardDAVListFixture) UnpublishPerson(context.Context, int64) error { return nil }
+func (f cardDAVListFixture) PublishPerson(context.Context, int64) error { return nil }
+func (f cardDAVListFixture) PreviewPublication(context.Context, int64) (*carddav.PublicationPreview, error) {
+	return &carddav.PublicationPreview{PersonID: 7, Kind: carddav.PublicationReviewCurrent}, nil
+}
+func (f cardDAVListFixture) PublishReviewedPerson(context.Context, int64, string) error { return nil }
+func (f cardDAVListFixture) UnpublishPerson(context.Context, int64) error               { return nil }
 func (f cardDAVListFixture) ListConflicts(context.Context) ([]store.CardDAVConflict, error) {
 	return []store.CardDAVConflict{f.conflict}, nil
 }
@@ -1075,6 +1225,7 @@ func (f cardDAVListFixture) ResolveConflict(context.Context, int64, carddav.Reso
 }
 
 func TestCardDAVConflictListNeverExposesSnapshots(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	controller := &CardDAVController{service: cardDAVListFixture{conflict: store.CardDAVConflict{ID: 7, AddressBookID: 2, Href: "/books/personal/alice.vcf", Status: store.CardDAVConflictUnresolved, LocalBody: []byte("private-local-card"), RemoteBody: []byte("private-remote-card")}}}
@@ -1089,6 +1240,7 @@ func TestCardDAVConflictListNeverExposesSnapshots(t *testing.T) {
 }
 
 func TestCardDAVConflictDetailExposesOnlyRequestedSnapshots(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	conflict := store.CardDAVConflict{
@@ -1108,6 +1260,7 @@ func TestCardDAVConflictDetailExposesOnlyRequestedSnapshots(t *testing.T) {
 }
 
 func TestCardDAVConflictResolutionReturnsOnlyResolvedIdentity(t *testing.T) {
+	t.Parallel()
 	resp := cardDAVRouteResponse(t, cardDAVErrorFixture{}, http.MethodPost,
 		"/api/v1/carddav/conflicts/7/resolve", `{"choice":"keep_remote"}`)
 	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
@@ -1129,6 +1282,7 @@ func (f *cardDAVResolveCountFixture) ResolveConflict(_ context.Context, _ int64,
 }
 
 func TestCardDAVConflictResolutionIsOneStrictMutationWithTypedStaleResponse(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	service := &cardDAVResolveCountFixture{err: store.ErrCardDAVConflictStale}
@@ -1151,6 +1305,7 @@ func TestCardDAVConflictResolutionIsOneStrictMutationWithTypedStaleResponse(t *t
 }
 
 func TestCardDAVMutationPendingErrorsHaveStable409Codes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -1158,6 +1313,8 @@ func TestCardDAVMutationPendingErrorsHaveStable409Codes(t *testing.T) {
 	}{
 		{name: "conflict pending", err: carddav.ErrCardDAVConflictPending, code: "carddav_conflict_pending"},
 		{name: "publication pending", err: store.ErrCardDAVPublicationPending, code: "carddav_publication_pending"},
+		{name: "inference review required", err: store.ErrCardDAVInferenceReviewRequired, code: "carddav_inference_review_required"},
+		{name: "review stale", err: store.ErrCardDAVReviewStale, code: "carddav_review_stale"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1169,6 +1326,97 @@ func TestCardDAVMutationPendingErrorsHaveStable409Codes(t *testing.T) {
 	}
 }
 
+func TestCardDAVPublicationTooLargeResponses(t *testing.T) {
+	t.Parallel()
+	document := OpenAPIDocument()
+	for _, route := range []struct {
+		method, suffix, body string
+	}{
+		{http.MethodPost, "", ""},
+		{http.MethodGet, "/preview", ""},
+		{http.MethodPost, "/approve", `{"approval_token":"token-1"}`},
+	} {
+		t.Run(route.method+route.suffix, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			service := cardDAVErrorFixture{
+				mutateErr: carddav.ErrCardDAVPreviewTooLarge, previewErr: carddav.ErrCardDAVPreviewTooLarge,
+			}
+			resp := cardDAVRouteResponse(t, service, route.method,
+				"/api/v1/carddav/publications/7"+route.suffix, route.body)
+			require.Equal(http.StatusRequestEntityTooLarge, resp.Code, resp.Body.String())
+			assert.Contains(resp.Body.String(), `"error":"carddav_preview_too_large"`)
+			if route.method == http.MethodPost {
+				tooLarge := &carddav.ContactTooLargeError{PersonID: 7, Err: errors.Join(carddav.ErrMicrosoftContactTooLarge, &carddav.StatusError{StatusCode: http.StatusRequestEntityTooLarge})}
+				resp = cardDAVRouteResponse(t, cardDAVErrorFixture{mutateErr: tooLarge}, route.method,
+					"/api/v1/carddav/publications/7"+route.suffix, route.body)
+				require.Equal(http.StatusRequestEntityTooLarge, resp.Code, resp.Body.String())
+				assert.Contains(resp.Body.String(), `"error":"microsoft_contact_too_large"`)
+				assert.Contains(resp.Body.String(), operations.MicrosoftContactTooLargeMessage(7))
+			}
+			path := document.Paths["/api/v1/carddav/publications/{person_id}"+route.suffix]
+			require.NotNil(path)
+			operation := path.Post
+			if route.method == http.MethodGet {
+				operation = path.Get
+			}
+			require.NotNil(operation)
+			assert.Contains(operation.Responses, "413")
+		})
+	}
+	t.Run("POST sync", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		tooLarge := &carddav.ContactTooLargeError{PersonID: 7, Err: carddav.ErrMicrosoftContactTooLarge}
+		resp := cardDAVRouteResponse(t, cardDAVErrorFixture{syncErr: tooLarge}, http.MethodPost, "/api/v1/carddav/sync", `{}`)
+		require.Equal(http.StatusRequestEntityTooLarge, resp.Code, resp.Body.String())
+		assert.Contains(resp.Body.String(), `"error":"microsoft_contact_too_large"`)
+		assert.Contains(resp.Body.String(), operations.FixedPublicError(operations.PublicErrorMicrosoftContactTooLarge).Message)
+		assert.NotContains(resp.Body.String(), "Person 7")
+		path := document.Paths["/api/v1/carddav/sync"]
+		require.NotNil(path)
+		require.NotNil(path.Post)
+		assert.Contains(path.Post.Responses, "413")
+	})
+}
+
+func TestCardDAVPublicationPreviewAndApprovalRoutes(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	conflictID := int64(3)
+	preview := &carddav.PublicationPreview{
+		PersonID: 7, AddressBook: carddav.AddressBookIdentity{ID: 2, Name: "Personal"},
+		Kind: carddav.PublicationReviewConflict, VCard: "BEGIN:VCARD\r\nEND:VCARD\r\n",
+		ApprovalToken: "token-1", ReviewRequired: true, ConflictID: &conflictID,
+	}
+	approved := ""
+	service := cardDAVErrorFixture{
+		preview: preview, approved: &approved,
+		publication: &carddav.PublicationView{PersonID: 7, State: carddav.PublicationConflict, Desired: true, ConflictID: &conflictID},
+	}
+
+	resp := cardDAVRouteResponse(t, service, http.MethodGet, "/api/v1/carddav/publications/7/preview", "")
+	require.Equal(http.StatusOK, resp.Code, resp.Body.String())
+	assert.JSONEq(`{"person_id":7,"address_book":{"id":2,"name":"Personal"},"kind":"conflict","vcard":"BEGIN:VCARD\r\nEND:VCARD\r\n","approval_token":"token-1","review_required":true,"conflict_id":3}`, resp.Body.String())
+
+	resp = cardDAVRouteResponse(t, service, http.MethodPost, "/api/v1/carddav/publications/7/approve", `{"approval_token":"token-1"}`)
+	require.Equal(http.StatusOK, resp.Code, resp.Body.String())
+	assert.Equal("token-1", approved)
+	assert.JSONEq(`{"person_id":7,"state":"conflict","desired":true,"conflict_id":3}`, resp.Body.String())
+
+	resp = cardDAVRouteResponse(t, service, http.MethodPost, "/api/v1/carddav/publications/7/approve", `{"approval_token":""}`)
+	assert.Equal(http.StatusBadRequest, resp.Code, resp.Body.String())
+	resp = cardDAVRouteResponse(t, service, http.MethodPost, "/api/v1/carddav/publications/7/approve", `{}`)
+	assert.Equal(http.StatusBadRequest, resp.Code, resp.Body.String())
+
+	resp = cardDAVRouteResponse(t, cardDAVErrorFixture{previewErr: store.ErrCardDAVReviewStale}, http.MethodGet, "/api/v1/carddav/publications/7/preview", "")
+	assert.Equal(http.StatusConflict, resp.Code, resp.Body.String())
+	assert.Contains(resp.Body.String(), `"error":"carddav_review_stale"`)
+	resp = cardDAVRouteResponse(t, cardDAVErrorFixture{previewErr: store.ErrPersonNotFound}, http.MethodGet, "/api/v1/carddav/publications/7/preview", "")
+	assert.Equal(http.StatusNotFound, resp.Code, resp.Body.String())
+}
+
 type cardDAVErrorFixture struct {
 	cardDAVListFixture
 
@@ -1178,6 +1426,9 @@ type cardDAVErrorFixture struct {
 	publication *carddav.PublicationView
 	pubErr      error
 	mutateErr   error
+	preview     *carddav.PublicationPreview
+	previewErr  error
+	approved    *string
 	conflictErr error
 	resolveErr  error
 	syncResult  carddav.SyncResult
@@ -1197,7 +1448,16 @@ func (f cardDAVErrorFixture) SetBookRoles(context.Context, int64, carddav.BookRo
 func (f cardDAVErrorFixture) PublicationView(context.Context, int64) (*carddav.PublicationView, error) {
 	return f.publication, f.pubErr
 }
-func (f cardDAVErrorFixture) PublishPerson(context.Context, int64) error   { return f.mutateErr }
+func (f cardDAVErrorFixture) PublishPerson(context.Context, int64) error { return f.mutateErr }
+func (f cardDAVErrorFixture) PreviewPublication(context.Context, int64) (*carddav.PublicationPreview, error) {
+	return f.preview, f.previewErr
+}
+func (f cardDAVErrorFixture) PublishReviewedPerson(_ context.Context, _ int64, token string) error {
+	if f.approved != nil {
+		*f.approved = token
+	}
+	return f.mutateErr
+}
 func (f cardDAVErrorFixture) UnpublishPerson(context.Context, int64) error { return f.mutateErr }
 func (f cardDAVErrorFixture) GetConflictView(context.Context, int64) (*carddav.ConflictDetail, error) {
 	if f.conflictErr != nil {
@@ -1223,9 +1483,11 @@ func cardDAVRouteResponse(t *testing.T, service CardDAVOperations, method, path,
 }
 
 func TestCardDAVRoutesMapValidationMissingConflictAndStorageStatuses(t *testing.T) {
+	t.Parallel()
 	const roles = `{"write_target":false,"subscribed":true,"lookup_source":false}`
 	tests := []struct {
 		name, method, path, body string
+		code, message            string
 		service                  CardDAVOperations
 		want                     int
 	}{
@@ -1241,6 +1503,8 @@ func TestCardDAVRoutesMapValidationMissingConflictAndStorageStatuses(t *testing.
 		{name: "resolution validation", method: http.MethodPost, path: "/api/v1/carddav/conflicts/7/resolve", body: `{"choice":"invalid"}`, service: cardDAVErrorFixture{resolveErr: carddav.ErrInvalidResolutionChoice}, want: http.StatusBadRequest},
 		{name: "conflict missing", method: http.MethodPost, path: "/api/v1/carddav/conflicts/7/resolve", body: `{"choice":"keep_remote"}`, service: cardDAVErrorFixture{resolveErr: store.ErrCardDAVConflictNotFound}, want: http.StatusNotFound},
 		{name: "conflict stale", method: http.MethodPost, path: "/api/v1/carddav/conflicts/7/resolve", body: `{"choice":"keep_remote"}`, service: cardDAVErrorFixture{resolveErr: store.ErrCardDAVConflictStale}, want: http.StatusConflict},
+		{name: "remote protected", method: http.MethodPost, path: "/api/v1/carddav/conflicts/7/resolve", body: `{"choice":"keep_remote"}`, service: cardDAVErrorFixture{resolveErr: fmt.Errorf("%w: private detail", store.ErrCardDAVRemoteProtected)}, want: http.StatusConflict, code: "carddav_remote_protected", message: "The remote card would overwrite a value added in msgvault or another address book. Keep local, or restore that value in the address book and sync again."},
+		{name: "remote invalid", method: http.MethodPost, path: "/api/v1/carddav/conflicts/7/resolve", body: `{"choice":"keep_remote"}`, service: cardDAVErrorFixture{resolveErr: fmt.Errorf("%w: private detail", store.ErrCardDAVRemoteInvalid)}, want: http.StatusConflict, code: "carddav_remote_invalid", message: "The remote card has values that cannot be published, such as an invalid preference or location. Fix them in the address book and sync again, or keep local."},
 		{name: "conflict storage", method: http.MethodPost, path: "/api/v1/carddav/conflicts/7/resolve", body: `{"choice":"keep_remote"}`, service: cardDAVErrorFixture{resolveErr: errors.New("database unavailable")}, want: http.StatusInternalServerError},
 		{name: "sync stale", method: http.MethodPost, path: "/api/v1/carddav/sync", body: `{}`, service: cardDAVErrorFixture{syncErr: store.ErrCardDAVStalePlan}, want: http.StatusConflict},
 		{name: "sync already active", method: http.MethodPost, path: "/api/v1/carddav/sync", body: `{}`, service: cardDAVErrorFixture{syncErr: store.ErrCardDAVSyncActive}, want: http.StatusConflict},
@@ -1254,17 +1518,21 @@ func TestCardDAVRoutesMapValidationMissingConflictAndStorageStatuses(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			resp := cardDAVRouteResponse(t, tt.service, tt.method, tt.path, tt.body)
 			assert.Equal(t, tt.want, resp.Code, resp.Body.String())
+			if tt.code != "" {
+				assert.JSONEq(t, fmt.Sprintf(`{"error":%q,"message":%q}`, tt.code, tt.message), resp.Body.String())
+			}
 		})
 	}
 }
 
 func TestCardDAVRetryGateResponseCarriesSafeRetryAfter(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 
 	_, st, _ := savedCardDAVFixture(t)
 	retryAt := time.Now().UTC().Add(90 * time.Second)
-	require.NoError(st.SetCardDAVRetryAfterContext(t.Context(), retryAt))
+	require.NoError(st.SetCardDAVRetryAfterContext(t.Context(), retryAt, store.DefaultCardDAVAccountID))
 	controller := &CardDAVController{
 		store:   st,
 		service: cardDAVErrorFixture{syncErr: store.ErrCardDAVRetryAfter},
@@ -1286,6 +1554,7 @@ func TestCardDAVRetryGateResponseCarriesSafeRetryAfter(t *testing.T) {
 }
 
 func TestCardDAVFreshRateLimitsMapToServiceUnavailableWithRetryAfter(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	srv := &Server{}
@@ -1294,22 +1563,23 @@ func TestCardDAVFreshRateLimitsMapToServiceUnavailableWithRetryAfter(t *testing.
 	}
 
 	operation := httptest.NewRecorder()
-	srv.writeCardDAVOperationError(t.Context(), operation, statusErr, "CardDAV sync failed")
+	srv.writeCardDAVOperationError(operation, statusErr, "CardDAV sync failed")
 	require.Equal(http.StatusServiceUnavailable, operation.Code, operation.Body.String())
 	assert.Equal("17", operation.Header().Get("Retry-After"))
 
 	account := httptest.NewRecorder()
-	srv.writeCardDAVAccountError(t.Context(), account,
+	srv.writeCardDAVAccountError(account,
 		errors.Join(errCardDAVUpstream, statusErr), "CardDAV discovery failed")
 	require.Equal(http.StatusServiceUnavailable, account.Code, account.Body.String())
 	assert.Equal("17", account.Header().Get("Retry-After"))
 }
 
 func TestCardDAVAccountTestMapsValidationAndUpstreamFailures(t *testing.T) {
+	t.Parallel()
 	st := testutil.NewTestStore(t)
 	candidate := &controlledCardDAVCandidate{discover: errors.New("remote unavailable")}
 	controller := &CardDAVController{cfg: &config.Config{HomeDir: t.TempDir()}, store: st}
-	controller.factory = func(*store.Store, string, string, string) (cardDAVCandidate, error) { return candidate, nil }
+	controller.factory = func(*store.Store, config.CardDAVConfig, string) (cardDAVCandidate, error) { return candidate, nil }
 	srv := NewServerWithOptions(ServerOptions{Config: &config.Config{}, Store: &mockStore{}, Logger: testLogger(), CardDAV: controller})
 
 	for _, tc := range []struct {
@@ -1331,18 +1601,21 @@ func TestCardDAVAccountTestMapsValidationAndUpstreamFailures(t *testing.T) {
 }
 
 func TestCardDAVAccountChangeOwnershipErrorsMapConflict(t *testing.T) {
+	t.Parallel()
 	srv := &Server{}
 	for _, err := range []error{
 		store.ErrCardDAVCredentialChangePending,
 		store.ErrCardDAVIdentityChangeOwned,
+		config.ErrConfigConflict,
 	} {
 		resp := httptest.NewRecorder()
-		srv.writeCardDAVAccountError(t.Context(), resp, err, "CardDAV account change blocked")
+		srv.writeCardDAVAccountError(resp, err, "CardDAV account change blocked")
 		assert.Equal(t, http.StatusConflict, resp.Code, resp.Body.String())
 	}
 }
 
 func TestCardDAVAccountTestMapsCredentialStorageFailure(t *testing.T) {
+	t.Parallel()
 	cfg, st, _ := savedCardDAVFixture(t)
 	controller, err := NewCardDAVController(cfg, st, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
@@ -1362,6 +1635,7 @@ func TestCardDAVAccountTestMapsCredentialStorageFailure(t *testing.T) {
 }
 
 func TestCardDAVSyncResponseUsesLowercaseJSONFields(t *testing.T) {
+	t.Parallel()
 	resp := cardDAVRouteResponse(t, cardDAVErrorFixture{syncResult: carddav.SyncResult{
 		Books: 1, Created: 2, Updated: 3, Removed: 4,
 	}}, http.MethodPost, "/api/v1/carddav/sync", `{}`)
@@ -1381,6 +1655,7 @@ func (f *cardDAVSyncOptionsFixture) Sync(_ context.Context, options carddav.Sync
 }
 
 func TestCardDAVSyncRouteMarksRunManual(t *testing.T) {
+	t.Parallel()
 	service := &cardDAVSyncOptionsFixture{}
 	resp := cardDAVRouteResponse(t, service, http.MethodPost, "/api/v1/carddav/sync", `{"full":true}`)
 	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
@@ -1389,6 +1664,7 @@ func TestCardDAVSyncRouteMarksRunManual(t *testing.T) {
 }
 
 func TestCardDAVPublicationStateRouteRequiresAuthAndReturnsState(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	controller := &CardDAVController{service: cardDAVErrorFixture{publication: &carddav.PublicationView{
 		PersonID: 11, State: carddav.PublicationPending, Desired: true,
@@ -1412,6 +1688,7 @@ func TestCardDAVPublicationStateRouteRequiresAuthAndReturnsState(t *testing.T) {
 }
 
 func TestCardDAVUnpublishReturnsDesiredFalseWhenPublicationIsGone(t *testing.T) {
+	t.Parallel()
 	resp := cardDAVRouteResponse(t, cardDAVErrorFixture{
 		publication: &carddav.PublicationView{PersonID: 11, State: carddav.PublicationUnpublished},
 	}, http.MethodDelete, "/api/v1/carddav/publications/11", "")

@@ -160,6 +160,7 @@ func TestAuthEnvOverrides(t *testing.T) {
 	assert := assert.New(t)
 	for _, name := range AuthEnvOverrideNames() {
 		t.Setenv(name, "")
+		require.NoError(os.Unsetenv(name))
 	}
 	t.Setenv("MSGVAULT_AUTH_OIDC_ISSUER", "https://idp.example")
 	t.Setenv("MSGVAULT_AUTH_OIDC_CLIENT_ID", "vault")
@@ -201,6 +202,7 @@ func TestInboxArchiveEnvOverride(t *testing.T) {
 	require := require.New(t)
 	for _, name := range AuthEnvOverrideNames() {
 		t.Setenv(name, "")
+		require.NoError(os.Unsetenv(name))
 	}
 
 	base := "[server]\napi_key = \"admin-secret-value\"\n"
@@ -233,6 +235,7 @@ func TestAuthEnvOverridesDeclareKeysAndRemote(t *testing.T) {
 	assert := assert.New(t)
 	for _, name := range AuthEnvOverrideNames() {
 		t.Setenv(name, "")
+		require.NoError(os.Unsetenv(name))
 	}
 	t.Setenv("MSGVAULT_AUTH_API_KEYS", `[{"name":"sidecar","key_env":"MSGVAULT_TEST_SIDECAR_KEY","role":"admin"},{"name":"reader","key":"reader-secret-value"}]`)
 	t.Setenv("MSGVAULT_TEST_SIDECAR_KEY", "sidecar-secret-value")
@@ -250,7 +253,8 @@ func TestAuthEnvOverridesDeclareKeysAndRemote(t *testing.T) {
 	assert.Equal(authz.RoleAdmin, resolved[1].Role)
 	assert.Equal(authz.RoleViewer, resolved[2].Role, "the default role applies to environment keys too")
 	assert.Equal("http://daemon:8080", cfg.Remote.URL)
-	assert.Equal("remote-secret-value", cfg.Remote.APIKey)
+	require.NoError(cfg.ResolveRemoteKey())
+	assert.Equal("remote-secret-value", cfg.Remote.AuthenticationKey())
 	assert.True(cfg.Remote.AllowInsecure)
 
 	t.Setenv("MSGVAULT_AUTH_API_KEYS", `[{"name":"file","key":"x"}]`)

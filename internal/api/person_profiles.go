@@ -3,7 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -28,8 +29,11 @@ const (
 // PersonProfileStore is the feature-local capability for durable curated
 // people. The daemon adapter passes these calls directly to *store.Store.
 type PersonProfileStore interface {
-	CreatePersonFromParticipantContext(ctx context.Context, participantID int64) (*store.Person, bool, error)
+	CreatePersonFromParticipantWithDisplayNameContext(
+		ctx context.Context, participantID int64, displayName *string,
+	) (*store.Person, bool, error)
 	GetPersonContext(ctx context.Context, id int64) (*store.Person, error)
+	GetPersonByUIDContext(ctx context.Context, uid string) (*store.Person, error)
 	ListPersonsContext(ctx context.Context) ([]store.Person, error)
 	DirectoryPeoplePageContext(ctx context.Context, query store.DirectoryPeopleQuery) (*store.DirectoryPeoplePage, error)
 	UpdatePersonDisplayNameContext(
@@ -50,7 +54,8 @@ type PersonProfileStore interface {
 }
 
 type CreatePersonRequest struct {
-	ParticipantID int64 `json:"participant_id"`
+	ParticipantID int64   `json:"participant_id"`
+	DisplayName   *string `json:"display_name,omitzero" nullable:"true"`
 }
 
 type PatchPersonRequest struct {
@@ -77,7 +82,7 @@ type PersonSearchEngine interface {
 
 type PersonSearchRequest struct {
 	Query string `json:"query" minLength:"1"`
-	Limit int    `json:"limit,omitempty" minimum:"0" maximum:"100" default:"20"`
+	Limit int    `json:"limit,omitzero" minimum:"0" maximum:"100" default:"20"`
 }
 
 type PersonSearchResult struct {
@@ -115,7 +120,10 @@ func (s *Server) registerPersonProfileRoutes(api huma.API) {
 
 	create := rawAPIV1Operation("createPerson", http.MethodPost, "/people", "Promote a participant cluster to a durable person")
 	create.Description = "Returns 201 when a new person is created, or 200 when the cluster is already " +
-		"represented by a person (idempotent re-promotion, which also binds any unbound cluster members)."
+		"represented by a person (idempotent re-promotion, which also binds any unbound cluster members). " +
+		"New profiles default to the first nonblank observed cluster name by participant ID. " +
+		"An explicit display_name takes precedence; an empty or whitespace-only string leaves the name unset. " +
+		"Omitted or null uses the default. Re-promotion preserves the existing name, including a cleared name."
 	create.RequestBody = jsonRequestBodyFor[CreatePersonRequest](api)
 	create.Responses = jsonResponsesFor[store.Person](api, http.StatusOK, http.StatusCreated)
 	addPersonETagHeader(create.Responses[httpStatusKey(http.StatusOK)])
@@ -129,6 +137,17 @@ func (s *Server) registerPersonProfileRoutes(api huma.API) {
 	addPersonETagHeader(get.Responses[httpStatusKey(http.StatusOK)])
 	addErrorResponses(api, get.Responses, http.StatusNotFound, http.StatusServiceUnavailable)
 	registerRawHumaRoute(api, get, s.handleGetPersonProfile)
+
+	getByUID := rawAPIV1Operation("getPersonByUID", http.MethodGet,
+		"/people/by-uid", "Look up a durable person by vCard or CardDAV UID")
+	getByUID.Description = "Resolves the person's current vCard UID, a retired UID that still aliases the person, " +
+		"or the UID of a CardDAV resource mapped to the person. Returns a conflict when one remote UID maps to " +
+		"different people."
+	addPersonUIDParameter(&getByUID)
+	getByUID.Responses = jsonResponsesFor[store.Person](api)
+	addErrorResponses(api, getByUID.Responses, http.StatusBadRequest, http.StatusNotFound,
+		http.StatusConflict, http.StatusServiceUnavailable)
+	registerRawHumaRoute(api, getByUID, s.handleGetPersonByUID)
 
 	patch := rawAPIV1Operation("patchPerson", http.MethodPatch, "/people/{id}", "Update a durable person's display name")
 	addPersonIDParameter(&patch)
@@ -251,7 +270,9 @@ func (s *Server) handleCreatePerson(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_participant_id", "participant_id must be a positive integer")
 		return
 	}
-	person, created, err := profiles.CreatePersonFromParticipantContext(r.Context(), request.ParticipantID)
+	person, created, err := profiles.CreatePersonFromParticipantWithDisplayNameContext(
+		r.Context(), request.ParticipantID, request.DisplayName,
+	)
 	if err != nil {
 		s.writePersonError(w, err)
 		return
@@ -293,6 +314,24 @@ func (s *Server) handleGetPersonProfile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	person, err := profiles.GetPersonContext(r.Context(), id)
+	if err != nil {
+		s.writePersonError(w, err)
+		return
+	}
+	writePerson(w, http.StatusOK, person)
+}
+
+func (s *Server) handleGetPersonByUID(w http.ResponseWriter, r *http.Request) {
+	profiles, ok := s.personProfileStore(w)
+	if !ok {
+		return
+	}
+	uid := strings.TrimSpace(r.URL.Query().Get("uid"))
+	if uid == "" {
+		writeError(w, http.StatusBadRequest, "invalid_person_uid", "vCard UID must not be empty")
+		return
+	}
+	person, err := profiles.GetPersonByUIDContext(r.Context(), uid)
 	if err != nil {
 		s.writePersonError(w, err)
 		return
@@ -446,6 +485,8 @@ func (s *Server) writePersonError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, store.ErrPersonNotFound):
 		writeError(w, http.StatusNotFound, "person_profile_not_found", "Person profile not found")
+	case errors.Is(err, store.ErrPersonUIDAmbiguous):
+		writeError(w, http.StatusConflict, "person_uid_ambiguous", "UID is bound to multiple person profiles")
 	case errors.Is(err, store.ErrPersonRevisionConflict):
 		writeError(w, http.StatusConflict, "person_revision_conflict", "Person profile changed; reload and retry")
 	case errors.Is(err, store.ErrPersonBindingConflict):
@@ -483,6 +524,15 @@ func addPersonIDParameter(operation *huma.Operation) {
 	operation.Parameters = append(operation.Parameters, &huma.Param{
 		Name: "id", In: pathKey, Required: true, Description: "Durable person ID",
 		Schema: &huma.Schema{Type: huma.TypeInteger, Format: formatInt64},
+	})
+}
+
+func addPersonUIDParameter(operation *huma.Operation) {
+	minimumLength := 1
+	operation.Parameters = append(operation.Parameters, &huma.Param{
+		Name: "uid", In: "query", Required: true,
+		Description: "Exact vCard UID or CardDAV resource UID",
+		Schema:      &huma.Schema{Type: huma.TypeString, MinLength: &minimumLength},
 	})
 }
 
@@ -577,7 +627,7 @@ func decodePersonRequest(w http.ResponseWriter, r *http.Request, target any) boo
 
 func decodePersonRequestFields(
 	w http.ResponseWriter, r *http.Request, target any,
-) (map[string]json.RawMessage, bool) {
+) (map[string]jsontext.Value, bool) {
 	return decodeEntityRequestFields(w, r, target, "person")
 }
 
@@ -591,24 +641,24 @@ func decodeEntityRequest(w http.ResponseWriter, r *http.Request, target any, ent
 
 func decodeEntityRequestFields(
 	w http.ResponseWriter, r *http.Request, target any, entity string,
-) (map[string]json.RawMessage, bool) {
+) (map[string]jsontext.Value, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid "+entity+" request")
 		return nil, false
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	decoder := jsontext.NewDecoder(bytes.NewReader(body), json.RejectUnknownMembers(true))
+
+	if err := json.UnmarshalDecode(decoder, target); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid "+entity+" request: "+err.Error())
 		return nil, false
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := json.UnmarshalDecode(decoder, &struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "bad_request",
 			capitalizeASCII(entity)+" request must contain one JSON object")
 		return nil, false
 	}
-	var fields map[string]json.RawMessage
+	var fields map[string]jsontext.Value
 	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid "+entity+" request")
 		return nil, false

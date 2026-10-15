@@ -57,7 +57,7 @@ test('desktop operations journey restores filters, pages, opaque detail, history
   await page.getByRole('region', { name: 'Operation run detail' })
     .getByRole('button', { name: 'Open Sources status' }).click();
   await expect(page.getByRole('main', { name: 'Sources' })).toBeVisible();
-  await page.getByRole('button', { name: 'View source operations' }).click();
+  await page.getByRole('button', { name: 'Sync history' }).click();
   await expect(page.getByRole('main', { name: 'Operations' })).toBeVisible();
   await expect.poll(() => fixture.listQueries.at(-1)?.get('kind')).toBe('source_sync');
 });
@@ -75,4 +75,12 @@ test('narrow operations journey uses focused detail and returns focus to its row
   await expect(page.getByRole('region', { name: 'Operation lanes' })).toHaveCount(0);
   await page.getByRole('button', { name: 'Back to operation history' }).click();
   await expect(sourceRow).toBeFocused();
+});
+
+test('paused Operations filter can be selected', async ({ page }) => {
+  const fixture = await installOperations(page);
+  await page.goto(operationsURL());
+  await selectKitOption(page, 'State', 'Paused');
+  await expect.poll(() => fixture.listQueries.at(-1)?.get('state')).toBe('paused');
+  await expect(page.getByRole('combobox', { name: 'State: Paused' })).toBeVisible();
 });

@@ -10,6 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"go.kenn.io/msgvault/internal/agentgrant"
+	"go.kenn.io/msgvault/internal/apiprotocol"
+	"go.kenn.io/msgvault/internal/config"
 	"golang.org/x/time/rate"
 )
 
@@ -63,6 +66,7 @@ const (
 	ifMatchHeaderName   = "If-Match"
 	headerParamLocation = "header"
 	pathKey             = "path"
+	nameKey             = "name"
 
 	// formatInt64 is the OpenAPI schema format for 64-bit identifiers.
 	formatInt64 = "int64"
@@ -235,6 +239,8 @@ type requestAuthentication struct {
 	// the caller's role may allow a mutation, the token does not.
 	WriteDenied           bool
 	trustedForCLIDuration bool
+	Grant                 *agentgrant.Grant
+	RemoteClient          *config.RemoteClientConfig
 }
 
 func (s *Server) requestAuthentication(r *http.Request) requestAuthentication {
@@ -245,10 +251,22 @@ func (s *Server) requestAuthentication(r *http.Request) requestAuthentication {
 }
 
 func (s *Server) classifyAPIRequestDirect(r *http.Request) requestAuthentication {
+	// Agent token takes priority: if the header is present, the request must
+	// authenticate as a delegated caller; we never fall through to other modes.
+	if agentVal, agentPresent := agentTokenHeaderValue(r); agentPresent {
+		if s.agentGrants == nil || agentVal == "" || ownerCredentialPresented(r) {
+			return requestAuthentication{Mode: AuthModeRequired}
+		}
+		if grant, ok := s.agentGrants.Lookup(agentVal); ok {
+			return requestAuthentication{Mode: AuthModeDelegated, Grant: &grant}
+		}
+		return requestAuthentication{Mode: AuthModeRequired}
+	}
+
 	// Preserve the existing keyless mode: secure startup confines the daemon to
 	// loopback unless the operator explicitly opts into unauthenticated remote
 	// access, and every request remains authorized when no key is configured.
-	if s.cfg.Server.APIKey == "" {
+	if s.cfg.Server.AuthenticationKey() == "" {
 		return requestAuthentication{
 			Mode:                  AuthModeLoopback,
 			Principal:             authz.Loopback(),
@@ -276,6 +294,15 @@ func (s *Server) classifyAPIRequestDirect(r *http.Request) requestAuthentication
 	if auth, ok := s.classifyAccessToken(r, authHeader); ok {
 		return s.finishAuthentication(r, auth, false)
 	}
+	for i := range s.cfg.Server.RemoteClients {
+		if client := &s.cfg.Server.RemoteClients[i]; client.APIKey != "" && constantTimeAPIKeyEqual(authHeader, client.APIKey) {
+			return requestAuthentication{
+				Mode:                  AuthModeRemoteClient,
+				RemoteClient:          client,
+				trustedForCLIDuration: true,
+			}
+		}
+	}
 
 	if cookie, err := r.Cookie(sessionCookieName); err == nil && s.sessions != nil {
 		if session, ok := s.sessions.lookup(cookie.Value); ok {
@@ -290,8 +317,66 @@ func (s *Server) classifyAPIRequestDirect(r *http.Request) requestAuthentication
 	return requestAuthentication{Mode: AuthModeRequired}
 }
 
+// agentTokenHeaderValue returns the value of the agent token header and whether
+// it was present. Returns ("", true) if the header was present but empty or
+// duplicated (a failed claim); returns ("", false) if absent.
+func agentTokenHeaderValue(r *http.Request) (string, bool) {
+	vals := r.Header[http.CanonicalHeaderKey(apiprotocol.AgentTokenHeader)]
+	if len(vals) == 0 {
+		return "", false
+	}
+	if len(vals) != 1 || vals[0] == "" {
+		return "", true
+	}
+	return vals[0], true
+}
+
+// ownerCredentialPresented returns true if the request carries any credential
+// that could identify the owner: API key, Authorization header, session cookie,
+// or daemon runtime token.
+func ownerCredentialPresented(r *http.Request) bool {
+	if v := r.Header.Get("X-Api-Key"); v != "" {
+		return true
+	}
+	if v := r.Header.Get("Authorization"); v != "" {
+		return true
+	}
+	if _, err := r.Cookie(sessionCookieName); err == nil {
+		return true
+	}
+	if v := r.Header.Get(apiprotocol.DaemonRuntimeTokenHeader); v != "" {
+		return true
+	}
+	return false
+}
+
 func (s *Server) apiRequestAuthorized(r *http.Request) bool {
-	return s.requestAuthentication(r).Mode != AuthModeRequired
+	switch s.requestAuthentication(r).Mode {
+	case AuthModeLoopback, AuthModeAPIKey, AuthModeSession, AuthModeToken, AuthModeCaller:
+		return true
+	default:
+		return false
+	}
+}
+
+// requestGateEligible reports whether the request should participate in the
+// operation gate. Owner, session, and loopback requests register as waiters or
+// holders on any gated route. Delegated callers reach this predicate on
+// /api/v1/cli/run and /api/v1/calendar/control. CLI requests use
+// cliRunGateDecision; calendar control acquires the gate only for actual writes. Other
+// delegated reads use a SQL snapshot during scoped route admission.
+// Remote clients reach the gate only for collection writes they are granted.
+// Unauthenticated requests (AuthModeRequired) pass straight through so they
+// reach the API auth layer without touching gate state.
+func (s *Server) requestGateEligible(r *http.Request) bool {
+	auth := s.requestAuthentication(r)
+	if auth.Mode == AuthModeDelegated {
+		return r.URL.Path == "/api/v1/cli/run" || r.URL.Path == "/api/v1/calendar/control"
+	}
+	if auth.Mode == AuthModeRemoteClient {
+		return auth.RemoteClient.CollectionsWrite && strings.HasPrefix(r.URL.Path, "/api/v1/cli/collections")
+	}
+	return auth.Mode != AuthModeRequired
 }
 
 // RateLimitMiddleware returns a middleware that rate limits requests by IP.

@@ -23,24 +23,28 @@ const (
 )
 
 type PublicationView struct {
-	PersonID         int64
-	State            PublicationState
-	Desired          bool
-	PendingOperation store.CardDAVMutationOperation
-	AddressBook      *AddressBookIdentity
-	ConflictID       *int64
+	InferenceReviewRequired bool
+	PersonID                int64
+	State                   PublicationState
+	Desired                 bool
+	PendingOperation        store.CardDAVMutationOperation
+	AddressBook             *AddressBookIdentity
+	ConflictID              *int64
 }
 
 func (s *Service) ListBooks(ctx context.Context) ([]store.CardDAVAddressBook, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("CardDAV service is not configured")
 	}
-	return s.store.ListCardDAVAddressBooksContext(ctx)
+	return s.scopedBooks(ctx)
 }
 
 func (s *Service) SetBookRoles(ctx context.Context, bookID int64, roles BookRoles) error {
 	if s == nil || s.store == nil {
 		return errors.New("CardDAV service is not configured")
+	}
+	if err := s.requireOwnBook(ctx, bookID); err != nil {
+		return err
 	}
 	return s.store.SetCardDAVBookRolesContext(ctx, bookID, store.CardDAVBookRoles{
 		IsWriteTarget:  roles.WriteTarget,
@@ -62,7 +66,7 @@ func (s *Service) PublicationView(ctx context.Context, personID int64) (*Publica
 
 func publicationViewFromSource(source *store.CardDAVPublicationStateSource) *PublicationView {
 	personID := source.PersonID
-	view := &PublicationView{PersonID: personID, State: PublicationUnpublished}
+	view := &PublicationView{PersonID: personID, State: PublicationUnpublished, InferenceReviewRequired: source.InferenceReviewRequired}
 	if !source.HasPublication {
 		if source.ProspectiveBookID > 0 {
 			book := publicAddressBookIdentity(source.ProspectiveBookID, source.ProspectiveName)

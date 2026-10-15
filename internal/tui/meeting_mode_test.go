@@ -99,17 +99,22 @@ func TestMeetingAccountsExcludeUnrelatedSources(t *testing.T) {
 		query.AccountInfo{ID: 4, SourceType: "teams", Identifier: "team-chat"},
 		query.AccountInfo{ID: 5, SourceType: meetingSourceImported, Identifier: "local-meetings"},
 		query.AccountInfo{ID: 6, SourceType: meetingSourceNotion, Identifier: "notion-notes"},
+		query.AccountInfo{ID: 7, SourceType: "muesli", Identifier: "mac"},
+		query.AccountInfo{ID: 8, SourceType: "twilio", Identifier: "twilio-calls"},
 	).Build()
 
 	accounts := model.meetingAccounts()
 
-	require.Len(t, accounts, 4)
-	assert.Equal(t, []string{"work-notes", "team-meetings", "local-meetings", "notion-notes"}, []string{
+	require.Len(t, accounts, 6)
+	assert.Equal(t, []string{"work-notes", "team-meetings", "local-meetings", "notion-notes", "mac", "twilio-calls"}, []string{
 		accounts[0].Identifier,
 		accounts[1].Identifier,
 		accounts[2].Identifier,
 		accounts[3].Identifier,
+		accounts[4].Identifier,
+		accounts[5].Identifier,
 	})
+	assert.Equal(t, "Twilio", model.meetingSourceLabel(8))
 }
 
 func TestMeetingImportedSourceLabelUsesDisplayNameAndFallbacks(t *testing.T) {
@@ -122,6 +127,20 @@ func TestMeetingImportedSourceLabelUsesDisplayNameAndFallbacks(t *testing.T) {
 	assert.Equal(t, "Imported Interviews", model.meetingSourceLabel(5))
 	assert.Equal(t, "second-stream", model.meetingSourceLabel(6))
 	assert.Equal(t, "Imported", model.meetingSourceLabel(7))
+}
+
+func TestPlaudMeetingSourceIsSelectableAndLabeled(t *testing.T) {
+	assert := assert.New(t)
+	account := query.AccountInfo{ID: 8, SourceType: "plaud", Identifier: "personal"}
+	model := NewBuilder().WithAccounts(account).WithSize(100, 24).Build()
+	model.mode = modeMeetings
+	model.loading = false
+
+	assert.Equal([]query.AccountInfo{account}, model.selectableAccounts())
+	assert.Equal("Plaud", model.meetingSourceLabel(account.ID))
+	assert.NotContains(stripANSI(model.renderView()), "No meeting sources configured")
+	model.openAccountSelector()
+	assert.Contains(stripANSI(model.renderAccountSelectorModal()), "personal")
 }
 
 func TestMeetingAccountSelectorUsesMeetingSources(t *testing.T) {
@@ -1394,4 +1413,16 @@ func TestModeKeyReachesMeetings(t *testing.T) {
 		assert.True(t, handled)
 		assert.Equal(t, modeMeetings, updated.mode)
 	})
+}
+
+func TestOmiMeetingAccounts(t *testing.T) {
+	assert := assert.New(t)
+	model := NewBuilder().WithAccounts(query.AccountInfo{ID: 11, SourceType: "omi", Identifier: "omi-work"}).WithSize(100, 24).Build()
+	accounts := model.meetingAccounts()
+	require.Len(t, accounts, 1)
+	assert.Equal("omi-work", accounts[0].Identifier)
+	assert.Equal("Omi", model.meetingSourceLabel(11))
+	sourceID := int64(11)
+	model.meetingState.sourceID = &sourceID
+	assert.Contains(stripANSI(model.meetingHeaderView()), "[Meetings] - Omi")
 }

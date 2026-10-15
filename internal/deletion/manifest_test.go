@@ -1132,7 +1132,7 @@ func TestManager_CheckpointCancelSerialize(t *testing.T) {
 	select {
 	case <-cancelDone:
 		require.FailNow("cancel ran while checkpoint held the lock")
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After(150 * time.Millisecond): //nolint:kennlint // absence check: the held manifest lock keeps cancel waiting
 	}
 
 	// Complete the checkpoint's atomic write, then release the lock.
@@ -1172,7 +1172,7 @@ func TestManager_WriteInProgressCheckpoint_Writes(t *testing.T) {
 	entries, err := os.ReadDir(mgr.InProgressDir())
 	require.NoError(err, "ReadDir")
 	for _, e := range entries {
-		assert.False(strings.HasSuffix(e.Name(), ".tmp"), "leftover temp file %s", e.Name())
+		assert.False(strings.HasPrefix(e.Name(), "."), "leftover temp file %s", e.Name())
 	}
 }
 

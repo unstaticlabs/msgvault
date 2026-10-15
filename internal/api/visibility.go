@@ -318,3 +318,55 @@ func writeScopeError(w http.ResponseWriter, err error) bool {
 	}
 	return false
 }
+
+// requireVisibleMessage checks source authority before optional message adapters
+// read provider tags, recordings, or any other message-specific content.
+func (s *Server) requireVisibleMessage(w http.ResponseWriter, r *http.Request, id int64) bool {
+	if !s.requestPrincipal(r).Scoped() {
+		return true
+	}
+	engine := s.queryEngineForContext(r.Context())
+	if engine == nil {
+		writeError(w, http.StatusServiceUnavailable, "scope_unavailable", "Scoped access needs the analytics engine")
+		return false
+	}
+	message, err := engine.GetMessage(r.Context(), id)
+	if err != nil {
+		if !s.writeIfContextError(w, err) {
+			writeError(w, http.StatusServiceUnavailable, "scope_unavailable", "Message visibility could not be checked")
+		}
+		return false
+	}
+	if message == nil {
+		writeError(w, http.StatusNotFound, "not_found", "Message not found")
+		return false
+	}
+	return true
+}
+
+// visibleSources intersects an explicit request with the authenticated user's
+// sources. The impossible ID keeps an empty scope from becoming an all-source query.
+func visibleSources(ctx context.Context, requested []int64) []int64 {
+	principal := principalFromContext(ctx)
+	if !principal.Scoped() {
+		return requested
+	}
+	permitted := make(map[int64]bool, len(principal.VisibleSourceIDs))
+	for _, id := range principal.VisibleSourceIDs {
+		permitted[id] = true
+	}
+	ids := principal.VisibleSourceIDs
+	if requested != nil {
+		ids = requested
+	}
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if permitted[id] {
+			out = append(out, id)
+		}
+	}
+	if len(out) == 0 {
+		return []int64{-1}
+	}
+	return out
+}

@@ -1,6 +1,7 @@
 package query
 
 import (
+	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
 	"time"
 )
@@ -61,15 +62,17 @@ const (
 
 // Context narrows the archive and supplies server-side work-item authority.
 type Context struct {
-	RowUnit          RowUnit            `json:"row_unit,omitempty"`
-	WorkAuthorityKey string             `json:"-"`
-	HandlingStates   []string           `json:"handling_states,omitempty"`
-	InboxStates      []string           `json:"inbox_states,omitempty"`
-	ReadStates       []string           `json:"read_states,omitempty"`
-	SourceIDs        []int64            `json:"source_ids,omitempty"`
-	ParticipantIDs   []int64            `json:"participant_ids,omitempty"`
-	Domains          []string           `json:"domains,omitempty"`
-	Identity         *IdentityPredicate `json:"-"`
+	RowUnit          RowUnit               `json:"row_unit,omitempty"`
+	WorkAuthorityKey string                `json:"-"`
+	HandlingStates   []string              `json:"handling_states,omitempty"`
+	InboxStates      []string              `json:"inbox_states,omitempty"`
+	ReadStates       []string              `json:"read_states,omitempty"`
+	AccountScopes    []search.AccountScope `json:"account_scopes,omitempty"`
+
+	SourceIDs      []int64            `json:"source_ids,omitempty"`
+	ParticipantIDs []int64            `json:"participant_ids,omitempty"`
+	Domains        []string           `json:"domains,omitempty"`
+	Identity       *IdentityPredicate `json:"-"`
 	// AdditionalParticipantGroups holds extra participant filters beyond the
 	// primary ParticipantIDs group. Each inner slice is OR'd internally (any
 	// member matches) but the groups themselves are AND'd together, and
@@ -151,8 +154,8 @@ type SortSpec struct {
 }
 
 type PageSpec struct {
-	Limit  int `json:"limit,omitempty"`
-	Offset int `json:"offset,omitempty"`
+	Limit  int `json:"limit,omitzero"`
+	Offset int `json:"offset,omitzero"`
 }
 
 type EntryKind string
@@ -167,14 +170,14 @@ const (
 )
 
 type MatchSummary struct {
-	LexicalMatchCount *int64   `json:"lexical_match_count,omitempty"`
+	LexicalMatchCount *int64   `json:"lexical_match_count,omitzero" nullable:"false"`
 	StrongestExcerpt  string   `json:"strongest_excerpt,omitempty"`
-	SemanticScore     *float64 `json:"semantic_score,omitempty"`
+	SemanticScore     *float64 `json:"semantic_score,omitzero" nullable:"false"`
 }
 
 type SearchProvenance struct {
 	LexicalIndexRevision string `json:"lexical_index_revision,omitempty"`
-	VectorGeneration     *int64 `json:"vector_generation,omitempty"`
+	VectorGeneration     *int64 `json:"vector_generation,omitzero" nullable:"false"`
 }
 
 // EmailWorkSummary exposes scoped status without pretending provider unread or
@@ -196,8 +199,8 @@ type EntryRow struct {
 	ReadState                  string            `json:"read_state,omitempty" enum:"read,unread,unknown"`
 	Key                        string            `json:"key"`
 	Kind                       EntryKind         `json:"kind"`
-	AnchorMessageID            *int64            `json:"anchor_message_id,omitempty"`
-	ConversationID             *int64            `json:"conversation_id,omitempty"`
+	AnchorMessageID            *int64            `json:"anchor_message_id,omitzero" nullable:"false"`
+	ConversationID             *int64            `json:"conversation_id,omitzero" nullable:"false"`
 	OccurredAt                 time.Time         `json:"occurred_at"`
 	Match                      MatchSummary      `json:"match"`
 	SourceID                   int64             `json:"source_id"`
@@ -225,7 +228,7 @@ type EntryRow struct {
 	// message-relative sender cluster (see buildExploreSQL). It is nil when no
 	// owner can be identified or every participant on the entry is the owner:
 	// never guessed from participant_ids[0] alone.
-	CounterpartParticipantID *int64 `json:"counterpart_participant_id,omitempty"`
+	CounterpartParticipantID *int64 `json:"counterpart_participant_id,omitzero" nullable:"false"`
 }
 
 type ExploreResponse struct {
@@ -241,7 +244,7 @@ type ExploreResponse struct {
 // conversation rows.
 type ExploreCoverageRequest struct {
 	Context   Context `json:"context"`
-	BatchSize int     `json:"batch_size,omitempty"`
+	BatchSize int     `json:"batch_size,omitzero"`
 }
 
 // ExploreCoverageResult reports one full coverage scan: the set-wise

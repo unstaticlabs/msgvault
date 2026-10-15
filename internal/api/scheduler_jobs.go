@@ -7,8 +7,13 @@ import (
 	"go.kenn.io/msgvault/internal/gcal"
 	"go.kenn.io/msgvault/internal/granola"
 	"go.kenn.io/msgvault/internal/meetingimport"
+	"go.kenn.io/msgvault/internal/muesli"
 	"go.kenn.io/msgvault/internal/notionmeetings"
+	"go.kenn.io/msgvault/internal/omi"
+	"go.kenn.io/msgvault/internal/plaud"
 	"go.kenn.io/msgvault/internal/synctechsms"
+	"go.kenn.io/msgvault/internal/twenty"
+	"go.kenn.io/msgvault/internal/twilio"
 )
 
 type sourceScheduleKind uint8
@@ -30,6 +35,7 @@ type sourceScheduleClassification struct {
 const (
 	sourceTypeBeeper = "beeper"
 	sourceTypeGmail  = "gmail"
+	sourceTypeMatrix = "matrix"
 	sourceTypeSlack  = "slack"
 )
 
@@ -38,20 +44,31 @@ const (
 // beeper sync job under this exact name.
 const BeeperJobName = sourceTypeBeeper
 
+// MatrixJobName is the singleton scheduler job for all Matrix accounts.
+const MatrixJobName = sourceTypeMatrix
+
 // SlackJobName is the single generic-job name that drives the configured
 // Slack workspace source.
 const SlackJobName = sourceTypeSlack
 
-// CardDAVJobName is the stable singleton scheduler identity for the configured
-// CardDAV account.
+// CardDAVJobName is the scheduler identity for the default CardDAV connection.
 const CardDAVJobName = "carddav"
+
+// CardDAVJobNameForConnection keeps the legacy default job and gives named
+// connections independent scheduler identities. Names are validated on setup.
+func CardDAVJobNameForConnection(name string) string {
+	if name == "" || name == "default" {
+		return CardDAVJobName
+	}
+	return CardDAVJobName + ":" + name
+}
 
 // classifySourceScheduling determines which scheduler, if any, may operate a
 // store source. Account scheduling is opt-in so imported or unknown source
 // types cannot borrow a scheduled account merely by sharing its identifier.
 func classifySourceScheduling(sourceType, identifier string) sourceScheduleClassification {
 	switch sourceType {
-	case "", sourceTypeGmail, "imap", "teams", "discord":
+	case "", sourceTypeGmail, "imap", "msmail", "teams", "discord":
 		return sourceScheduleClassification{kind: sourceScheduleAccount}
 	case meetingimport.SourceType:
 		return sourceScheduleClassification{kind: sourceScheduleNonSchedulable}
@@ -92,21 +109,35 @@ func SchedulerJobNameForSource(sourceType, identifier string) (string, bool) {
 			return "", false
 		}
 		return gcalJobName(email), true
+	case omi.SourceType:
+		return "omi:" + identifier, true
 	case granola.SourceType:
 		// Store identifier == config Identifier (see
 		// internal/granola/importer.go GetOrCreateSource call).
 		return "granola:" + identifier, true
+	case plaud.SourceType:
+		return "plaud:" + identifier, true
 	case circleback.SourceType:
 		// Store identifier == config Identifier (see
 		// internal/circleback/importer.go GetOrCreateSource call).
 		return "circleback:" + identifier, true
 	case notionmeetings.SourceType:
 		return "notion-meetings:" + identifier, true
+	case twilio.SourceType:
+		return "twilio:" + identifier, true
+	case twenty.SourceType:
+		return "twenty:" + identifier, true
+	case muesli.SourceType:
+		// Store identifier == config Identifier (see
+		// internal/muesli/importer.go GetSourceByTypeAndIdentifier call).
+		return "muesli:" + identifier, true
 	case sourceTypeBeeper:
 		// One scheduler job syncs every beeper source (see
 		// internal/beeper/importer.go GetOrCreateSource, one store source
 		// per beeper AccountID, all driven by the singleton "beeper" job).
 		return BeeperJobName, true
+	case sourceTypeMatrix:
+		return MatrixJobName, true
 	case sourceTypeSlack:
 		// One configured Slack workspace maps to one store source and one
 		// singleton daemon job.

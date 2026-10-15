@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"strings"
@@ -31,28 +31,53 @@ type DiscordPendingAttachmentMessage = PendingAttachmentMessage
 // attachment rows, regardless of whether every row is already downloaded.
 type DiscordAttachmentMessage = PendingAttachmentMessage
 
-func (s *Store) replaceMessageProviderAttachments(messageID int64, providerPrefix string, refs []AttachmentRef) error {
-	return s.replaceMessageAttachmentsWhere(
+func (s *Store) replaceMessageProviderAttachmentsContext(ctx context.Context, messageID int64, providerPrefix string, refs []AttachmentRef) error {
+	return s.replaceMessageAttachmentsWhereContext(ctx,
 		messageID, `source_attachment_id LIKE ?`, false, refs, providerPrefix+"%",
 	)
 }
 
 func (s *Store) messageProviderAttachments(messageID int64, providerPrefix string) (map[string]AttachmentRef, error) {
-	rows, err := s.db.Query(`
-		SELECT COALESCE(filename, ''), COALESCE(mime_type, ''), storage_path, COALESCE(content_hash, ''), size, source_attachment_id,
+	return s.messageProviderAttachmentsContext(context.Background(), messageID, providerPrefix)
+}
+
+// messageProviderAttachmentsContext honors cancellation during messageProviderAttachments.
+func (s *Store) messageProviderAttachmentsContext(ctx context.Context, messageID int64, providerPrefix string) (map[string]AttachmentRef, error) {
+	refs, err := s.messageAttachmentsWhere(ctx, messageID, `source_attachment_id LIKE ?`, providerPrefix+"%")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]AttachmentRef, len(refs))
+	for _, ref := range refs {
+		out[ref.SourceAttachmentID] = ref
+	}
+	return out, nil
+}
+
+// MessageMIMEAttachmentsContext returns a message's MIME attachment rows in
+// row order, including pending and skipped occurrences.
+func (s *Store) MessageMIMEAttachmentsContext(ctx context.Context, messageID int64) ([]AttachmentRef, error) {
+	return s.messageAttachmentsWhere(ctx, messageID, `source_attachment_id IS NULL`)
+}
+
+func (s *Store) messageAttachmentsWhere(ctx context.Context, messageID int64, where string, args ...any) ([]AttachmentRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(storage_path, ''), COALESCE(content_hash, ''),
+		       COALESCE(size, 0), COALESCE(source_attachment_id, ''),
 		       COALESCE(media_type, ''), COALESCE(width, 0), COALESCE(height, 0), COALESCE(duration_ms, 0),
-		       COALESCE(CAST(attachment_metadata AS TEXT), ''), attachment_role, role_source,
+		       COALESCE(CAST(attachment_metadata AS TEXT), ''), COALESCE(attachment_role, ''), COALESCE(role_source, ''),
 		       COALESCE(source_part_key, ''), COALESCE(content_id, ''),
 		       COALESCE(attachment_state, ''), COALESCE(attachment_skip_reason, '')
 		FROM attachments
-		WHERE message_id = ? AND source_attachment_id LIKE ?
-	`, messageID, providerPrefix+"%")
+		WHERE message_id = ? AND `+where+`
+		ORDER BY id
+	`, append([]any{messageID}, args...)...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	out := map[string]AttachmentRef{}
+	var out []AttachmentRef
 	for rows.Next() {
 		var ref AttachmentRef
 		var size int64
@@ -65,7 +90,7 @@ func (s *Store) messageProviderAttachments(messageID int64, providerPrefix strin
 			return nil, err
 		}
 		ref.Size = int(size)
-		out[ref.SourceAttachmentID] = ref
+		out = append(out, ref)
 	}
 	return out, rows.Err()
 }
@@ -73,7 +98,14 @@ func (s *Store) messageProviderAttachments(messageID int64, providerPrefix strin
 func (s *Store) listRetryableAttachmentMessages(
 	sourceID int64, providerPrefix string, policy attachmentpolicy.Policy,
 ) ([]PendingAttachmentMessage, error) {
-	rows, err := s.db.Query(`
+	return s.listRetryableAttachmentMessagesContext(context.Background(), sourceID, providerPrefix, policy)
+}
+
+// listRetryableAttachmentMessagesContext honors cancellation during listRetryableAttachmentMessages.
+func (s *Store) listRetryableAttachmentMessagesContext(ctx context.Context,
+	sourceID int64, providerPrefix string, policy attachmentpolicy.Policy,
+) ([]PendingAttachmentMessage, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.id, m.source_message_id, c.source_conversation_id,
 		       c.conversation_type, COALESCE(c.participant_count, 0),
 		       COALESCE(a.attachment_state, ''), COALESCE(a.size, 0),
@@ -239,7 +271,12 @@ func (s *Store) ApplyBeeperRetryableAttachmentPolicy(
 
 // ListSlackRetryableAttachmentMessages returns only unfinished Slack media.
 func (s *Store) ListSlackRetryableAttachmentMessages(sourceID int64, policy attachmentpolicy.Policy) ([]PendingAttachmentMessage, error) {
-	return s.listRetryableAttachmentMessages(sourceID, "slack:", policy)
+	return s.ListSlackRetryableAttachmentMessagesContext(context.Background(), sourceID, policy)
+}
+
+// ListSlackRetryableAttachmentMessagesContext honors cancellation during ListSlackRetryableAttachmentMessages.
+func (s *Store) ListSlackRetryableAttachmentMessagesContext(ctx context.Context, sourceID int64, policy attachmentpolicy.Policy) ([]PendingAttachmentMessage, error) {
+	return s.listRetryableAttachmentMessagesContext(ctx, sourceID, "slack:", policy)
 }
 
 // ListDiscordRetryableAttachmentMessages returns only unfinished Discord media.
@@ -261,17 +298,27 @@ type ConversationMembership struct {
 
 // AttachmentConversation returns the archived context used by media policy.
 func (s *Store) AttachmentConversation(messageID int64) (attachmentpolicy.Conversation, error) {
-	membership, err := s.AttachmentConversationMembership(messageID)
+	return s.AttachmentConversationContext(context.Background(), messageID)
+}
+
+// AttachmentConversationContext honors cancellation during AttachmentConversation.
+func (s *Store) AttachmentConversationContext(ctx context.Context, messageID int64) (attachmentpolicy.Conversation, error) {
+	membership, err := s.AttachmentConversationMembershipContext(ctx, messageID)
 	return membership.Conversation, err
 }
 
 // AttachmentConversationMembership returns the archived context used by media
 // policy together with the state of the provider's membership record.
 func (s *Store) AttachmentConversationMembership(messageID int64) (ConversationMembership, error) {
+	return s.AttachmentConversationMembershipContext(context.Background(), messageID)
+}
+
+// AttachmentConversationMembershipContext honors cancellation during AttachmentConversationMembership.
+func (s *Store) AttachmentConversationMembershipContext(ctx context.Context, messageID int64) (ConversationMembership, error) {
 	var conversation attachmentpolicy.Conversation
 	var observedParticipants int
 	var sourceType, metadata string
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT c.conversation_type, COALESCE(c.participant_count, 0),
 		       (SELECT COUNT(DISTINCT cp.participant_id)
 		        FROM conversation_participants cp WHERE cp.conversation_id = c.id),
@@ -418,8 +465,9 @@ func (s *Store) listPendingAttachmentMessages(sourceID int64, providerPrefix str
 		      AND a.source_attachment_id LIKE ?
 		      AND (a.content_hash IS NULL OR a.content_hash = '')
 		      AND COALESCE(a.media_type, '') <> 'link'
+		      AND COALESCE(a.attachment_state, '') <> ?
 		  )
-	`, sourceID, providerPrefix+"%")
+	`, sourceID, providerPrefix+"%", attachmentpolicy.StateUnavailable)
 	if err != nil {
 		return nil, err
 	}
@@ -440,8 +488,96 @@ func (s *Store) listPendingAttachmentMessages(sourceID int64, providerPrefix str
 // Pending rows retain an observed CDN URL or deterministic provider sentinel.
 // Hashless rows with a trusted local CAS path are duplicate-content aliases.
 func (s *Store) ReplaceMessageDiscordAttachments(messageID int64, refs []AttachmentRef) error {
+	return s.ReplaceMessageDiscordAttachmentsContext(context.Background(), messageID, refs)
+}
+
+// ReplaceMessageDiscordAttachmentsContext honors cancellation during ReplaceMessageDiscordAttachments.
+func (s *Store) ReplaceMessageDiscordAttachmentsContext(ctx context.Context, messageID int64, refs []AttachmentRef) error {
 	refs = normalizeDiscordAttachmentRefs(refs)
-	return s.replaceMessageProviderAttachments(messageID, "discord:", refs)
+	return s.replaceMessageProviderAttachmentsContext(ctx, messageID, "discord:", refs)
+}
+
+// SetDiscordAttachmentMetadata refreshes only derived Discord attachment JSON.
+// It leaves media identity, storage, policy, and occurrence fields unchanged.
+func (s *Store) SetDiscordAttachmentMetadata(
+	messageID int64, metadata map[string]string,
+) (int64, error) {
+	return s.SetDiscordAttachmentMetadataContext(context.Background(), messageID, metadata)
+}
+
+// SetDiscordAttachmentMetadataContext honors cancellation during SetDiscordAttachmentMetadata.
+func (s *Store) SetDiscordAttachmentMetadataContext(ctx context.Context,
+	messageID int64, metadata map[string]string,
+) (int64, error) {
+	if len(metadata) == 0 {
+		var exists bool
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM attachments
+				WHERE message_id = ? AND source_attachment_id LIKE 'discord:%'
+				  AND attachment_metadata IS NOT NULL
+			)
+		`, messageID).Scan(&exists); err != nil {
+			return 0, fmt.Errorf("check Discord attachment metadata: %w", err)
+		}
+		if !exists {
+			return 0, nil
+		}
+	}
+
+	var changed int64
+	err := s.withTxContext(ctx, func(tx *loggedTx) error {
+		resetQuery := fmt.Sprintf(`
+			UPDATE attachments
+			SET attachment_metadata = %s
+			WHERE message_id = ? AND source_attachment_id LIKE 'discord:%%'
+			  AND (
+			      %s
+			  )
+		`, s.dialect.JSONBindExpr(), s.dialect.JSONIsDistinctExpr("attachment_metadata"))
+		resetArgs := []any{nullIfEmpty(""), messageID, nullIfEmpty("")}
+		if len(metadata) > 0 {
+			placeholders := strings.TrimSuffix(strings.Repeat("?,", len(metadata)), ",")
+			resetQuery += " AND source_attachment_id NOT IN (" + placeholders + ")"
+			for sourceAttachmentID := range metadata {
+				resetArgs = append(resetArgs, sourceAttachmentID)
+			}
+		}
+		result, err := tx.ExecContext(ctx, resetQuery, resetArgs...)
+		if err != nil {
+			return fmt.Errorf("clear stale Discord attachment metadata: %w", err)
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count stale Discord attachment metadata: %w", err)
+		}
+		changed += n
+
+		for sourceAttachmentID, value := range metadata {
+			result, err := tx.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE attachments
+				SET attachment_metadata = %s
+				WHERE message_id = ? AND source_attachment_id = ?
+				  AND %s
+			`, s.dialect.JSONBindExpr(), s.dialect.JSONIsDistinctExpr("attachment_metadata")),
+				nullIfEmpty(value), messageID, sourceAttachmentID, nullIfEmpty(value))
+			if err != nil {
+				return fmt.Errorf("update Discord attachment metadata %s: %w", sourceAttachmentID, err)
+			}
+			n, err := result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("count Discord attachment metadata %s: %w", sourceAttachmentID, err)
+			}
+			changed += n
+		}
+		if changed > 0 {
+			if err := s.bumpDerivedDataRevisionContext(ctx, tx, true); err != nil {
+				return fmt.Errorf("advance Discord attachment metadata revision: %w", err)
+			}
+		}
+		return nil
+	})
+	return changed, err
 }
 
 // normalizeDiscordAttachmentRefs fills deterministic pending markers and
@@ -507,7 +643,12 @@ func casPathHash(storagePath string) (string, bool) {
 
 // MessageDiscordAttachments returns Discord-managed rows keyed by source ID.
 func (s *Store) MessageDiscordAttachments(messageID int64) (map[string]AttachmentRef, error) {
-	refs, err := s.messageProviderAttachments(messageID, "discord:")
+	return s.MessageDiscordAttachmentsContext(context.Background(), messageID)
+}
+
+// MessageDiscordAttachmentsContext honors cancellation during MessageDiscordAttachments.
+func (s *Store) MessageDiscordAttachmentsContext(ctx context.Context, messageID int64) (map[string]AttachmentRef, error) {
+	refs, err := s.messageProviderAttachmentsContext(ctx, messageID, "discord:")
 	if err != nil {
 		return nil, err
 	}

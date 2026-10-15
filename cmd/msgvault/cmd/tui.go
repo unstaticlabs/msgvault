@@ -11,10 +11,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"go.kenn.io/msgvault/internal/api"
+	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonclient"
+	"go.kenn.io/msgvault/internal/logging"
 	"go.kenn.io/msgvault/internal/peoplebrowser"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/telemetry"
 	"go.kenn.io/msgvault/internal/tui"
+	apiclient "go.kenn.io/msgvault/pkg/client/generated"
 )
 
 var forceLocalTUI bool
@@ -75,13 +79,23 @@ HTTP Mode:
   Otherwise it starts or reuses the local daemon. Use --local to force the local
   daemon when a remote is configured.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		backend, err := openTUIBackend(cmd.Context())
+		state := invocationFromCommand(cmd)
+		if state == nil || state.cfg == nil {
+			return errors.New("configuration is unavailable")
+		}
+		currentCfg := state.cfg
+		currentLogResult := state.logResult
+		local, err := cmd.Flags().GetBool(localValue)
+		if err != nil {
+			return fmt.Errorf("read --local flag: %w", err)
+		}
+		backend, err := openTUIBackendWithLocal(withInvocation(cmd.Context(), state), local)
 		if err != nil {
 			return err
 		}
 		defer backend.cleanup()
 		if backend.info.Kind == HTTPStoreConfiguredRemote {
-			fmt.Printf("Connected to remote: %s\n", cfg.Remote.URL)
+			fmt.Printf("Connected to remote: %s\n", currentCfg.Remote.URL)
 		}
 
 		// The shipped daemon engine provides Texts directly. People uses the
@@ -98,8 +112,8 @@ HTTP Mode:
 		semanticSearch := tuiSemanticSearcher(cmd.Context(), backend.client, backend.engine)
 		collectionScopes := tuiCollectionScopes(cmd.Context(), backend.client, backend.engine)
 		model := tui.New(backend.engine, tui.Options{
-			DataDir:               cfg.Data.DataDir,
-			ExportDir:             cfg.ExportDir(),
+			DataDir:               currentCfg.Data.DataDir,
+			ExportDir:             currentCfg.ExportDir(),
 			Version:               Version,
 			TextEngine:            textEngine,
 			PeopleBackend:         peopleBackend,
@@ -109,6 +123,7 @@ HTTP Mode:
 			AnalyticsNotice:       notice,
 			SettingsBackend:       backend.settings,
 			CollectionScopeLister: collectionScopes,
+			ReportScreen:          tuiScreenReporter(backend.client),
 		})
 		p := tea.NewProgram(model)
 		noticeCtx, stopNoticeRefresh := context.WithCancel(cmd.Context())
@@ -128,18 +143,63 @@ HTTP Mode:
 		// the render. The daily log file still receives
 		// everything, so 'msgvault logs -f' in another pane
 		// continues to work for diagnostics.
-		prevLogger := slog.Default()
-		if logResult != nil {
-			slog.SetDefault(logResult.FileOnlyLogger())
-		}
-		defer slog.SetDefault(prevLogger)
-
-		if _, err := p.Run(); err != nil {
-			return fmt.Errorf("run tui: %w", err)
+		if err := withTUIFileLogger(currentLogResult, func() error {
+			started := time.Now()
+			_, err := p.Run()
+			if err == nil || errors.Is(err, tea.ErrInterrupted) {
+				reportTUISession(cmd.Context(), currentCfg, backend.info, time.Since(started))
+			}
+			if err != nil {
+				return fmt.Errorf("run tui: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
 
 		return nil
 	},
+}
+
+func reportTUISession(ctx context.Context, cfg *config.Config, info HTTPStoreInfo, duration time.Duration) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	clientConfig := daemonclient.Config{URL: info.URL, APIKey: httpStoreAPIKey(info, cfg), AllowInsecure: true}
+	if info.Kind == HTTPStoreConfiguredRemote {
+		clientConfig.AllowInsecure = cfg.Remote.AllowInsecure
+	}
+	client, err := newDaemonCLIClient(ctx, clientConfig)
+	if err != nil {
+		return
+	}
+	defer func() { _ = client.Close() }()
+	// daemonclient.New already built and cached the generated client.
+	generated, _ := client.GeneratedClient()
+	_, _ = generated.CaptureTelemetryEvent(ctx, &apiclient.CaptureTelemetryEventRequestOptions{
+		Body: &apiclient.CaptureTelemetryEventBody{Event: telemetry.EventSessionEnded, Properties: map[string]any{"surface": "tui", "duration_bucket": telemetry.DurationBucket(duration)}},
+	})
+}
+
+func tuiScreenReporter(client *daemonclient.Client) func(context.Context, string) error {
+	return func(ctx context.Context, screen string) error {
+		generated, err := client.GeneratedClient()
+		if err != nil {
+			return err
+		}
+		_, err = generated.CaptureTelemetryEvent(ctx, &apiclient.CaptureTelemetryEventRequestOptions{
+			Body: &apiclient.CaptureTelemetryEventBody{Event: "screen_viewed", Properties: map[string]any{"screen": screen, "surface": "tui"}},
+		})
+		return err
+	}
+}
+
+func withTUIFileLogger(result *logging.Result, run func() error) error {
+	previous := slog.Default()
+	if result != nil {
+		slog.SetDefault(result.FileOnlyLogger())
+	}
+	defer slog.SetDefault(previous)
+	return run()
 }
 
 func tuiSemanticSearcher(
@@ -162,11 +222,16 @@ func tuiSemanticSearcher(
 	return searcher
 }
 
+// tuiPeopleBackend returns the People backend for the selected daemon, or nil
+// when the daemon is too old to serve People at all. The brief routes arrived
+// later than People itself, so a daemon between the two schema versions gets a
+// backend without the brief surfaces: the People browser then hides the brief
+// rather than reporting a failed read on every contact.
 func tuiPeopleBackend(
 	ctx context.Context,
 	client *daemonclient.Client,
 	engine *daemonclient.Engine,
-) *daemonclient.PeopleBrowser {
+) peoplebrowser.Backend {
 	if client == nil || engine == nil {
 		return nil
 	}
@@ -174,13 +239,20 @@ func tuiPeopleBackend(
 	if err != nil || !compatible {
 		return nil
 	}
-	return daemonclient.NewPeopleBrowser(engine)
+	browser := daemonclient.NewPeopleBrowser(engine)
+	briefs, err := client.SupportsAPISchemaVersion(ctx, briefMinAPISchemaVersion)
+	if err != nil || !briefs {
+		return daemonclient.NewPeopleBrowserWithoutBriefs(browser)
+	}
+	return browser
 }
 
 const (
 	semanticSearchMinAPISchemaVersion   = "2.7.0"
 	peopleMinAPISchemaVersion           = "2.10.0"
+	directoryPeopleMinAPISchemaVersion  = "2.13.0"
 	collectionScopesMinAPISchemaVersion = "2.17.0"
+	briefMinAPISchemaVersion            = "2.20.0"
 	tuiSemanticMessageType              = "email"
 )
 
@@ -282,10 +354,22 @@ func refreshAnalyticsCacheNotice(
 }
 
 func openTUIBackend(ctx context.Context) (*tuiBackend, error) {
-	if forceLocalTUI {
-		previousUseLocal := useLocal
-		useLocal = true
-		defer func() { useLocal = previousUseLocal }()
+	state := invocationFromContext(ctx)
+	if state == nil {
+		return nil, errors.New("configuration is unavailable")
+	}
+	return openTUIBackendWithLocal(ctx, forceLocalTUI)
+}
+
+func openTUIBackendWithLocal(ctx context.Context, forceLocal bool) (*tuiBackend, error) {
+	if forceLocal {
+		inv := invocationFromContext(ctx)
+		if inv == nil {
+			return nil, errors.New("configuration is unavailable")
+		}
+		local := *inv
+		local.options.useLocal = true
+		ctx = withInvocation(ctx, &local)
 	}
 
 	st, info, err := OpenHTTPStore(ctx)

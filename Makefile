@@ -37,14 +37,21 @@ PG_TEST_PARALLEL ?= 4
 # `make test` and `make test-pg-shipped` still run every package.
 SHARDED_TEST_PKGS := ./cmd/msgvault/cmd ./internal/store ./internal/api
 TEST_SHARDS ?= 4
+TEST_PROFILE ?= auto
+# Only the automatic SQLite profile adds query and overlaps package jobs.
+SQLITE_SHARDED_TEST_PKGS := $(sort $(SHARDED_TEST_PKGS) ./internal/query)
+SQLITE_SHARD_TARGETS := $(addprefix test-sqlite-shard/,$(SQLITE_SHARDED_TEST_PKGS))
 GOLANGCI_LINT_VERSION ?= v2.14.0
 GOVULNCHECK_VERSION ?= v1.7.0
+HUMA_CHECK_VERSION := 3e1f59e9011e878ec595aa04aebc8a77c5292c4d
 GO_INSTALL_BIN := $(shell go env GOBIN)
 ifeq ($(strip $(GO_INSTALL_BIN)),)
 GO_INSTALL_BIN := $(shell go env GOPATH)/bin
 endif
 GOLANGCI_LINT_BIN := $(GO_INSTALL_BIN)/golangci-lint
 CI_TOOLS_BIN := $(shell git rev-parse --path-format=absolute --git-path ci-tools/bin)
+GOEXE := $(shell go env GOEXE)
+CUSTOM_GCL_BIN := $(CI_TOOLS_BIN)/custom-gcl$(GOEXE)
 GOVULNCHECK_BIN := $(CI_TOOLS_BIN)/govulncheck
 
 # Build tags for the PostgreSQL test lane (test-pg). Must be the full build set:
@@ -65,7 +72,8 @@ PG_TEST_TAGS := fts5 sqlite_vec pgvector
 # in both configurations, so test-pg-both runs just these in the shipped-build
 # configuration. Verified by `make pg-shipped-only-check`, which re-derives the
 # closure from `go list`.
-PG_SHIPPED_ONLY_PKGS := ./cmd/msgvault ./cmd/msgvault/cmd ./internal/api ./internal/mcp ./internal/scheduler ./internal/store ./internal/vector/chunkmatch ./internal/vector/document ./internal/vector/embed ./internal/vector/hybrid ./internal/vector/pgvector ./scripts/contextual-retrieval-eval
+NOCGO_LINT_PKGS := ./pkg/archive/... ./internal/postgresprofile/... ./internal/sqliteutil/... ./internal/duckdbutil/... ./internal/muesli/...
+PG_SHIPPED_ONLY_PKGS := ./cmd/msgvault ./cmd/msgvault/cmd ./internal/api ./internal/daemonclient ./internal/mcp ./internal/scheduler ./internal/store ./internal/vector/chunkmatch ./internal/vector/document ./internal/vector/embed ./internal/vector/hybrid ./internal/vector/pgvector ./internal/vector/sqlitevec ./pkg/archive ./scripts/contextual-retrieval-eval
 
 OPENAPI_ARTIFACTS := api/openapi.yaml pkg/client/openapi.yaml pkg/client/generated
 WEB_INSTALL_STAMP := web/node_modules/.msgvault-install-stamp
@@ -82,23 +90,38 @@ export GOLANGCI_LINT_CACHE
 # serialize one another while duplicate runners in one worktree can wait.
 GOLANGCI_LINT_TMP ?= $(GOLANGCI_LINT_CACHE)/tmp
 
-.PHONY: build build-release install clean test test-unsharded test-shards test-v test-pg test-pg-shipped test-pg-shipped-unsharded test-pg-both pg-shipped-only-check require-test-db fmt lint-tools lint lint-ci vuln-tools vulncheck testify-helper-check tidy openapi api-generate openapi-check api-check web-install web-generate web-check web-test web-test-browser web-e2e web-build web-embed web-assets-check smoke-web-release shootout run-shootout install-hooks bench vcard-registry-check vcard-registry-update docs-install docs-build docs-serve docs-check docs-fixture-test docs-fixture-check docs-fixture-smoke docs-web-screenshots docs-screenshots docs-assets-branch docs-generated-assets-branch docs-deploy-staging docs-deploy help
+.PHONY: build build-release install clean test test-unsharded test-shards test-v test-pg test-pg-shipped test-pg-shipped-unsharded test-pg-both pg-shipped-only-check require-test-db fmt lint-tools custom-gcl lint lint-ci vuln-tools vulncheck testify-helper-check tidy openapi api-generate openapi-check api-check web-install web-generate web-check web-test web-test-browser web-e2e web-build web-embed web-assets-check smoke-web-release shootout run-shootout install-hooks bench vcard-registry-check vcard-registry-update docs-install docs-build docs-serve docs-check docs-fixture-test docs-fixture-check docs-fixture-smoke docs-web-screenshots docs-screenshots docs-assets-branch docs-generated-assets-branch docs-deploy-staging docs-deploy help
 
 # Build the binary (debug)
 build: web-embed
-	CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS)" -o msgvault ./cmd/msgvault
-	@chmod +x msgvault
+ifeq ($(shell go env GOOS),linux)
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -o msgvault-codex-bridge ./cmd/msgvault-codex-bridge
+	chmod 755 msgvault-codex-bridge
+	@bridge_digest=$$(sha256sum msgvault-codex-bridge | cut -d' ' -f1); \
+		CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS) -X go.kenn.io/msgvault/internal/peoplesweep.codexBridgeSHA256=$$bridge_digest" -o msgvault$(GOEXE) ./cmd/msgvault
+else
+	CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS)" -o msgvault$(GOEXE) ./cmd/msgvault
+endif
+	@chmod +x msgvault$(GOEXE)
 
 # Build with optimizations (release)
 build-release: web-embed
-	CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS_RELEASE)" -trimpath -o msgvault ./cmd/msgvault
-	@chmod +x msgvault
+ifeq ($(shell go env GOOS),linux)
+	CGO_ENABLED=0 go build -trimpath -buildvcs=false -o msgvault-codex-bridge ./cmd/msgvault-codex-bridge
+	chmod 755 msgvault-codex-bridge
+	@bridge_digest=$$(sha256sum msgvault-codex-bridge | cut -d' ' -f1); \
+		CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS_RELEASE) -X go.kenn.io/msgvault/internal/peoplesweep.codexBridgeSHA256=$$bridge_digest" -trimpath -o msgvault$(GOEXE) ./cmd/msgvault
+else
+	CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS_RELEASE)" -trimpath -o msgvault$(GOEXE) ./cmd/msgvault
+endif
+	@chmod +x msgvault$(GOEXE)
 
 # Install to ~/.local/bin, $GOBIN, or $GOPATH/bin
-install: web-embed
-	@if [ -d "$(HOME)/.local/bin" ]; then \
-		echo "Installing to ~/.local/bin/msgvault"; \
-		CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS)" -o "$(HOME)/.local/bin/msgvault" ./cmd/msgvault; \
+install: build
+	@set -e; if [ -d "$(HOME)/.local/bin" ]; then \
+		echo "Installing to ~/.local/bin/msgvault$(GOEXE)"; \
+		install -m 755 msgvault$(GOEXE) "$(HOME)/.local/bin/msgvault$(GOEXE)"; \
+		if [ "$$(go env GOOS)" = linux ]; then install -m 755 msgvault-codex-bridge "$(HOME)/.local/bin/msgvault-codex-bridge"; fi; \
 	else \
 		INSTALL_DIR="$${GOBIN:-$$(go env GOBIN)}"; \
 		if [ -z "$$INSTALL_DIR" ]; then \
@@ -106,27 +129,56 @@ install: web-embed
 			INSTALL_DIR="$$GOPATH_FIRST/bin"; \
 		fi; \
 		mkdir -p "$$INSTALL_DIR"; \
-		echo "Installing to $$INSTALL_DIR/msgvault"; \
-		CGO_ENABLED=1 go build -tags "$(BUILD_TAGS)" -ldflags="$(LDFLAGS)" -o "$$INSTALL_DIR/msgvault" ./cmd/msgvault; \
+		echo "Installing to $$INSTALL_DIR/msgvault$(GOEXE)"; \
+		install -m 755 msgvault$(GOEXE) "$$INSTALL_DIR/msgvault$(GOEXE)"; \
+		if [ "$$(go env GOOS)" = linux ]; then install -m 755 msgvault-codex-bridge "$$INSTALL_DIR/msgvault-codex-bridge"; fi; \
 	fi
 
 # Clean build artifacts
 clean:
-	rm -f msgvault msgvault.exe mimeshootout
+	rm -f msgvault msgvault.exe msgvault-codex-bridge mimeshootout
 	rm -rf bin/
 
-# Run the full SQLite suite. The three largest packages run as shards after the
-# unsharded remainder so one test binary cannot set the full wall clock. CI runs
-# the same two parts as separate jobs.
+# Scale the SQLite suite when both CPU and memory budgets allow it. An explicit
+# TEST_SHARDS, a database URL, or TEST_PROFILE=standard keeps the existing layout.
 test:
+	@case "$(TEST_PROFILE)" in auto|standard) ;; *) echo "TEST_PROFILE must be auto or standard" >&2; exit 1 ;; esac; \
+	shards=0; \
+	if [ "$(TEST_PROFILE)" = auto ] && [ "$(origin TEST_SHARDS)" = file ] && [ -z "$(MSGVAULT_TEST_DB)" ]; then \
+		profile=$$(go run ./scripts/test-resources -packages $(words $(SQLITE_SHARDED_TEST_PKGS))) || exit $$?; \
+		set -- $$profile; shards=$$1; \
+	fi; \
+	if [ "$$shards" -gt 0 ]; then \
+		echo "SQLite tests: concurrent packages, $$shards shards per large package"; \
+		$(MAKE) -j$$(($(words $(SQLITE_SHARDED_TEST_PKGS)) + 1)) GOMAXPROCS=$$2 GOFLAGS="$(GOFLAGS) -p=1" \
+			test-unsharded $(SQLITE_SHARD_TARGETS) SHARDED_TEST_PKGS="$(SQLITE_SHARDED_TEST_PKGS)" \
+			TEST_SHARDS=$$shards TEST_REMAINDER_PARALLEL=$$3; \
+	else \
+		echo "Tests: standard package schedule, $(TEST_SHARDS) shards"; \
+		$(MAKE) test-standard; \
+	fi
+
+# Use an existing built binary when supplied, otherwise build the worktree CLI.
+.PHONY: test-cli-e2e
+test-cli-e2e:
+	@if [ -z "$(MSGVAULT_E2E_BINARY)" ]; then $(MAKE) build; fi
+	MSGVAULT_E2E_BINARY="$(if $(MSGVAULT_E2E_BINARY),$(MSGVAULT_E2E_BINARY),$(CURDIR)/msgvault$(GOEXE))" go test -timeout $(TEST_TIMEOUT) -tags "$(BUILD_TAGS)" ./cmd/msgvault/cmd -run '^TestSearchDiscoverabilityBuiltCLI$$' -count=1
+
+.PHONY: test-standard $(SQLITE_SHARD_TARGETS)
+test-standard:
 	$(MAKE) test-unsharded
 	$(MAKE) test-shards
+
+# These explicit goals let make own job waiting and error propagation. The
+# regular test-shards target remains sequential, including PostgreSQL callers.
+$(SQLITE_SHARD_TARGETS): test-sqlite-shard/%:
+	scripts/test-package-shards.sh $* $(TEST_SHARDS) "$(BUILD_TAGS)" $(TEST_TIMEOUT)
 
 # Everything except SHARDED_TEST_PKGS. CI's test lane runs this alongside the
 # sharded jobs; together they cover exactly what `make test` covers.
 test-unsharded:
 	@excluded=$$(go list $(SHARDED_TEST_PKGS) | sed 's/^/-e /' | tr '\n' ' '); \
-	go test -timeout $(TEST_TIMEOUT) -tags "$(BUILD_TAGS)" $$(go list ./... | grep -vxF $$excluded)
+	go test -timeout $(TEST_TIMEOUT) $(if $(TEST_REMAINDER_PARALLEL),-p $(TEST_REMAINDER_PARALLEL),) -tags "$(BUILD_TAGS)" $$(go list ./... | grep -vxF $$excluded)
 
 # SHARDED_TEST_PKGS, each as TEST_SHARDS concurrent processes. Same binary,
 # same tests, same per-package timeout; only the process boundary is new.
@@ -149,6 +201,12 @@ test-v:
 # See docs/internal/PG_STATUS.md for the supported feature surface.
 test-pg: require-test-db
 	go test -timeout $(TEST_TIMEOUT) -p $(PG_TEST_PARALLEL) -tags "$(PG_TEST_TAGS)" ./...
+
+# PostgreSQL-only library profile: no SQLite, DuckDB, or sqlite-vec driver.
+.PHONY: test-pg-nocgo
+test-pg-nocgo: require-test-db
+	CGO_ENABLED=0 go build ./internal/store ./internal/query ./internal/slack ./internal/discord ./internal/api
+	CGO_ENABLED=0 go test -timeout $(TEST_TIMEOUT) ./internal/postgresprofile ./pkg/archive
 
 # Run the SHIPPED build's tests against PostgreSQL (set MSGVAULT_TEST_DB first).
 # The released binary is built with BUILD_TAGS and no pgvector, so that build
@@ -248,7 +306,7 @@ api-generate:
 	set -e; tmp="$$(mktemp)"; trap 'rm -f "$$tmp"' EXIT; go run ./cmd/msgvault openapi > "$$tmp"; if [ -f api/openapi.yaml ] && cmp -s "$$tmp" api/openapi.yaml; then rm "$$tmp"; else mv "$$tmp" api/openapi.yaml; fi; trap - EXIT
 	set -e; tmp="$$(mktemp)"; trap 'rm -f "$$tmp"' EXIT; go run ./cmd/msgvault openapi --version 3.0 --format yaml > "$$tmp"; if [ -f pkg/client/openapi.yaml ] && cmp -s "$$tmp" pkg/client/openapi.yaml; then rm "$$tmp"; else mv "$$tmp" pkg/client/openapi.yaml; fi; trap - EXIT
 	cd pkg/client/generated && find . -maxdepth 1 -type f -name '*.go' ! -name 'generate.go' -delete && go tool -modfile=../../../tools/oapi-codegen/go.mod oapi-codegen -config config.yaml ../openapi.yaml
-	go run ./internal/codegenfix/cmd pkg/client/generated/types.go
+	go run ./internal/codegenfix/cmd pkg/client/generated/types.go pkg/client/generated/client.go
 
 openapi-check: api-generate
 	@git diff --exit-code -- $(OPENAPI_ARTIFACTS) || (echo "OpenAPI generated assets are stale; run 'make api-generate' and commit the changes." >&2; exit 1)
@@ -282,13 +340,15 @@ web-check: web-install
 web-test:
 	cd web && bun run test
 
-web-test-browser:
+# test:browser runs everything under web/tests, including tests/e2e specs
+# whose fixtures spawn the repo-root msgvault daemon, so the binary must
+# exist before Playwright starts. Same invariant as web-e2e below.
+web-test-browser: build
 	cd web && bun run test:browser
 
-# Task 20 browser gates use the same digest-pinned Playwright environment as
-# web-test-browser in CI. Traces, screenshots, and video are retained only for
-# failures by web/playwright.config.ts.
-web-e2e:
+# Browser gates use the same digest-pinned Playwright environment as CI.
+# Build the real daemon and embedded UI before Playwright test timeouts start.
+web-e2e: build
 	cd web && bun run test:e2e
 
 web-build: web-generate
@@ -319,23 +379,52 @@ smoke-web-release:
 fmt:
 	go fmt ./...
 
-# Install the pinned linter used by CI.
+# Install the pinned linter used by CI; lint-ci runs this first, so skip it when already installed.
 lint-tools:
+	@if [ "$$("$(GOLANGCI_LINT_BIN)" version --short 2>/dev/null)" = "$(GOLANGCI_LINT_VERSION:v%=%)" ]; then exit 0; fi; \
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
-# Run linter (auto-fix)
-lint:
-	@if ! command -v golangci-lint >/dev/null 2>&1; then \
-		echo "golangci-lint not found. Install: https://golangci-lint.run/usage/install/" >&2; \
-		exit 1; \
-	fi
-	@mkdir -p "$(GOLANGCI_LINT_TMP)"
-	TMPDIR="$(GOLANGCI_LINT_TMP)" golangci-lint run --fix ./...
+# Build golangci-lint with the plugins in .custom-gcl.yml into the
+# repository-owned tool path. Strip repo-local Git variables so a build run
+# from the commit hook does not inherit GIT_DIR. An existing binary is reused
+# while it is newer than .custom-gcl.yml and reports GOLANGCI_LINT_VERSION.
+custom-gcl: lint-tools
+	@if [ -x "$(CUSTOM_GCL_BIN)" ] && [ "$(CUSTOM_GCL_BIN)" -nt .custom-gcl.yml ]; then case "$$("$(CUSTOM_GCL_BIN)" version --short 2>/dev/null)" in "$(GOLANGCI_LINT_VERSION)"-custom-gcl-*) exit 0;; esac; fi; \
+	mkdir -p "$(CI_TOOLS_BIN)"; \
+	unset_args=$$(git rev-parse --local-env-vars 2>/dev/null | sed 's/^/-u /' | tr '\n' ' '); \
+	env $$unset_args GOFLAGS=-buildvcs=false "$(GOLANGCI_LINT_BIN)" custom \
+		--destination "$(CI_TOOLS_BIN)" --name custom-gcl \
+		--version "$(GOLANGCI_LINT_VERSION)"
 
-# Run linter (CI, no auto-fix)
-lint-ci: lint-tools testify-helper-check
+# Run linter (auto-fix)
+lint: custom-gcl
 	@mkdir -p "$(GOLANGCI_LINT_TMP)"
-	TMPDIR="$(GOLANGCI_LINT_TMP)" "$(GOLANGCI_LINT_BIN)" run ./...
+	TMPDIR="$(GOLANGCI_LINT_TMP)" "$(CUSTOM_GCL_BIN)" run --fix ./...
+
+# Check the shared Huma API contract.
+# The dedicated adapter targets a foreign host even when its route matches this API.
+huma-check:
+	@go run go.kenn.io/kit/cmd/huma-check@$(HUMA_CHECK_VERSION) -h >/dev/null 2>&1 || :; \
+	status=0; out=$$(go run go.kenn.io/kit/cmd/huma-check@$(HUMA_CHECK_VERSION) ./... 2>&1) || status=$$?; \
+	if [ $$status -eq 1 ] && printf '%s\n' "$$out" | awk ' \
+		/^internal[\\\/]docbankmedia[\\\/][^\\\/]+\.go:[1-9][0-9]*:[1-9][0-9]*: hand-rolled HTTP request to this module\047s own Huma route \/[^ ;]*; call it through the generated API client \(client\)$$/ { foreign++; next } \
+		$$0 == "exit status 1" && !wrapper { wrapper = 1; next } \
+		{ bad = 1 } \
+		END { exit !(foreign && wrapper && !bad) }'; then \
+		echo "huma-check: accepted foreign-service client diagnostics in internal/docbankmedia"; \
+	else \
+		[ -z "$$out" ] || printf '%s\n' "$$out"; exit $$status; \
+	fi
+
+.PHONY: huma-check
+
+# Run linter (CI, no auto-fix). The second pass lints the files that only the
+# PostgreSQL-only CGO_ENABLED=0 build compiles. It covers the packages whose
+# tests also build without CGO; the others' tests need the SQLite driver.
+lint-ci: custom-gcl testify-helper-check
+	@mkdir -p "$(GOLANGCI_LINT_TMP)"
+	TMPDIR="$(GOLANGCI_LINT_TMP)" "$(CUSTOM_GCL_BIN)" run ./...
+	CGO_ENABLED=0 TMPDIR="$(GOLANGCI_LINT_TMP)" "$(CUSTOM_GCL_BIN)" run $(NOCGO_LINT_PKGS)
 	@if [ -n "$$GITHUB_PATH" ]; then \
 		$(MAKE) --no-print-directory vuln-tools; \
 		printf '%s\n' "$(CI_TOOLS_BIN)" >> "$$GITHUB_PATH"; \
@@ -354,7 +443,7 @@ vulncheck: vuln-tools
 testify-helper-check:
 	go run ./cmd/testify-helper-check -tags="$(BUILD_TAGS)" ./...
 
-# Install pre-commit hook via prek
+# Install pre-commit and pre-push hooks via prek
 install-hooks:
 	@if ! command -v prek >/dev/null 2>&1; then \
 		echo "prek not found. Install with: brew install prek" >&2; \
@@ -428,13 +517,18 @@ docs-assets-branch:
 docs-generated-assets-branch:
 	bash docs/screenshots/update-generated-assets-branch.sh
 
+# Build locally so the sibling website/ directory is available to both deploys.
 # Deploy docs to Vercel staging
 docs-deploy-staging:
-	cd docs && vercel
+	cd docs && vercel pull --yes --environment=preview
+	cd docs && vercel build
+	cd docs && vercel deploy --prebuilt
 
 # Deploy docs to Vercel production
 docs-deploy:
-	cd docs && vercel --prod
+	cd docs && vercel pull --yes --environment=production
+	cd docs && vercel build --prod
+	cd docs && vercel deploy --prebuilt --prod
 
 # Build the MIME shootout tool
 shootout:
@@ -452,8 +546,9 @@ help:
 	@echo "  build-release  - Release build (optimized, stripped)"
 	@echo "  install        - Install to ~/.local/bin or GOPATH"
 	@echo ""
-	@echo "  test           - Run tests"
+	@echo "  test           - Run SQLite tests with automatic CPU/memory scaling (TEST_PROFILE=standard disables)"
 	@echo "  test-v         - Run tests (verbose)"
+	@echo "  test-cli-e2e    - Build and test the CLI on a synthetic archive"
 	@echo "  test-shards    - Run SHARDED_TEST_PKGS as TEST_SHARDS concurrent processes each"
 	@echo "  test-unsharded - Run every package except SHARDED_TEST_PKGS (CI's test lane)"
 	@echo "  fmt            - Format code"
@@ -476,7 +571,7 @@ help:
 	@echo "  web-embed      - Build, stage, and validate browser assets for Go embedding"
 	@echo "  web-assets-check - Validate the release asset graph and run the validator's tests"
 	@echo "  smoke-web-release - Build and exercise an isolated release-style daemon"
-	@echo "  install-hooks  - Install pre-commit hook via prek"
+	@echo "  install-hooks  - Install pre-commit and pre-push hooks via prek"
 	@echo "  clean          - Remove build artifacts"
 	@echo ""
 	@echo "  docs-install   - Install docs dependencies"

@@ -82,7 +82,7 @@ func (e *pgEngine) GetDeletionTargetsByAggregateSearch(
 // explicitly.
 func (e *pgEngine) SearchMessageBodies(
 	ctx context.Context, q *search.Query, limit, offset int,
-) ([]MessageSummary, error) {
+) (*SearchFastResult, error) {
 	bodySearcher, ok := e.Engine.(MessageBodySearcher)
 	if !ok {
 		return nil, ErrMessageBodySearchUnavailable
@@ -113,4 +113,42 @@ func NewEngine(db *sql.DB, isPostgres bool) Engine {
 		return NewPostgreSQLEngine(db)
 	}
 	return NewSQLiteEngine(db)
+}
+
+var _ OriginalMessageReader = (*pgEngine)(nil)
+
+// ReadOriginalMessage forwards to the dialect-parameterized engine; its SQL
+// is portable across SQLite and PostgreSQL.
+func (e *pgEngine) ReadOriginalMessage(ctx context.Context, ref MessageRef, maxBytes int64) (*OriginalMessage, error) {
+	reader, ok := e.Engine.(OriginalMessageReader)
+	if !ok {
+		return nil, ErrOriginalExportUnsupported
+	}
+	return reader.ReadOriginalMessage(ctx, ref, maxBytes)
+}
+
+// ResolveMessageID forwards to the dialect-parameterized engine.
+func (e *pgEngine) ResolveMessageID(ctx context.Context, ref string) (int64, string, error) {
+	resolver, ok := e.Engine.(MessageIDResolver)
+	if !ok {
+		return 0, "", ErrOriginalExportUnsupported
+	}
+	return resolver.ResolveMessageID(ctx, ref)
+}
+
+// ListThread forwards to the dialect-parameterized engine.
+func (e *pgEngine) ListThread(ctx context.Context, q ThreadQuery) (*ThreadPage, error) {
+	reader, ok := e.Engine.(OriginalMessageReader)
+	if !ok {
+		return nil, ErrOriginalExportUnsupported
+	}
+	return reader.ListThread(ctx, q)
+}
+
+func (e *pgEngine) ReadOriginalMessageForSources(ctx context.Context, ref MessageRef, maxBytes int64, sourceIDs []int64) (*OriginalMessage, error) {
+	reader, ok := e.Engine.(SourceOriginalMessageReader)
+	if !ok {
+		return nil, ErrOriginalExportUnsupported
+	}
+	return reader.ReadOriginalMessageForSources(ctx, ref, maxBytes, sourceIDs)
 }

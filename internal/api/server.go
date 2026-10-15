@@ -21,14 +21,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.kenn.io/kit/telemetry/posthog"
+	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/apiprotocol"
 	"go.kenn.io/msgvault/internal/authn/oidc"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonauth"
 	"go.kenn.io/msgvault/internal/operations"
+	"go.kenn.io/msgvault/internal/personagenda"
 	"go.kenn.io/msgvault/internal/providercredentials"
 	"go.kenn.io/msgvault/internal/provideridentity"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/remoteimage"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
@@ -49,6 +53,11 @@ type MessageStore interface {
 	GetMessagesSummariesByIDs(ids []int64) ([]APIMessage, error)
 	SearchMessages(query string, offset, limit int) ([]APIMessage, int64, error)
 	SearchMessagesQuery(q *search.Query, offset, limit int) ([]APIMessage, int64, error)
+	// Successful searches return a non-nil ID slice even with no matches;
+	// Explore interprets nil candidate IDs as an unrestricted population.
+	SearchMessageIDsQueryContext(
+		ctx context.Context, q *search.Query, limit int,
+	) ([]int64, int64, error)
 }
 
 // MessageIdentityStore is the optional source-identity extension used by
@@ -69,6 +78,14 @@ type TaskLinkOperations interface {
 
 type TaskIdentityResolver func(context.Context, *APIMessage) (tasklinks.MessageIdentity, error)
 
+type PersonAgendaOperations interface {
+	List(ctx context.Context, personID int64) (personagenda.Result, error)
+	Create(ctx context.Context, personID int64, idempotencyKey string, input personagenda.CreateInput) (personagenda.Item, error)
+	Link(ctx context.Context, personID int64, taskID, list string) (personagenda.Item, error)
+	Update(ctx context.Context, personID int64, taskID string, input personagenda.UpdateInput) (personagenda.Item, error)
+	Unlink(ctx context.Context, personID int64, taskID string) (personagenda.Item, error)
+}
+
 // ctxMessageSearcher is an optional extension of MessageStore for stores that
 // accept a context on the search path. handleSearch prefers it so an
 // abandoned or timed-out request cancels the underlying query instead of
@@ -83,17 +100,18 @@ type ctxMessageSearcher interface {
 // accept a context on the non-search read paths. Request handlers prefer it so
 // the request_id carried on r.Context() (via store.WithRequestID) reaches every
 // request-owned SQL query for slow/error logging, and so an abandoned request
-// cancels the underlying queries. Stores that predate it fall back to the
-// non-context methods.
+// cancels the underlying queries. Shared stats refreshes retain the initiating
+// request's ID but use the server lifetime for cancellation. Stores that predate
+// it fall back to the non-context methods.
 type CtxMessageStore interface {
 	GetStatsContext(ctx context.Context) (*StoreStats, error)
-	ListMessagesContext(ctx context.Context, offset, limit int) ([]APIMessage, int64, error)
+	ListMessagesContext(ctx context.Context, offset, limit int, sourceIDs []int64) ([]APIMessage, int64, error)
 	GetMessageContext(ctx context.Context, id int64) (*APIMessage, error)
 	GetMessagesSummariesByIDsContext(ctx context.Context, ids []int64) ([]APIMessage, error)
 }
 
 // getStats calls the context-aware store variant when available, so
-// request-owned stats queries carry the request context.
+// stats queries carry the caller's context and request ID.
 func (s *Server) getStats(ctx context.Context) (*StoreStats, error) {
 	if cs, ok := s.store.(CtxMessageStore); ok {
 		return cs.GetStatsContext(ctx)
@@ -102,9 +120,12 @@ func (s *Server) getStats(ctx context.Context) (*StoreStats, error) {
 }
 
 // listMessages calls the context-aware store variant when available.
-func (s *Server) listMessages(ctx context.Context, offset, limit int) ([]APIMessage, int64, error) {
+func (s *Server) listMessages(ctx context.Context, offset, limit int, sourceIDs []int64) ([]APIMessage, int64, error) {
 	if cs, ok := s.store.(CtxMessageStore); ok {
-		return cs.ListMessagesContext(ctx, offset, limit)
+		return cs.ListMessagesContext(ctx, offset, limit, sourceIDs)
+	}
+	if sourceIDs != nil {
+		return nil, 0, errors.New("store does not support scoped message lists")
 	}
 	return s.store.ListMessages(offset, limit)
 }
@@ -174,11 +195,12 @@ var _ ArchiveIdentifier = (*store.Store)(nil)
 // source status endpoint.
 type SourceStatusStore interface {
 	ListSources(sourceType string) ([]*store.Source, error)
-	GetActiveSync(sourceID int64) (*store.SyncRun, error)
-	GetLatestSync(sourceID int64) (*store.SyncRun, error)
-	GetLastSuccessfulSync(sourceID int64) (*store.SyncRun, error)
-	CountSyncRunItems(syncRunID int64, status string) (int64, error)
-	ListSyncRunItems(syncRunID int64, status string, limit int) ([]store.SyncRunItem, error)
+	ListSourcesContext(ctx context.Context, sourceType string) ([]*store.Source, error)
+	GetActiveSyncReadOnly(ctx context.Context, sourceID int64) (*store.SyncRun, error)
+	GetLatestSyncContext(ctx context.Context, sourceID, excludeID int64) (*store.SyncRun, error)
+	GetLastSuccessfulSyncContext(ctx context.Context, sourceID int64) (*store.SyncRun, error)
+	CountSyncRunItemsContext(ctx context.Context, syncRunID int64, status string) (int64, error)
+	ListSyncRunItemsContext(ctx context.Context, syncRunID int64, status string, limit int) ([]store.SyncRunItem, error)
 }
 
 // StoreStats is an alias for store.Stats — single source of truth.
@@ -203,7 +225,7 @@ type SyncScheduler interface {
 	// acquires the daemon's operation gate, avoiding a self-deadlock when
 	// the request itself is holding that gate.
 	IsJobScheduled(name string) bool
-	StartJob(name string) error
+	StartJob(name string) (scheduler.JobDisposition, error)
 	TriggerJob(name string) error
 }
 
@@ -232,17 +254,32 @@ type analyticsEngineContextKey struct{}
 
 // Server represents the HTTP API server.
 type Server struct {
-	cfg            *config.Config
-	store          MessageStore
-	analyticsState atomic.Pointer[analyticsEngineState]
-	savedViewStore SavedViewStore
-	sqlQueryRunner SQLQueryRunner
-	shutdownToken  string
-	shutdownFunc   func()
-	scheduler      SyncScheduler
-	cardDAV        *CardDAVController
-	logger         *slog.Logger
-	requestTimeout time.Duration
+	// statsSnapshots and accountCountSnapshots bound /stats and
+	// /cli/accounts latency under load (see snapshotCache). Background
+	// computations run on importContext, the server-lifetime context that
+	// Shutdown cancels.
+	statsSnapshots        snapshotCache[*StoreStats]
+	accountCountSnapshots snapshotCache[map[int64]store.SourceMessageCounts]
+	// virtualAccountSnapshots bounds the account picker catalog the same way.
+	virtualAccountSnapshots snapshotCache[map[int64][]store.VirtualAccount]
+	statsSnapshotWait       time.Duration
+	vectorStatsTimeout      time.Duration
+
+	cfg                    *config.Config
+	store                  MessageStore
+	analyticsState         atomic.Pointer[analyticsEngineState]
+	savedViewStore         SavedViewStore
+	sqlQueryRunner         SQLQueryRunner
+	archiveSQLQueryRunner  SQLQueryRunner
+	cacheBuildStatusReader CacheBuildStatusReader
+	shutdownToken          string
+	shutdownFunc           func()
+	scheduler              SyncScheduler
+	cardDAV                *CardDAVController
+	logger                 *slog.Logger
+	requestTimeout         time.Duration
+	// Empty in production; API tests use a local Jev fixture.
+	personMatchScoringEndpoint string
 	// readTimeout is the ordinary connection read ceiling used by http.Server.
 	// Tests shrink it to exercise protective slow-body handling without waiting
 	// for the production timeout.
@@ -294,10 +331,14 @@ type Server struct {
 	ftsIndexComplete atomic.Bool
 	// ftsEnsureRunning guards the single background probe/backfill worker
 	// spawned by CLI searches; ftsIndexState is what that worker is doing
-	// ("checking", "building", or "" when idle/complete) so search responses
+	// (checking, building, awaiting_owner, or empty when complete) so search responses
 	// can report it. See ensureCLISearchIndexAsync.
-	ftsEnsureRunning atomic.Bool
-	ftsIndexState    atomic.Value
+	ftsEnsureRunning   atomic.Bool
+	ftsIndexState      atomic.Value
+	ftsEnsureMu        sync.Mutex
+	ftsEnsureMayRepair bool
+	// agentReadSlots bounds concurrent agent read snapshots; see agentReadConcurrency.
+	agentReadSlots chan struct{}
 	// changesStallLoggedAt throttles the WARN handleMessageChanges emits when
 	// the content-change feed is held back by a long-lived write transaction.
 	// Unix nanoseconds of the last such line, so a consumer polling once a
@@ -312,7 +353,10 @@ type Server struct {
 	ftsRebuildGen atomic.Uint64
 	// settingsPendingRestart remains set after the first successful browser
 	// config edit for the lifetime of this daemon process.
-	settingsPendingRestart atomic.Bool
+	settingsPendingRestart  atomic.Bool
+	peopleCodexLoginOnce    sync.Once
+	peopleCodexLoginInitErr error
+	peopleCodexLogins       *peopleCodexLogins
 	// settingsConfigEditor is the persisted config transaction boundary. Tests
 	// replace it to deterministically exercise post-publication error handling.
 	settingsConfigEditor func(string, string, []config.Edit) (config.ConfigFile, error)
@@ -380,20 +424,26 @@ type Server struct {
 	// and embedded callers that construct a Server without options, which
 	// fall back to the legacy loose-file open.
 	blobStore AttachmentBlobStore
+	// messageRecordings joins recordings with Docbank transcripts. Nil serves
+	// an empty list.
+	messageRecordings *MessageRecordingReader
 	// remoteImages is the SSRF-hardened fetcher behind
 	// POST /api/v1/content/remote-image. Tests replace it to inject a fake
 	// resolver and dialer.
-	remoteImages *remoteImageFetcher
+	remoteImages *remoteimage.Fetcher
 	// inlineCache parses each message's raw MIME once and serves every cid: from
 	// that result, collapsing the per-cid fan-out (see inline_cache.go).
 	inlineCache *inlineParseCache
 	spaHandler  http.Handler
-	sessions    *sessionStore
 	// namedKeys are the resolved [[auth.api_keys]] credentials.
 	namedKeys  []namedAPIKey
 	oidc       *oidc.Provider
 	userStore  UserStore
 	visibility *visibilityCache
+	// telemetryCapture serves POST /api/v1/telemetry/events.
+	telemetryCapture http.Handler
+	sessions         *sessionStore
+	agentGrants      *agentgrant.Registry
 	// trustedProxies contains only explicitly configured direct proxy peers.
 	// Forwarded scheme/host data is ignored for every other RemoteAddr.
 	trustedProxies   []netip.Prefix
@@ -407,8 +457,20 @@ type Server struct {
 	// validation. It is never exposed to the browser with its credentials.
 	taskIntegrationProbe     TaskIntegrationProbe
 	taskLinkOperations       TaskLinkOperations
+	personAgendaOperations   PersonAgendaOperations
+	kataIssueOperations      KataIssueOperations
 	taskIdentityResolver     TaskIdentityResolver
 	fastmailInventoryFactory provideridentity.Factory
+	gmailProfileAddress      func(context.Context, *store.Source) (string, error)
+	// personBriefGenerator runs one manual, forced person brief through the
+	// daemon's people sweep worker. Nil in every process that does not own the
+	// worker, which makes POST /people/{id}/brief/generate report unavailable.
+	personBriefGeneratorMu sync.RWMutex
+	personBriefGenerator   PersonBriefGenerator
+	// peopleInferenceHTTPClient is the HTTP transport for synthetic provider
+	// checks. Nil uses the process default; tests route fixed vendor hosts to
+	// local HTTP fixtures without changing the configured egress policy.
+	peopleInferenceHTTPClient *http.Client
 	// listenerBound is set true once StartOnListener binds a real listener
 	// (the sole production serve path). It stays false for direct-handler unit
 	// tests that drive s.Router() without starting a listener, leaving the
@@ -419,6 +481,20 @@ type Server struct {
 	listenPort int
 }
 
+// SetPersonBriefGenerator installs the daemon's manual brief runner. The
+// daemon calls it once at startup when the people sweep is enabled.
+func (s *Server) SetPersonBriefGenerator(generate PersonBriefGenerator) {
+	s.personBriefGeneratorMu.Lock()
+	s.personBriefGenerator = generate
+	s.personBriefGeneratorMu.Unlock()
+}
+
+func (s *Server) personBriefGeneratorFunc() PersonBriefGenerator {
+	s.personBriefGeneratorMu.RLock()
+	defer s.personBriefGeneratorMu.RUnlock()
+	return s.personBriefGenerator
+}
+
 // clockNow returns the current wall time, honoring the test-injected clock.
 func (s *Server) clockNow() time.Time {
 	if s.clock != nil {
@@ -427,7 +503,8 @@ func (s *Server) clockNow() time.Time {
 	return time.Now()
 }
 
-type SQLQueryRunner func(ctx context.Context, sql string) (*query.QueryResult, error)
+type SQLQueryRunner func(ctx context.Context, sql string, fresh bool) (*query.QueryResult, *CacheBuildAccepted, error)
+type CacheBuildStatusReader func(id string) (CacheBuildStatus, bool)
 
 const (
 	DaemonLongRequestTimeout = 30 * time.Minute
@@ -436,11 +513,12 @@ const (
 	// SQL endpoint is the F2 runaway culprit: a single bad SELECT over the full
 	// archive pegged every core for minutes. 120s is generous for legitimate
 	// analytics while still bounding a pathological query.
-	QueryEndpointTimeout = 120 * time.Second
-	queryEndpointPath    = "/api/v1/query"
-	DaemonIdentityPath   = "/api/daemon/identity"
-	DaemonShutdownPath   = "/api/daemon/shutdown"
-	defaultBindAddr      = "127.0.0.1"
+	QueryEndpointTimeout     = 120 * time.Second
+	queryEndpointPath        = "/api/v1/query"
+	archiveQueryEndpointPath = "/api/v1/query/archive"
+	DaemonIdentityPath       = "/api/daemon/identity"
+	DaemonShutdownPath       = "/api/daemon/shutdown"
+	defaultBindAddr          = "127.0.0.1"
 	// inProgressLogThreshold is how long a request may run before the logger
 	// emits a WARN "http request in progress" line, and inProgressLogInterval
 	// how often it repeats thereafter. Requests are otherwise logged only on
@@ -461,19 +539,21 @@ type ServerOptions struct {
 	// SavedViewStore owns durable analytical view definitions. It is separate
 	// from the minimal MessageStore so API consumers do not need to implement
 	// unrelated persistence methods.
-	SavedViewStore SavedViewStore
 	// OIDC is the identity provider for browser sign-in and bearer access
 	// tokens; nil leaves both disabled.
 	OIDC *oidc.Provider
 	// UserStore records identity-provider sign-ins; nil skips the record.
-	UserStore      UserStore
-	Engine         query.Engine // Optional: query engine for aggregates and TUI support
-	SQLQueryRunner SQLQueryRunner
-	ShutdownToken  string
-	ShutdownFunc   func()
-	HybridEngine   *hybrid.Engine
-	VectorCfg      vector.Config
-	Backend        vector.Backend
+	UserStore              UserStore
+	SavedViewStore         SavedViewStore
+	Engine                 query.Engine // Optional: query engine for aggregates and TUI support
+	SQLQueryRunner         SQLQueryRunner
+	ArchiveSQLQueryRunner  SQLQueryRunner
+	CacheBuildStatusReader CacheBuildStatusReader
+	ShutdownToken          string
+	ShutdownFunc           func()
+	HybridEngine           *hybrid.Engine
+	VectorCfg              vector.Config
+	Backend                vector.Backend
 	// PersonSearchEngine is the optional semantic people service.
 	PersonSearchEngine PersonSearchEngine
 	// VectorStatus is the initial vector subsystem status. Zero value
@@ -504,6 +584,9 @@ type ServerOptions struct {
 	// packed CAS storage with a loose-file fallback. Nil keeps the legacy
 	// loose-file-only read path.
 	BlobStore AttachmentBlobStore
+	// MessageRecordings reads recordings and their Docbank transcripts for
+	// GET /api/v1/messages/{id}/recordings. Nil serves an empty list.
+	MessageRecordings *MessageRecordingReader
 	// RequestTimeout caps each request by adding a deadline to the request
 	// context. Zero defaults to 60s. The underlying http.Server's WriteTimeout
 	// is set to RequestTimeout + 5s so handlers that honor cancellation can
@@ -526,14 +609,21 @@ type ServerOptions struct {
 	// internal/web.Handler and is the production default. Tests may inject a
 	// handler built over an in-memory filesystem.
 	SPAHandler http.Handler
+	// TelemetryCapture serves POST /api/v1/telemetry/events. Nil admits no event.
+	TelemetryCapture http.Handler
 	// TaskIntegrationProbe overrides provider-neutral task discovery for tests.
 	// Nil uses taskclient.Evaluate.
-	TaskIntegrationProbe TaskIntegrationProbe
-	TaskLinkOperations   TaskLinkOperations
-	TaskIdentityResolver TaskIdentityResolver
+	TaskIntegrationProbe   TaskIntegrationProbe
+	TaskLinkOperations     TaskLinkOperations
+	TaskIdentityResolver   TaskIdentityResolver
+	PersonAgendaOperations PersonAgendaOperations
+	KataIssueOperations    KataIssueOperations
 	// FastmailInventoryFactory is the provider-read seam used by identity
 	// discovery. Nil constructs the production JMAP client.
 	FastmailInventoryFactory provideridentity.Factory
+	// GmailProfileAddress reads one profile using the selected source credentials.
+	// Nil leaves Gmail provider discovery unavailable. Ordinary sync does not use it.
+	GmailProfileAddress func(context.Context, *store.Source) (string, error)
 }
 
 // NewServer creates a new API server.
@@ -562,59 +652,90 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 	}
 	importContext, cancelImports := context.WithCancel(context.Background())
 	s := &Server{
-		cfg:                      opts.Config,
-		store:                    opts.Store,
-		savedViewStore:           opts.SavedViewStore,
-		sqlQueryRunner:           opts.SQLQueryRunner,
-		shutdownToken:            opts.ShutdownToken,
-		shutdownFunc:             opts.ShutdownFunc,
-		hybridEngine:             opts.HybridEngine,
-		vectorCfg:                opts.VectorCfg,
-		backend:                  opts.Backend,
-		personSearchEngine:       opts.PersonSearchEngine,
-		scheduler:                opts.Scheduler,
-		cardDAV:                  opts.CardDAV,
-		logger:                   opts.Logger,
-		requestTimeout:           timeout,
-		readTimeout:              daemonReadTimeout,
-		queryTimeout:             QueryEndpointTimeout,
-		inProgressThreshold:      inProgressLogThreshold,
-		inProgressInterval:       inProgressLogInterval,
-		daemonVersion:            opts.DaemonVersion,
-		idleTracker:              opts.IdleTracker,
-		operationGate:            opts.OperationGate,
-		inboxArchive:             opts.InboxArchive,
-		operationHistoryReader:   opts.OperationHistoryReader,
-		importContext:            importContext,
-		cancelImports:            cancelImports,
-		blobStore:                opts.BlobStore,
-		remoteImages:             newRemoteImageFetcher(),
-		inlineCache:              newInlineParseCache(inlineCacheMaxEntries, inlineCacheMaxBytes),
-		spaHandler:               opts.SPAHandler,
-		sessions:                 newSessionStore(defaultSessionTTL),
-		oidc:                     opts.OIDC,
-		userStore:                opts.UserStore,
-		visibility:               newVisibilityCache(),
+		oidc:                   opts.OIDC,
+		userStore:              opts.UserStore,
+		visibility:             newVisibilityCache(),
+		inboxArchive:           opts.InboxArchive,
+		cfg:                    opts.Config,
+		store:                  opts.Store,
+		savedViewStore:         opts.SavedViewStore,
+		sqlQueryRunner:         opts.SQLQueryRunner,
+		archiveSQLQueryRunner:  opts.ArchiveSQLQueryRunner,
+		cacheBuildStatusReader: opts.CacheBuildStatusReader,
+		shutdownToken:          opts.ShutdownToken,
+		shutdownFunc:           opts.ShutdownFunc,
+		hybridEngine:           opts.HybridEngine,
+		vectorCfg:              opts.VectorCfg,
+		backend:                opts.Backend,
+		personSearchEngine:     opts.PersonSearchEngine,
+		scheduler:              opts.Scheduler,
+		cardDAV:                opts.CardDAV,
+		logger:                 opts.Logger,
+		requestTimeout:         timeout,
+		readTimeout:            daemonReadTimeout,
+		queryTimeout:           QueryEndpointTimeout,
+		inProgressThreshold:    inProgressLogThreshold,
+		inProgressInterval:     inProgressLogInterval,
+		daemonVersion:          opts.DaemonVersion,
+		idleTracker:            opts.IdleTracker,
+		operationGate:          opts.OperationGate,
+		operationHistoryReader: opts.OperationHistoryReader,
+		importContext:          importContext,
+		cancelImports:          cancelImports,
+		statsSnapshots:         snapshotCache[*StoreStats]{logger: opts.Logger},
+		accountCountSnapshots:  snapshotCache[map[int64]store.SourceMessageCounts]{logger: opts.Logger},
+		virtualAccountSnapshots: snapshotCache[map[int64][]store.VirtualAccount]{
+			logger: opts.Logger, freshFor: virtualAccountCatalogFreshFor,
+		},
+		statsSnapshotWait:  statsSnapshotWait,
+		vectorStatsTimeout: vectorStatsTimeout,
+		blobStore:          opts.BlobStore,
+		messageRecordings:  opts.MessageRecordings,
+		remoteImages:       remoteimage.NewFetcher(),
+		inlineCache:        newInlineParseCache(inlineCacheMaxEntries, inlineCacheMaxBytes),
+		spaHandler:         opts.SPAHandler,
+		telemetryCapture:   opts.TelemetryCapture,
+		sessions:           newSessionStore(defaultSessionTTL),
+		agentGrants: func() *agentgrant.Registry {
+			if opts.Config != nil && opts.Config.Server.AgentAccess {
+				return agentgrant.NewRegistry()
+			}
+			return nil
+		}(),
 		exploreState:             newExploreServerState(time.Now),
 		exploreCursorKey:         newExploreCursorKey(),
 		trustedProxies:           trustedProxyPrefixes(opts.Config.Server.TrustedProxies),
 		settingsConfigEditor:     config.EditConfigFilePrivate,
 		taskIntegrationProbe:     taskProbe,
 		taskLinkOperations:       opts.TaskLinkOperations,
+		personAgendaOperations:   opts.PersonAgendaOperations,
+		kataIssueOperations:      opts.KataIssueOperations,
 		taskIdentityResolver:     opts.TaskIdentityResolver,
 		fastmailInventoryFactory: fastmailInventoryFactory,
+		gmailProfileAddress:      opts.GmailProfileAddress,
 		started:                  make(chan struct{}),
+		agentReadSlots:           make(chan struct{}, agentReadConcurrency),
 	}
 	s.analyticsState.Store(&analyticsEngineState{
 		engine: opts.Engine, mode: opts.AnalyticsMode,
 		analyticsInitializationActive: opts.AnalyticsInitializationActive,
 	})
 	s.loadNamedAPIKeys()
+	if s.telemetryCapture == nil {
+		// kit's nil-reporter handler admits no event.
+		s.telemetryCapture = posthog.NewCaptureHandler(nil)
+	}
 	if s.taskIdentityResolver == nil {
 		s.taskIdentityResolver = s.resolveTaskMessageIdentity
 	}
 	if s.taskLinkOperations == nil {
 		s.taskLinkOperations = newTaskLinkBackend(opts.Config)
+	}
+	if s.personAgendaOperations == nil {
+		s.personAgendaOperations = newPersonAgendaBackend(opts.Config, opts.Store)
+	}
+	if s.kataIssueOperations == nil {
+		s.kataIssueOperations = newKataIssueBackend(opts.Config, opts.Store, s.logger)
 	}
 	s.vectorStatus = opts.VectorStatus
 	if s.vectorStatus == "" {
@@ -678,7 +799,7 @@ func (s *Server) setupRouter() http.Handler {
 	// unauthenticated requests do not register as waiters.
 	var h http.Handler = mux
 	h = s.analyticsEngineMiddleware(h)
-	h = operationGateMiddleware(s.operationGate, s.apiRequestAuthorized)(h)
+	h = operationGateMiddleware(s.operationGate, s.requestGateEligible)(h)
 	h = s.csrfMiddleware(h)
 	h = s.requestSecurityMiddleware(h)
 	h = RateLimitMiddleware(s.rateLimiter, s.loopbackRateLimitExempt)(h)
@@ -796,7 +917,7 @@ func (s *Server) StartOnListener(ln net.Listener) error {
 		return err
 	}
 
-	if s.cfg.Server.APIKey == "" {
+	if s.cfg.Server.AuthenticationKey() == "" {
 		s.logger.Warn("API server running without authentication — set [server] api_key in config.toml")
 	}
 
@@ -860,6 +981,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.sessions != nil {
 		s.sessions.Close()
 	}
+	if s.agentGrants != nil {
+		s.agentGrants.Close()
+	}
 	s.serverMu.RLock()
 	server := s.server
 	s.serverMu.RUnlock()
@@ -882,6 +1006,11 @@ func (s *Server) analyticsEngineMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state := s.analyticsState.Load()
 		ctx := context.WithValue(r.Context(), analyticsEngineContextKey{}, state)
+		if r.Header.Get(apiprotocol.AgentTokenHeader) != "" {
+			boundary := &readResponseWriter{ResponseWriter: w}
+			ctx = context.WithValue(ctx, readResponseKey{}, boundary)
+			w = boundary
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1065,12 +1194,13 @@ func serveWithProtectiveRequestDeadline(
 func (s *Server) timeoutMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost &&
-			r.URL.Path == meetingImportEndpointPath &&
+			(r.URL.Path == meetingImportEndpointPath || r.URL.Path == muesliImportEndpointPath) &&
 			s.apiRequestAuthorized(r) {
 			serveMeetingImportWithReadDeadline(w, r, next)
 			return
 		}
-		if cardDAVRequestNeedsProtectiveCeiling(r) {
+		if cardDAVRequestNeedsProtectiveCeiling(r) ||
+			(r.Method == http.MethodPost && r.URL.Path == "/api/v1/identity/scoring/run") {
 			serveWithProtectiveRequestDeadline(w, r, next)
 			return
 		}
@@ -1084,6 +1214,9 @@ func (s *Server) timeoutMiddleware(next http.Handler) http.Handler {
 		}
 
 		timeout, bounded := s.requestTimeoutForPath(r.URL.Path)
+		if !bounded && (r.Method == http.MethodGet || r.Method == http.MethodHead) && s.requestAuthentication(r).Grant != nil {
+			timeout, bounded = s.requestTimeout, true
+		}
 		if !bounded {
 			serveWithoutWriteDeadline(w, r, next)
 			return
@@ -1126,6 +1259,8 @@ func cliRequestNeedsProtectiveCeiling(r *http.Request) bool {
 		"POST /api/v1/cli/embeddings/plan",
 		"GET /api/v1/cli/message",
 		"GET /api/v1/cli/message/raw",
+		"GET /api/v1/cli/message/original",
+		"GET /api/v1/cli/message/thread",
 		"GET /api/v1/cli/attachment",
 		"GET /api/v1/cli/search",
 		"POST /api/v1/cli/deduplicate/plan",
@@ -1144,7 +1279,7 @@ func cliRequestNeedsProtectiveCeiling(r *http.Request) bool {
 // unbounded (they report progress and are gated by the operation gate);
 // everything else gets the standard per-request timeout.
 func (s *Server) requestTimeoutForPath(path string) (time.Duration, bool) {
-	if path == queryEndpointPath {
+	if path == queryEndpointPath || path == archiveQueryEndpointPath {
 		return s.queryTimeout, true
 	}
 	if isLongDaemonRequest(path) {
@@ -1160,6 +1295,7 @@ func isLongDaemonRequest(path string) bool {
 		"/api/v1/carddav/sync",
 		"/api/v1/cli/deduplicate/plan",
 		meetingImportEndpointPath,
+		muesliImportEndpointPath,
 		"/api/v1/cli/identities/discover",
 		"/api/v1/cli/rebuild-fts",
 		"/api/v1/cli/repair-encoding",
@@ -1171,8 +1307,35 @@ func isLongDaemonRequest(path string) bool {
 		"/api/v1/cli/verify":
 		return true
 	default:
+		return isPersonBriefGeneratePath(path)
+	}
+}
+
+// isPersonBriefGeneratePath matches POST /api/v1/people/{id}/brief/generate.
+// A manual brief runs a provider call (and, when the person's cursors are
+// already caught up, one bounded extraction page), so it must not be cut off
+// by the standard per-request deadline. The operation gate still serializes it.
+func isPersonBriefGeneratePath(path string) bool {
+	const prefix = "/api/v1/people/"
+	const suffix = "/brief/generate"
+	// The length guard comes first because prefix and suffix are the same
+	// length: "/api/v1/people/brief/generate" satisfies both HasPrefix and
+	// HasSuffix while being shorter than the two together, so slicing it
+	// would cross its own bounds. Requiring more than both also guarantees a
+	// non-empty ID below.
+	if len(path) <= len(prefix)+len(suffix) {
 		return false
 	}
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	id := path[len(prefix) : len(path)-len(suffix)]
+	for _, digit := range id {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // loggerMiddleware logs HTTP requests on completion and, for requests that
@@ -1346,7 +1509,7 @@ func (w *trackingResponseWriter) WroteHeader() bool {
 // no API key is configured (pure local mode, the TUI/CLI autostart case) or it
 // carries a valid API key (an authenticated local client). apiRequestAuthorized
 // returns true in exactly those two cases, so it is reused here to avoid the
-// auth logic drifting.
+// auth logic drifting. A valid remote client key is trusted the same way.
 func (s *Server) loopbackRateLimitExempt(r *http.Request) bool {
 	if r.Method == http.MethodPost && r.URL.Path == sessionLoginPath {
 		return false
@@ -1354,7 +1517,7 @@ func (s *Server) loopbackRateLimitExempt(r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, sessionOIDCPathPrefix) {
 		return false
 	}
-	return isLoopbackRequest(r) && s.apiRequestAuthorized(r)
+	return isLoopbackRequest(r) && (s.apiRequestAuthorized(r) || s.remoteClientRequest(r))
 }
 
 func (s *Server) logUnauthorizedAPIRequest(r *http.Request) {
@@ -1365,13 +1528,14 @@ func (s *Server) logUnauthorizedAPIRequest(r *http.Request) {
 }
 
 func (s *Server) handleDaemonShutdown(w http.ResponseWriter, r *http.Request) {
-	if s.shutdownToken == "" || s.shutdownFunc == nil {
+	callerAuthorized := s.requestAuthentication(r).Mode == AuthModeCaller
+	if s.shutdownFunc == nil || (!callerAuthorized && s.shutdownToken == "") {
 		writeError(w, http.StatusNotFound, "shutdown_unavailable", "Daemon shutdown is not available")
 		return
 	}
 
 	got := r.Header.Get(DaemonShutdownTokenHeader)
-	if subtle.ConstantTimeCompare([]byte(got), []byte(s.shutdownToken)) != 1 {
+	if !callerAuthorized && subtle.ConstantTimeCompare([]byte(got), []byte(s.shutdownToken)) != 1 {
 		s.logger.Warn("unauthorized daemon shutdown request", "remote_addr", r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Invalid or missing daemon shutdown token")
 		return
@@ -1415,9 +1579,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAuthenticatedHealth returns health details that are safe behind the
-// API-key boundary.
+// API-key boundary. Delegated callers and remote clients receive the public projection plus
+// APISchemaVersion only, so they can verify version compatibility without
+// seeing internal operation labels that name configured account identifiers.
 func (s *Server) handleAuthenticatedHealth(w http.ResponseWriter, r *http.Request) {
 	s.refreshVectorStatus(r.Context())
+	auth := s.requestAuthentication(r)
+	if auth.Mode == AuthModeDelegated || auth.Mode == AuthModeRemoteClient {
+		writeJSON(w, http.StatusOK, HealthResponse{
+			Status:           "ok",
+			Vector:           s.vectorHealthPublic(),
+			Operation:        s.operationBusyHealth(),
+			AnalyticsEngine:  s.analyticsModeForContext(r.Context()),
+			APISchemaVersion: APISchemaVersion,
+		})
+		return
+	}
 	writeJSON(w, http.StatusOK, HealthResponse{
 		Status:           "ok",
 		Vector:           s.vectorHealth(),

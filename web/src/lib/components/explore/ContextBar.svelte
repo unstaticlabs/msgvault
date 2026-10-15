@@ -1,17 +1,30 @@
 <script lang="ts">
   import XIcon from '@lucide/svelte/icons/x';
   import { Button, Checkbox, IconButton, SelectDropdown } from '@kenn-io/kit-ui';
+  import type { Snippet } from 'svelte';
 
   import type { APIClient } from '../../api/client';
   import type { ExploreFilter, ExploreGroupDimension, ExploreSearchMode, ExploreURLState } from '../../explore/models';
-  import {
-    groupingDimensionLabel,
-    groupingOptions,
-    isGroupingDimension
-  } from '../../grouping/catalog';
+  import { filterDimensionLabel, filterValueLabel, groupedByLabel, searchModeLabel } from '../../explore/labels';
+  import { groupingOptions, isGroupingDimension } from '../../grouping/catalog';
+  import AccountFilter from './AccountFilter.svelte';
   import { isEmailWork, withEmailWork, withHandlingState, HANDLING_LABELS } from '../../explore/email-work';
   import IdentityFilter from './IdentityFilter.svelte';
  import { filterCaption, mailboxFilterOptions, mailboxFilterValue, withMailboxFilter } from '../../explore/mailbox-state';
+
+  interface ExtraChip {
+    key: string;
+    label: string;
+    removeLabel: string;
+    onRemove: () => void;
+  }
+
+  interface SortConfig {
+    options: { value: string; label: string }[];
+    value: string;
+    note?: string;
+    onchange?: (value: string) => void;
+  }
 
   let {
     client,
@@ -19,13 +32,17 @@
     searchMode,
     filters,
     groupingChain,
-    totalCount = undefined,
+    countLabel,
+    sort = undefined,
     presentation = 'table',
+    extra = undefined,
+    extraChips = [],
     onAddGroup,
     onRemoveGroup,
     onClearFilters,
     onFiltersChange,
-    onSort = undefined,
+    onRemoveQuery = undefined,
+    onRemoveFilter = undefined,
     onPresentationChange = undefined
   }: {
     client: APIClient;
@@ -33,13 +50,17 @@
     searchMode: ExploreSearchMode;
     filters: ExploreFilter[];
     groupingChain: ExploreGroupDimension[];
-    totalCount?: number;
+    countLabel: string;
+    sort?: SortConfig;
     presentation?: ExploreURLState['presentation'];
+    extra?: Snippet;
+    extraChips?: ExtraChip[];
     onAddGroup: (dimension: ExploreGroupDimension) => void;
     onRemoveGroup: (index: number) => void;
     onClearFilters: () => void;
     onFiltersChange: (filters: ExploreFilter[]) => void;
-    onSort?: () => void;
+    onRemoveQuery?: () => void;
+    onRemoveFilter?: (index: number) => void;
     onPresentationChange?: (presentation: ExploreURLState['presentation']) => void;
   } = $props();
 
@@ -47,13 +68,30 @@
   const handlingValues = $derived(filters.find((filter) => filter.dimension === 'handling_state')?.values ?? []);
   const handlingValue = $derived(handlingValues.length === 0 ? '' : handlingValues.length === 1 ? handlingValues[0] : handlingValues.length === 2 && handlingValues.includes('actionable') && handlingValues.includes('unknown') ? 'needs_attention' : 'multiple');
   const handlingOptions = $derived([{value: '', label: 'All handling states'}, ...Object.entries(HANDLING_LABELS).map(([value, label]) => ({value, label})), {value: 'needs_attention', label: 'Actionable or unknown'}, ...(handlingValue === 'multiple' ? [{value: 'multiple', label: 'Multiple handling states', disabled: true}] : [])]);
-  const options = $derived(groupingOptions({ excluded: groupingChain, includeUnavailable: true }));
-  const firstRequestable = $derived(options.find((option) => !option.disabled)?.value ?? '');
+  const groupOptions = $derived(groupingOptions({ excluded: groupingChain, includeUnavailable: true }));
+  const canGroup = $derived(groupOptions.some((option) => !option.disabled));
+  // The triggers carry their own names (no kit `title`), so the visible text says what each control is.
+  const options = $derived([
+    {
+      value: '',
+      label: groupingChain.length > 0 ? 'Add grouping' : 'None',
+      triggerLabel: groupingChain.length > 0 ? 'Add grouping' : 'Group by',
+      disabled: true
+    },
+    ...groupOptions
+  ]);
   const presentationOptions = [
-    { value: 'table', label: 'Table' },
-    { value: 'timeline', label: 'Timeline' },
-    { value: 'files', label: 'Files' }
+    { value: 'table', label: 'Table', triggerLabel: 'Show as: Table' },
+    { value: 'timeline', label: 'Timeline', triggerLabel: 'Show as: Timeline' },
+    { value: 'files', label: 'Files', triggerLabel: 'Show as: Files' }
   ];
+  const sortOptions = $derived([
+    ...(sort?.options ?? []).map((option) => ({ ...option, triggerLabel: `Sort: ${option.label}` })),
+    ...(sort?.note ? [{ value: '__note', label: sort.note, disabled: true }] : [])
+  ]);
+  const hasChips = $derived(
+    Boolean(query) || filters.length > 0 || extraChips.length > 0 || groupingChain.length > 0
+  );
 
   function selectGrouping(value: string): void {
     if (isGroupingDimension(value)) onAddGroup(value);
@@ -77,63 +115,81 @@
       onclick={() => { filtersOpen = !filtersOpen; }}
     />
     <SelectDropdown
-      title="Show as"
       value={presentation}
       options={presentationOptions}
       onchange={(value) => onPresentationChange?.(value as ExploreURLState['presentation'])}
     />
     <div class="group-picker" data-group-picker>
       <SelectDropdown
-        value={firstRequestable}
+        value=""
         {options}
-        title="Group by"
-        disabled={!firstRequestable}
+        disabled={!canGroup}
         onchange={selectGrouping}
       />
     </div>
-    <Button
-      size="sm"
-      surface="outline"
-      label="Newest first"
-      ariaLabel="Sort: newest first"
-      onclick={() => onSort?.()}
-    />
+    {#if sort}
+      <div data-sort-menu>
+        <SelectDropdown
+          value={sort.value}
+          options={sortOptions}
+          onchange={(value) => sort.onchange?.(value)}
+        />
+      </div>
+    {/if}
+    {@render extra?.()}
+    <span class="context-count" aria-live="polite" data-mono>{countLabel}</span>
   </div>
 
-  <div class="context-crumbs">
-    {#if query}
-      <span class="crumb crumb--query">{searchMode}: “{query}”</span>
-    {/if}
-    {#each filters as filter (`${filter.dimension}:${filter.values.join('\u0000')}`)}
-      <span class="crumb crumb--filter">{filterCaption(filter)}</span>
-    {/each}
-    {#each groupingChain as dimension, index (`${dimension}:${index}`)}
-      <span class="crumb crumb--group">
-        Group {groupingDimensionLabel(dimension)}
-        <IconButton
-          size="sm"
-          ariaLabel={`Remove ${groupingDimensionLabel(dimension)} grouping`}
-          onclick={() => onRemoveGroup(index)}
-        ><XIcon size="12" aria-hidden="true" /></IconButton>
-      </span>
-    {/each}
-    {#if !query && filters.length === 0 && groupingChain.length === 0}
-      <span class="empty-context">All archive entries</span>
-    {/if}
-  </div>
-
-  <span class="context-count" data-mono>{totalCount === undefined ? 'Count pending' : `${totalCount.toLocaleString()} results`}</span>
+  {#if hasChips}
+    <div class="context-chips">
+      {#if query}
+        <span class="chip">
+          <span class="chip-label">{searchModeLabel(searchMode)}: “{query}”</span>
+          <IconButton size="sm" ariaLabel="Remove search" onclick={() => onRemoveQuery?.()}
+          ><XIcon size="12" aria-hidden="true" /></IconButton>
+        </span>
+      {/if}
+      {#each filters as filter, index (`${filter.dimension}:${filter.values.join('\u0000')}`)}
+        <span class="chip chip--filter">
+          <span class="chip-label">{#if ['inbox_state', 'read_state', 'row_unit', 'handling_state'].includes(filter.dimension)}{filterCaption(filter)}{:else}{filterDimensionLabel(filter.dimension)}: {filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}{/if}</span>
+          <IconButton
+            size="sm"
+            ariaLabel={`Remove ${filterDimensionLabel(filter.dimension)} filter`}
+            onclick={() => onRemoveFilter?.(index)}
+          ><XIcon size="12" aria-hidden="true" /></IconButton>
+        </span>
+      {/each}
+      {#each extraChips as chip (chip.key)}
+        <span class="chip chip--filter">
+          <span class="chip-label">{chip.label}</span>
+          <IconButton size="sm" ariaLabel={chip.removeLabel} onclick={chip.onRemove}
+          ><XIcon size="12" aria-hidden="true" /></IconButton>
+        </span>
+      {/each}
+      {#each groupingChain as dimension, index (`${dimension}:${index}`)}
+        <span class="chip chip--group">
+          <span class="chip-label">{groupedByLabel([dimension])}</span>
+          <IconButton
+            size="sm"
+            ariaLabel={`Remove ${filterDimensionLabel(dimension)} grouping`}
+            onclick={() => onRemoveGroup(index)}
+          ><XIcon size="12" aria-hidden="true" /></IconButton>
+        </span>
+      {/each}
+    </div>
+  {/if}
 
   {#if filtersOpen}
     <div class="filter-panel">
       <div class="filter-summary">
         {#if filters.length === 0}
-          <span>No active filters.</span>
+          <span>No filters applied.</span>
         {:else}
           <span>{filters.length} active {filters.length === 1 ? 'filter' : 'filters'}</span>
           <Button size="sm" surface="outline" label="Clear filters" onclick={onClearFilters} />
         {/if}
       </div>
+      <AccountFilter {client} {filters} onChange={onFiltersChange} />
       <div class="mailbox-filters">
         <SelectDropdown title="Inbox" value={mailboxFilterValue(filters, 'inbox_state')}
           options={mailboxFilterOptions(filters, 'inbox_state')}
@@ -154,9 +210,8 @@
     position: relative;
     display: flex;
     min-width: 0;
-    min-height: 34px;
-    align-items: center;
-    gap: var(--space-4);
+    flex-direction: column;
+    gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
@@ -165,53 +220,53 @@
   }
 
   .context-controls,
-  .context-crumbs {
+  .context-chips {
     display: flex;
     min-width: 0;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
-  }
-
-  .context-crumbs {
-    flex: 1;
-    overflow-x: auto;
   }
 
   .group-picker {
     width: 172px;
   }
 
-  .crumb {
+  .chip {
     display: inline-flex;
-    flex: none;
+    max-width: 100%;
     align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-1) var(--space-2);
+    gap: var(--space-1);
+    padding: 0 0 0 var(--space-2);
     border-radius: var(--radius-sm);
     background: var(--bg-inset);
     color: var(--text-secondary);
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
 
-  .crumb--filter {
+  .chip-label {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .chip :global(button) {
+    flex-shrink: 0;
+  }
+
+  .chip--filter {
     border: 1px solid color-mix(in srgb, var(--accent-amber) 35%, var(--border-muted));
     background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-surface));
   }
 
-  .crumb--group {
+  .chip--group {
     border: 1px solid color-mix(in srgb, var(--accent-teal) 35%, var(--border-muted));
     background: color-mix(in srgb, var(--accent-teal) 8%, var(--bg-surface));
   }
 
-  .empty-context,
-  .context-count,
-  .filter-panel {
-    color: var(--text-muted);
-  }
-
   .context-count {
-    flex: none;
-    font-variant-numeric: tabular-nums;
+    margin-left: auto;
+    color: var(--text-muted);
+    white-space: nowrap;
   }
 
   .filter-panel {
@@ -229,6 +284,7 @@
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
+    color: var(--text-muted);
     box-shadow: var(--shadow-md);
   }
 
@@ -248,11 +304,5 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
-  }
-  @media (max-width: 640px) {
-    .context-bar { flex-wrap: wrap; }
-    .context-controls { flex: 1 1 100%; flex-wrap: wrap; }
-    .context-crumbs { flex: 1 1 calc(100% - 80px); flex-wrap: wrap; overflow: visible; }
-    .context-count { margin-left: auto; }
   }
 </style>

@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS sources (
     UNIQUE(source_type, identifier)
 );
 
--- One external CardDAV connection. Passwords never enter this schema; the
+-- External CardDAV connections. Passwords never enter this schema; the
 -- account row contains only non-secret connection identity and discovery
 -- fences used by remote-first synchronization.
 CREATE TABLE IF NOT EXISTS carddav_discovery_lock (
@@ -113,6 +113,7 @@ INSERT OR IGNORE INTO carddav_discovery_lock(singleton) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS carddav_sync_runs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id    INTEGER NOT NULL DEFAULT 1 CHECK (account_id > 0),
     trigger       TEXT NOT NULL CHECK (trigger IN ('manual', 'scheduled')),
     full_sync     BOOLEAN NOT NULL DEFAULT FALSE CHECK (full_sync IN (FALSE, TRUE)),
     state         TEXT NOT NULL CHECK (state IN ('running', 'succeeded', 'failed', 'cancelled', 'partial')),
@@ -134,7 +135,7 @@ CREATE TABLE IF NOT EXISTS carddav_sync_runs (
            (state IN ('failed', 'cancelled', 'partial') AND error_code <> ''))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_carddav_sync_runs_one_active
-    ON carddav_sync_runs((1)) WHERE state = 'running';
+    ON carddav_sync_runs(account_id) WHERE state = 'running';
 CREATE INDEX IF NOT EXISTS idx_carddav_sync_runs_state_id
     ON carddav_sync_runs(state, id DESC);
 CREATE INDEX IF NOT EXISTS idx_carddav_sync_runs_operations_order
@@ -265,7 +266,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_operation_token_keys_one_active
     ON operation_token_keys(state) WHERE state = 'active';
 
 CREATE TABLE IF NOT EXISTS carddav_accounts (
-    id                    INTEGER PRIMARY KEY CHECK (id = 1),
+    id                    INTEGER PRIMARY KEY CHECK (id > 0),
+    connection_name       TEXT NOT NULL DEFAULT 'default' UNIQUE,
     base_url              TEXT NOT NULL,
     username              TEXT NOT NULL,
     principal_url         TEXT NOT NULL,
@@ -317,6 +319,7 @@ CREATE TABLE IF NOT EXISTS carddav_address_books (
     updated_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CHECK (NOT is_write_target OR is_subscribed)
 );
+
 
 -- Canonical and discovery-alias URLs share one normalized identity namespace.
 -- Raw URLs remain on the book for lossless round-tripping; this child table is
@@ -385,6 +388,18 @@ CREATE TABLE IF NOT EXISTS persons (
     updated_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Inferred export inputs must be explicitly reviewed before publication. A
+-- missing row is the all-zero state so ordinary contacts cost no durable row.
+CREATE TABLE IF NOT EXISTS person_carddav_inference_state (
+    person_id INTEGER PRIMARY KEY REFERENCES persons(id) ON DELETE CASCADE,
+    inference_revision INTEGER NOT NULL DEFAULT 0 CHECK (inference_revision >= 0),
+    approved_revision INTEGER NOT NULL DEFAULT 0
+        CHECK (approved_revision >= 0 AND approved_revision <= inference_revision),
+    approved_connection_generation INTEGER,
+    approved_address_book_id INTEGER REFERENCES carddav_address_books(id) ON DELETE SET NULL,
+    CHECK ((approved_connection_generation IS NULL) = (approved_address_book_id IS NULL))
+);
+
 -- Bindings are deliberately participant-local and are the source of truth
 -- for person membership: a person covers exactly its bound participants,
 -- never "whatever cluster a binding sits in". Link/unlink changes the
@@ -443,6 +458,10 @@ CREATE INDEX IF NOT EXISTS idx_person_sweep_changes_person_sequence
     ON person_sweep_changes(person_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_person_sweep_changes_source_sequence
     ON person_sweep_changes(source_id, sequence);
+-- Serves the brief window's journal bound, which asks per message whether
+-- the person's journal recorded it at or before a sequence.
+CREATE INDEX IF NOT EXISTS idx_person_sweep_changes_person_message
+    ON person_sweep_changes(person_id, message_id, sequence);
 
 -- Coalesced durable sweep debt. A lease ownership change always increments
 -- lease_fence; every worker mutation validates both owner and fence.
@@ -534,20 +553,21 @@ CREATE TABLE IF NOT EXISTS person_inference_checks (
     model_version        TEXT NOT NULL
 );
 
--- Revocation stamps the active grant instead of deleting it. Regranting the
--- same exact profile creates a new audit row.
-CREATE TABLE IF NOT EXISTS person_inference_consents (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    profile_fingerprint  TEXT NOT NULL REFERENCES person_inference_profiles(fingerprint),
-    granted_by           TEXT NOT NULL,
-    granted_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    revoked_by           TEXT,
-    revoked_at           DATETIME,
+-- One audit row per grant. Revocation stamps the row; regranting adds a row.
+-- IDs count up within each purpose and are shown to users.
+CREATE TABLE IF NOT EXISTS provider_consents (
+    purpose      TEXT NOT NULL,
+    id           INTEGER NOT NULL,
+    fingerprint  TEXT NOT NULL,
+    granted_by   TEXT NOT NULL,
+    granted_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_by   TEXT,
+    revoked_at   DATETIME,
+    PRIMARY KEY (purpose, id),
     CHECK ((revoked_by IS NULL) = (revoked_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_person_inference_consents_active
-    ON person_inference_consents(profile_fingerprint)
-    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_consents_active
+    ON provider_consents(purpose, fingerprint) WHERE revoked_at IS NULL;
 
 -- External person enrichment is a distinct egress purpose. Each immutable
 -- runtime policy requires its own exact grant; inference consent cannot
@@ -563,18 +583,25 @@ CREATE TABLE IF NOT EXISTS person_enrichment_profiles (
     created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS person_enrichment_consents (
-    id                  INTEGER PRIMARY KEY,
-    profile_fingerprint TEXT NOT NULL REFERENCES person_enrichment_profiles(fingerprint),
-    granted_by          TEXT NOT NULL,
-    granted_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    revoked_by          TEXT,
-    revoked_at          DATETIME,
+-- Jev identity evidence requires a separate exact disclosure grant. Revoked
+-- rows remain for audit; another grant for the same disclosure is allowed.
+CREATE TABLE IF NOT EXISTS person_match_consents (
+    id                    INTEGER PRIMARY KEY,
+    disclosure_fingerprint TEXT NOT NULL,
+    endpoint              TEXT NOT NULL,
+    model_id              TEXT NOT NULL,
+    packet_schema         TEXT NOT NULL,
+    retention_declaration TEXT NOT NULL,
+    policy_version        TEXT NOT NULL,
+    question_version      TEXT NOT NULL,
+    granted_by            TEXT NOT NULL,
+    granted_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_by            TEXT,
+    revoked_at            DATETIME,
     CHECK ((revoked_by IS NULL) = (revoked_at IS NULL))
 );
-CREATE UNIQUE INDEX IF NOT EXISTS person_enrichment_consents_active
-    ON person_enrichment_consents(profile_fingerprint)
-    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS person_match_consents_active
+    ON person_match_consents(disclosure_fingerprint) WHERE revoked_at IS NULL;
 
 -- Suppressions outlive curated people and contain only provider-scoped keyed
 -- digests. They intentionally have no person FK or recoverable identifier.
@@ -795,19 +822,6 @@ CREATE TABLE IF NOT EXISTS person_semantic_embedding_profiles (
     created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS person_semantic_embedding_consents (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    profile_fingerprint TEXT NOT NULL REFERENCES person_semantic_embedding_profiles(fingerprint),
-    granted_by          TEXT NOT NULL,
-    granted_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    revoked_by          TEXT,
-    revoked_at          DATETIME,
-    CHECK ((revoked_by IS NULL) = (revoked_at IS NULL))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_person_semantic_embedding_consents_active
-    ON person_semantic_embedding_consents(profile_fingerprint)
-    WHERE revoked_at IS NULL;
-
 -- Immutable evidence and generation envelopes for automatic person facts.
 -- Rows remain append-only for the lifetime of their owning person.
 CREATE TABLE IF NOT EXISTS person_fact_evidence (
@@ -900,6 +914,10 @@ CREATE TABLE IF NOT EXISTS person_sweep_attempts (
         '', 'policy', 'budget', 'lease_lost', 'rate_limited', 'timeout',
         'provider_http', 'invalid_output', 'archive_gap', 'internal'
     )),
+    brief_failure_class         TEXT NOT NULL DEFAULT '' CHECK (brief_failure_class IN (
+        '', 'policy', 'budget', 'lease_lost', 'rate_limited', 'timeout',
+        'provider_http', 'invalid_output', 'archive_gap', 'internal'
+    )),
     cursor_envelope_json        TEXT NOT NULL,
     envelope_hash               TEXT NOT NULL,
     program_fingerprint         TEXT NOT NULL,
@@ -964,8 +982,8 @@ CREATE TABLE IF NOT EXISTS person_sweep_batches (
     created_at                  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     completed_at                TEXT,
     CONSTRAINT person_sweep_batches_call_coordinate_check CHECK (
-        (call_ordinal = 0 AND purpose = 'primary') OR
-        (call_ordinal = 1 AND purpose = 'repair')
+        (call_ordinal = 0 AND purpose IN ('primary', 'brief')) OR
+        (call_ordinal = 1 AND purpose IN ('repair', 'brief_repair'))
     ),
     PRIMARY KEY (attempt_id, batch_ordinal, call_ordinal)
 );
@@ -997,7 +1015,8 @@ CREATE TABLE IF NOT EXISTS person_fact_claims (
     value_fingerprint     TEXT,
     valid_from            DATETIME,
     valid_until           DATETIME,
-    origin                TEXT NOT NULL CHECK (origin IN ('extraction', 'enrichment', 'system', 'invalid')),
+    origin                TEXT NOT NULL CONSTRAINT person_fact_claims_origin_check
+                              CHECK (origin IN ('extraction', 'enrichment', 'brief', 'system', 'invalid')),
     confidence_json       JSON NOT NULL,
     rejection_action      TEXT CHECK (rejection_action IN (
                               'applied', 'retained', 'superseded', 'invalid', 'identity-rejected',
@@ -1093,6 +1112,59 @@ CREATE TABLE IF NOT EXISTS person_fact_pin_events (
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Opt-in for generated relationship briefs, on top of person_tracking. Row
+-- presence is the state, exactly like tracking; enrolling requires a tracking
+-- row, and unenrolling leaves existing brief versions readable.
+CREATE TABLE IF NOT EXISTS person_brief_enrollments (
+    person_id   INTEGER PRIMARY KEY REFERENCES persons(id) ON DELETE CASCADE,
+    enabled_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    actor       TEXT NOT NULL
+);
+
+-- Immutable dated brief versions. structured_json and rendered_text are never
+-- updated: a regeneration inserts version n+1 as 'current' and marks version n
+-- 'superseded' in the same transaction.
+CREATE TABLE IF NOT EXISTS person_briefs (
+    id                          INTEGER PRIMARY KEY,
+    person_id                   INTEGER NOT NULL REFERENCES persons(id) ON DELETE CASCADE,
+    version                     INTEGER NOT NULL CHECK (version >= 1),
+    generation_id               INTEGER NOT NULL REFERENCES person_fact_generations(id) ON DELETE CASCADE,
+    status                      TEXT NOT NULL CHECK (status IN ('current', 'superseded', 'rejected')),
+    program_id                  TEXT NOT NULL,
+    program_version             TEXT NOT NULL,
+    program_fingerprint         TEXT NOT NULL,
+    provider                    TEXT NOT NULL,
+    provider_version            TEXT NOT NULL,
+    model                       TEXT NOT NULL,
+    model_version               TEXT NOT NULL,
+    provider_policy_fingerprint TEXT NOT NULL,
+    boundary_json               JSON NOT NULL,
+    structured_json             JSON NOT NULL,
+    rendered_text               TEXT NOT NULL,
+    renderer_policy             TEXT NOT NULL,
+    dropped_item_count          INTEGER NOT NULL DEFAULT 0 CHECK (dropped_item_count >= 0),
+    generated_at                DATETIME NOT NULL,
+    superseded_at               DATETIME,
+    rejected_at                 DATETIME,
+    rejected_reason             TEXT NOT NULL DEFAULT '',
+    created_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (person_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS person_brief_evidence (
+    brief_id    INTEGER NOT NULL REFERENCES person_briefs(id) ON DELETE CASCADE,
+    evidence_id INTEGER NOT NULL REFERENCES person_fact_evidence(id) ON DELETE CASCADE,
+    ordinal     INTEGER NOT NULL CHECK (ordinal >= 0),
+    PRIMARY KEY (brief_id, ordinal)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_briefs_current
+    ON person_briefs(person_id) WHERE status = 'current';
+CREATE INDEX IF NOT EXISTS idx_person_briefs_person_version
+    ON person_briefs(person_id, version DESC);
+CREATE INDEX IF NOT EXISTS idx_person_brief_evidence_evidence
+    ON person_brief_evidence(evidence_id, brief_id);
+
 CREATE INDEX IF NOT EXISTS idx_person_fact_generations_person
     ON person_fact_generations(person_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_person_fact_evidence_person
@@ -1166,6 +1238,7 @@ CREATE TABLE IF NOT EXISTS carddav_resources (
     governance              TEXT NOT NULL CHECK (governance IN ('remote', 'local', 'none')),
     person_id               INTEGER REFERENCES persons(id) ON DELETE SET NULL,
     person_revision_at_bind INTEGER,
+    owns_display_name       BOOLEAN NOT NULL DEFAULT FALSE,
     created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (address_book_id, href)
@@ -1191,6 +1264,10 @@ CREATE TABLE IF NOT EXISTS carddav_publications (
     previous_mapping_revision   INTEGER,
     create_recovery_used        BOOLEAN NOT NULL DEFAULT FALSE,
     mutation_revision           INTEGER NOT NULL DEFAULT 0 CHECK (mutation_revision >= 0),
+    outgoing_envelope_metadata  BLOB,
+    approved_body_sha256        TEXT,
+    approved_inference_revision INTEGER,
+    approved_mutation_revision  INTEGER,
     pending_started_at          DATETIME,
     created_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1215,6 +1292,13 @@ CREATE TABLE IF NOT EXISTS carddav_conflicts (
     base_remote_etag         TEXT NOT NULL,
     remote_etag              TEXT,
     mapping_revision         INTEGER NOT NULL CHECK (mapping_revision > 0),
+    review_revision          INTEGER NOT NULL DEFAULT 1,
+    local_inference_revision INTEGER,
+    approved_local_body_sha256 TEXT,
+    approved_local_inference_revision INTEGER,
+    approved_conflict_revision INTEGER,
+    local_envelope_metadata BLOB,
+    local_mutation_intent BLOB,
     local_body               BLOB,
     remote_body              BLOB,
     local_tombstone          BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1318,6 +1402,9 @@ CREATE TABLE IF NOT EXISTS messages (
     is_from_me BOOLEAN DEFAULT FALSE,
     source_is_from_me BOOLEAN,
     identity_is_from_me BOOLEAN NOT NULL DEFAULT FALSE,
+    account_address TEXT,
+    account_path TEXT,
+    draft_authored BOOLEAN NOT NULL DEFAULT FALSE, -- once filed as a draft, kept after the draft is retired
 
     -- Content
     subject TEXT,               -- email subject, NULL for chat
@@ -1455,6 +1542,17 @@ CREATE TABLE IF NOT EXISTS reactions (
     UNIQUE(message_id, participant_id, reaction_type, reaction_value)
 );
 
+-- Provider reaction event IDs, so a later redaction removes the right reaction.
+-- Two equivalent events share one visible reaction until both are redacted.
+CREATE TABLE IF NOT EXISTS reaction_source_events (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    source_reaction_id TEXT NOT NULL,
+    reaction_id INTEGER NOT NULL REFERENCES reactions(id) ON DELETE CASCADE,
+    PRIMARY KEY(source_id, source_reaction_id)
+);
+CREATE INDEX IF NOT EXISTS idx_reaction_source_events_reaction
+    ON reaction_source_events(reaction_id);
+
 -- ============================================================================
 -- ATTACHMENTS & MEDIA
 -- ============================================================================
@@ -1486,7 +1584,7 @@ CREATE TABLE IF NOT EXISTS attachments (
     -- Platform-specific
     source_attachment_id TEXT,      -- original ID from platform
     attachment_metadata JSON,       -- EXIF, etc.
-	attachment_state TEXT,           -- pending, stored, skipped, failed
+	attachment_state TEXT,           -- pending, stored, skipped, failed, unavailable
 	attachment_skip_reason TEXT,     -- typed policy/fetch outcome
 
     -- Source-authoritative occurrence role and provenance. Unknown fails
@@ -1529,6 +1627,77 @@ CREATE TABLE IF NOT EXISTS message_labels (
 
     PRIMARY KEY (message_id, label_id)
 );
+
+-- Durable cache repair boundary. Triggers write in the same transaction as
+-- each child-row mutation, so a failed or interrupted cache publication can
+-- replay every change after the last committed sequence.
+CREATE TABLE IF NOT EXISTS cache_related_change_journal (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset TEXT NOT NULL,
+    message_id INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cache_related_change_message
+    ON cache_related_change_journal(message_id);
+
+-- Revisions caused solely by related-row edits can be repaired from the
+-- child-row journal. Every other derived revision still requires a full build.
+CREATE TABLE IF NOT EXISTS cache_related_revision_journal (
+    revision INTEGER PRIMARY KEY
+);
+
+-- A label definition can change without touching any message_labels row.
+-- Message ID zero denotes a dataset-wide change for cache invalidation.
+CREATE TRIGGER IF NOT EXISTS trg_cache_label_definitions_insert
+AFTER INSERT ON labels FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('labels', 0);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_label_definitions_update
+AFTER UPDATE ON labels FOR EACH ROW
+WHEN OLD.name IS NOT NEW.name BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('labels', 0);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_label_definitions_delete
+AFTER DELETE ON labels FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id) VALUES ('labels', 0);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cache_labels_insert
+AFTER INSERT ON message_labels FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    VALUES ('message_labels', NEW.message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_labels_update
+AFTER UPDATE ON message_labels FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    VALUES ('message_labels', OLD.message_id);
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    SELECT 'message_labels', NEW.message_id
+    WHERE NEW.message_id <> OLD.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_labels_delete
+AFTER DELETE ON message_labels FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    VALUES ('message_labels', OLD.message_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_cache_attachments_insert
+AFTER INSERT ON attachments FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    VALUES ('attachments', NEW.message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_attachments_update
+AFTER UPDATE ON attachments FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    VALUES ('attachments', OLD.message_id);
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    SELECT 'attachments', NEW.message_id
+    WHERE NEW.message_id <> OLD.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_cache_attachments_delete
+AFTER DELETE ON attachments FOR EACH ROW BEGIN
+    INSERT INTO cache_related_change_journal (dataset, message_id)
+    VALUES ('attachments', OLD.message_id);
+END;
 
 -- ============================================================================
 -- RAW DATA STORAGE
@@ -1638,6 +1807,83 @@ CREATE TABLE IF NOT EXISTS attachment_change_consumers (
     CHECK (last_sequence >= baseline_sequence)
 );
 
+-- Beeper supplied-media occurrence identity and shared processing state. These
+-- rows retain only local evidence and remote receipt identities.
+CREATE TABLE IF NOT EXISTS beeper_media_occurrences (
+    destination_key         TEXT NOT NULL,
+    occurrence_ref          TEXT NOT NULL,
+    revision                TEXT NOT NULL,
+    source_type             TEXT NOT NULL,
+    source_identifier       TEXT NOT NULL,
+    source_conversation_id  TEXT NOT NULL,
+    source_message_id       TEXT NOT NULL,
+    source_attachment_id    TEXT NOT NULL,
+    source_part_key         TEXT NOT NULL,
+    source_row_id           INTEGER NOT NULL DEFAULT 0,
+    message_id              INTEGER NOT NULL DEFAULT 0,
+    attachment_id           INTEGER NOT NULL DEFAULT 0,
+    source_sha256           TEXT NOT NULL,
+    byte_length             INTEGER NOT NULL CHECK (byte_length > 0),
+    raw_hash                TEXT NOT NULL DEFAULT '',
+    transcript_sha256       TEXT NOT NULL DEFAULT '',
+    language                TEXT NOT NULL DEFAULT '',
+    occurrence_json         TEXT NOT NULL,
+    request_filename        TEXT NOT NULL,
+    request_mime_type       TEXT NOT NULL,
+    retention_operation_id  TEXT NOT NULL DEFAULT '',
+    retention_state         TEXT NOT NULL DEFAULT 'pending'
+        CHECK (retention_state IN ('pending', 'retained', 'blocked', 'source_unavailable', 'revoked')),
+    next_action_at          DATETIME,
+    error_code              TEXT NOT NULL DEFAULT '',
+    vault_uid               TEXT NOT NULL DEFAULT '',
+    source_id               TEXT NOT NULL DEFAULT '',
+    source_version_id       TEXT NOT NULL DEFAULT '',
+    content_version_id      TEXT NOT NULL DEFAULT '',
+    occurrence_id           TEXT NOT NULL DEFAULT '',
+    processing_key          TEXT NOT NULL DEFAULT '',
+    coverage_state          TEXT NOT NULL DEFAULT '',
+    created_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at              DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (destination_key, occurrence_ref, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_beeper_media_occurrences_ready
+    ON beeper_media_occurrences(destination_key, retention_state, next_action_at, occurrence_ref);
+CREATE INDEX IF NOT EXISTS idx_beeper_media_occurrences_processing
+    ON beeper_media_occurrences(destination_key, processing_key, retention_state);
+CREATE INDEX IF NOT EXISTS idx_beeper_media_occurrences_source
+    ON beeper_media_occurrences(source_type, source_identifier, source_message_id, destination_key);
+
+CREATE TABLE IF NOT EXISTS beeper_media_deliveries (
+    destination_key          TEXT NOT NULL,
+    processing_key           TEXT NOT NULL,
+    source_sha256            TEXT NOT NULL,
+    byte_length              INTEGER NOT NULL CHECK (byte_length > 0),
+    transcript_sha256        TEXT NOT NULL DEFAULT '',
+    language                 TEXT NOT NULL DEFAULT '',
+    provider                 TEXT NOT NULL DEFAULT 'beeper',
+    profile                  TEXT NOT NULL DEFAULT 'supplied-transcript',
+    phase                    TEXT NOT NULL DEFAULT 'pending-artifact'
+        CHECK (phase IN ('pending-artifact', 'pending-process', 'observing', 'done', 'blocked', 'source_unavailable')),
+    source_id                TEXT NOT NULL DEFAULT '',
+    source_version_id        TEXT NOT NULL DEFAULT '',
+    content_version_id       TEXT NOT NULL DEFAULT '',
+    donor_occurrence_id      TEXT NOT NULL DEFAULT '',
+    supplied_input_id        TEXT NOT NULL DEFAULT '',
+    pending_operation_id     TEXT,
+    frozen_request_json      TEXT,
+    next_action_at           DATETIME,
+    error_code               TEXT NOT NULL DEFAULT '',
+    processing_operation_id  TEXT NOT NULL DEFAULT '',
+    job_id                   TEXT NOT NULL DEFAULT '',
+    operation_state          TEXT NOT NULL DEFAULT '',
+    coverage_state           TEXT NOT NULL DEFAULT '',
+    created_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at               DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (destination_key, processing_key)
+);
+CREATE INDEX IF NOT EXISTS idx_beeper_media_deliveries_ready
+    ON beeper_media_deliveries(destination_key, phase, next_action_at, processing_key);
+
 -- Provider-independent visual indexing lifecycle. Dense vectors live in the
 -- selected vector backend; only opaque publication tokens are authoritative
 -- here, which keeps SQLite cross-database publication crash-safe.
@@ -1739,7 +1985,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 
     started_at DATETIME NOT NULL,
     completed_at DATETIME,
-    status TEXT DEFAULT 'running',  -- 'running', 'completed', 'failed', 'cancelled'
+    status TEXT DEFAULT 'running',  -- 'running', 'completed', 'failed', 'cancelled', 'paused'
 
     messages_processed INTEGER DEFAULT 0,
     messages_added INTEGER DEFAULT 0,
@@ -1828,6 +2074,162 @@ CREATE TABLE IF NOT EXISTS imap_message_memberships (
 CREATE INDEX IF NOT EXISTS idx_imap_message_memberships_source_message
     ON imap_message_memberships(source_id, message_id);
 
+-- Managed outbound drafts retain the exact APPEND receipt and any interrupted
+-- replacement bytes. The receipt is the mutation authority; mailbox sync only
+-- observes memberships and never changes these fields.
+CREATE TABLE IF NOT EXISTS imap_drafts (
+    draft_id TEXT PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    current_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    current_mailbox TEXT NOT NULL,
+    current_uidvalidity INTEGER NOT NULL,
+    current_uid INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    discarded_at DATETIME,
+    pending_operation TEXT,
+    pending_original_message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+    pending_original_mailbox TEXT,
+    pending_original_uidvalidity INTEGER,
+    pending_original_uid INTEGER,
+    pending_raw BLOB,
+    pending_replacement_mailbox TEXT,
+    pending_replacement_uidvalidity INTEGER,
+    pending_replacement_uid INTEGER,
+    pending_code TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CHECK (
+        (pending_operation IS NULL
+            AND pending_original_message_id IS NULL
+            AND pending_original_mailbox IS NULL
+            AND pending_original_uidvalidity IS NULL
+            AND pending_original_uid IS NULL
+            AND pending_raw IS NULL
+            AND pending_replacement_mailbox IS NULL
+            AND pending_replacement_uidvalidity IS NULL
+            AND pending_replacement_uid IS NULL
+            AND pending_code IS NULL)
+        OR (pending_operation IS NOT NULL
+            AND pending_operation IN ('edit', 'delete')
+            AND pending_original_message_id IS NOT NULL
+            AND pending_original_mailbox IS NOT NULL
+            AND pending_original_uidvalidity IS NOT NULL
+            AND pending_original_uidvalidity > 0
+            AND pending_original_uid IS NOT NULL
+            AND pending_original_uid > 0
+            AND ((pending_operation = 'edit' AND pending_raw IS NOT NULL AND length(pending_raw) > 0)
+                OR (pending_operation = 'delete' AND pending_raw IS NULL))
+            AND (pending_operation = 'edit'
+                OR (pending_replacement_mailbox IS NULL
+                    AND pending_replacement_uidvalidity IS NULL
+                    AND pending_replacement_uid IS NULL)))
+    ),
+    CHECK (discarded_at IS NULL OR pending_operation IS NULL),
+    CHECK (current_uidvalidity > 0 AND current_uid > 0),
+    CHECK ((pending_replacement_mailbox IS NULL
+            AND pending_replacement_uidvalidity IS NULL
+            AND pending_replacement_uid IS NULL)
+        OR (pending_replacement_mailbox IS NOT NULL
+            AND pending_replacement_uidvalidity IS NOT NULL
+            AND pending_replacement_uidvalidity > 0
+            AND pending_replacement_uid IS NOT NULL
+            AND pending_replacement_uid > 0))
+);
+
+CREATE INDEX IF NOT EXISTS idx_imap_drafts_current_message
+    ON imap_drafts(current_message_id);
+
+CREATE INDEX IF NOT EXISTS idx_imap_drafts_pending_original_message
+    ON imap_drafts(pending_original_message_id);
+
+-- Managed Gmail drafts retain the stable provider draft ID while Gmail
+-- replaces the enclosed message ID on each update.
+CREATE TABLE IF NOT EXISTS gmail_drafts (
+    draft_id TEXT PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    gmail_draft_id TEXT NOT NULL,
+    current_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    current_gmail_message_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    discarded_at DATETIME,
+    pending_operation TEXT,
+    pending_original_message_id INTEGER REFERENCES messages(id) ON DELETE CASCADE,
+    pending_original_gmail_message_id TEXT,
+    pending_raw BLOB,
+    pending_replacement_gmail_message_id TEXT,
+    pending_code TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, gmail_draft_id),
+    CHECK (
+        (pending_operation IS NULL
+            AND pending_original_message_id IS NULL
+            AND pending_original_gmail_message_id IS NULL
+            AND pending_raw IS NULL
+            AND pending_replacement_gmail_message_id IS NULL
+            AND pending_code IS NULL)
+        OR (pending_operation IN ('edit', 'delete')
+            AND pending_original_message_id IS NOT NULL
+            AND pending_original_gmail_message_id IS NOT NULL
+            AND length(trim(pending_original_gmail_message_id)) > 0
+            AND ((pending_operation = 'edit' AND pending_raw IS NOT NULL AND length(pending_raw) > 0)
+                OR (pending_operation = 'delete' AND pending_raw IS NULL))
+            AND (pending_operation = 'edit' OR pending_replacement_gmail_message_id IS NULL))
+    ),
+    CHECK (pending_operation = 'edit' OR pending_replacement_gmail_message_id IS NULL),
+    CHECK (discarded_at IS NULL OR pending_operation IS NULL)
+);
+
+CREATE INDEX IF NOT EXISTS idx_gmail_drafts_current_message
+    ON gmail_drafts(current_message_id);
+
+CREATE INDEX IF NOT EXISTS idx_gmail_drafts_pending_original_message
+    ON gmail_drafts(pending_original_message_id);
+
+-- Local chat drafts are unsent text owned by msgvault. Native destination
+-- fields are copied at creation so later mapping repairs cannot retarget it.
+CREATE TABLE IF NOT EXISTS chat_drafts (
+    draft_id TEXT PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    source_conversation_id TEXT NOT NULL,
+    conversation_type TEXT NOT NULL,
+    reply_to_source_message_id TEXT,
+    body TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_drafts_source
+    ON chat_drafts(source_id);
+
+CREATE INDEX IF NOT EXISTS idx_chat_drafts_conversation
+    ON chat_drafts(conversation_id);
+
+-- Beeper drafts bind a chat's native composer, which holds the content, so
+-- the shared pending columns carry no archive message link.
+CREATE TABLE IF NOT EXISTS beeper_drafts (
+    draft_id TEXT PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL CHECK (length(trim(chat_id)) > 0),
+    text TEXT,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    discarded_at DATETIME,
+    pending_operation TEXT CHECK (pending_operation IN ('edit', 'delete')),
+    pending_original_message_id INTEGER CHECK (pending_original_message_id IS NULL),
+    pending_raw BLOB,
+    pending_code TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    CHECK (pending_operation = 'edit' OR pending_raw IS NULL),
+    CHECK (discarded_at IS NULL OR pending_operation IS NULL)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_beeper_drafts_live_chat
+    ON beeper_drafts(source_id, chat_id) WHERE discarded_at IS NULL;
+
 -- Imported source items (files/objects already processed for resumable adapters)
 CREATE TABLE IF NOT EXISTS source_import_items (
     id INTEGER PRIMARY KEY,
@@ -1890,8 +2292,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_sent_at ON messages(sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_type ON messages(message_type);
 CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(source_id, deleted_from_source_at);
 CREATE INDEX IF NOT EXISTS idx_messages_source_message_id ON messages(source_message_id);
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to_message_id ON messages(reply_to_message_id)
+    WHERE reply_to_message_id IS NOT NULL;
 
 -- Message recipients
+-- idx_message_recipients_email_from is built after legacy column migrations in Store.
 CREATE INDEX IF NOT EXISTS idx_message_recipients_message ON message_recipients(message_id);
 CREATE INDEX IF NOT EXISTS idx_message_recipients_participant ON message_recipients(participant_id, recipient_type);
 
@@ -2989,6 +3394,9 @@ CREATE INDEX IF NOT EXISTS idx_participant_observations_current_lookup
     ON participant_contact_observations(
         address_kind, service_id, scope_kind, scope_value, normalized_value
     ) WHERE active_until IS NULL AND superseded_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_person_match_scoring_contact_lookup
+    ON participant_contact_observations(address_kind, normalized_value, participant_id)
+    WHERE active_until IS NULL AND superseded_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_participant_observations_participant
     ON participant_contact_observations(participant_id);
 CREATE INDEX IF NOT EXISTS idx_participant_observations_source
@@ -3042,6 +3450,62 @@ CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_state
 CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_value
     ON identity_match_candidates(basis, normalized_value)
     WHERE normalized_value IS NOT NULL;
+
+-- Scoring stores only a fingerprint and redacted outcome. The work row is a
+-- mutable lease/retry slot; the journal itself is append-only.
+CREATE TABLE IF NOT EXISTS person_match_judgment_work (
+    candidate_id INTEGER PRIMARY KEY REFERENCES identity_match_candidates(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_token TEXT,
+    lease_until DATETIME,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    retry_after_at DATETIME,
+    CHECK (attempt_count >= 0)
+);
+CREATE TABLE IF NOT EXISTS person_match_judgments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL,
+    fingerprint TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    question_version TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    probability REAL,
+    blockers_json TEXT NOT NULL DEFAULT '[]',
+    outcome TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('scored', 'retryable_error', 'terminal_error', 'stale')),
+    error_class TEXT,
+    retry_after_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (probability IS NULL OR (probability >= 0 AND probability <= 1))
+);
+CREATE INDEX IF NOT EXISTS idx_person_match_judgments_candidate
+    ON person_match_judgments(candidate_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_person_match_judgments_final
+    ON person_match_judgments(candidate_id, fingerprint)
+    WHERE status IN ('scored', 'terminal_error');
+CREATE TABLE IF NOT EXISTS person_match_judgment_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    candidate_id INTEGER NOT NULL DEFAULT 0,
+    started_at_zero BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- A reviewed acceptance has a second transaction for applying its link.
+-- Keep the evidence snapshot so restart recovery cannot link changed evidence.
+CREATE TABLE IF NOT EXISTS identity_match_review_decisions (
+    candidate_id INTEGER PRIMARY KEY REFERENCES identity_match_candidates(id) ON DELETE CASCADE,
+    evidence_fingerprint TEXT NOT NULL
+);
+
+-- A terminal user decision can be retried after its response is lost. Bind
+-- that retry to the original review token and the unchanged post-decision
+-- evidence snapshot so stale tokens cannot succeed after new evidence lands.
+CREATE TABLE IF NOT EXISTS identity_match_review_receipts (
+    candidate_id INTEGER PRIMARY KEY REFERENCES identity_match_candidates(id) ON DELETE CASCADE,
+    decision TEXT NOT NULL,
+    review_token TEXT NOT NULL,
+    evidence_fingerprint TEXT NOT NULL
+);
 
 -- A participant merge can collapse duplicate candidates while an accepted
 -- application is waiting for the identity lock. Record the exact survivor,
@@ -3138,6 +3602,7 @@ CREATE TABLE IF NOT EXISTS document_extraction_profiles (
     retention_posture     TEXT NOT NULL,
     training_posture      TEXT NOT NULL,
     allowed_media_types   JSON NOT NULL,
+    include_inline        BOOLEAN NOT NULL DEFAULT FALSE,
     policy_json           JSON NOT NULL,
     enabled               BOOLEAN NOT NULL DEFAULT FALSE,
     created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3182,6 +3647,10 @@ CREATE TABLE IF NOT EXISTS document_extractions (
     rebuild_id            TEXT REFERENCES document_extraction_rebuilds(id) ON DELETE SET NULL,
     canonical_blob_hash   TEXT NOT NULL CHECK (length(canonical_blob_hash) = 64),
     extraction_input_key  TEXT NOT NULL DEFAULT 'original',
+    -- Media type of the occurrence the claim uploaded through. A head only
+    -- covers its owner while the representative occurrence still selects
+    -- this route; NULL predates route tracking and always matches.
+    source_media_type     TEXT,
     state                 TEXT NOT NULL CHECK (state IN ('staging', 'ready', 'terminal', 'tombstoned')),
     lease_owner           TEXT,
     lease_fence           INTEGER NOT NULL DEFAULT 0,
@@ -3201,6 +3670,8 @@ CREATE TABLE IF NOT EXISTS document_extractions (
     unit_kind             TEXT,
     normalized_truncated  BOOLEAN NOT NULL DEFAULT FALSE,
     terminal_reason       TEXT,
+    failure_reason        TEXT,
+    failure_detail        TEXT,
     source_sequence       INTEGER NOT NULL DEFAULT 0,
     created_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3216,6 +3687,17 @@ CREATE INDEX IF NOT EXISTS idx_document_extractions_lease
     ON document_extractions(state, lease_until);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_extractions_vector_identity
     ON document_extractions(id, profile_id, canonical_blob_hash, extraction_input_key, source_sequence);
+
+CREATE TABLE IF NOT EXISTS document_extraction_conversions (
+    extraction_id        TEXT PRIMARY KEY REFERENCES document_extractions(id) ON DELETE CASCADE,
+    provider_media_type TEXT NOT NULL,
+    pdf_sha256           TEXT NOT NULL CHECK (length(pdf_sha256) = 64),
+    pdf_bytes            INTEGER NOT NULL CHECK (pdf_bytes > 0),
+    pages                INTEGER NOT NULL CHECK (pages > 0),
+    policy_fingerprint   TEXT NOT NULL,
+    converter_version    TEXT NOT NULL,
+    spans                JSON NOT NULL
+);
 
 -- One renewable claim per stable content owner. The monotonic fence prevents
 -- an expired worker from publishing after a later worker has taken ownership.
@@ -4085,3 +4567,67 @@ CREATE TABLE IF NOT EXISTS email_work_action_targets (
  seed_uid TEXT NOT NULL REFERENCES email_work_seeds(uid) ON DELETE CASCADE,
  PRIMARY KEY(action_uid,seed_uid)
 );
+
+-- Current normalized source evidence, rebuilt from authoritative meeting raw.
+CREATE TABLE IF NOT EXISTS meeting_details (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    projection_version INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    duration_seconds REAL,
+    duration_basis TEXT NOT NULL DEFAULT '',
+    action_coverage TEXT NOT NULL,
+    transcript_state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meeting_action_items (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    source_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    assignee_name TEXT NOT NULL DEFAULT '',
+    assignee_email TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    source_status TEXT NOT NULL DEFAULT '',
+    due_date TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL,
+    locator TEXT NOT NULL,
+    PRIMARY KEY (message_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_meeting_actions_status
+    ON meeting_action_items(status, message_id, ordinal);
+CREATE INDEX IF NOT EXISTS idx_meeting_actions_assignee
+    ON meeting_action_items(assignee_email, message_id, ordinal);
+
+-- Delivery-header addresses read from each email's stored MIME. Account
+-- attribution derives messages.account_address from them; they are hints
+-- about routing, not proof of ownership.
+CREATE TABLE IF NOT EXISTS message_delivery_addresses (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,      -- 'original' or 'delivered'
+    address TEXT NOT NULL,   -- lowercased mailbox
+    PRIMARY KEY (message_id, kind, address)
+);
+CREATE INDEX IF NOT EXISTS idx_message_delivery_addresses_address
+    ON message_delivery_addresses(address, message_id);
+
+CREATE TABLE IF NOT EXISTS recording_references (
+    destination_key TEXT NOT NULL,
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    route_key TEXT NOT NULL,
+    ref_sha256 TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    occurrence_json TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('pending','uncertain','retained','blocked','withdrawn')),
+    next_action_at DATETIME NOT NULL,
+    error_code TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL DEFAULT '',
+    occurrence_id TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT '',
+    coverage_state TEXT NOT NULL DEFAULT '',
+    last_send_at DATETIME,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (destination_key, message_id, route_key)
+);
+CREATE INDEX IF NOT EXISTS idx_recording_references_due
+    ON recording_references(destination_key, state, next_action_at);

@@ -6,7 +6,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"go.kenn.io/msgvault/internal/duckdbutil"
 	"go.kenn.io/msgvault/internal/explorecatalog"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/search"
@@ -37,7 +39,7 @@ const (
 )
 
 type ExploreFilter struct {
-	Dimension string   `json:"dimension" enum:"source,participant,domain,message_type,mailing_list,after,before,deletion,identity,inbox_state,read_state,row_unit,handling_state"`
+	Dimension string   `json:"dimension" enum:"source,participant,domain,message_type,mailing_list,after,before,deletion,identity,inbox_state,read_state,row_unit,handling_state,account"`
 	Values    []string `json:"values" minItems:"1"`
 }
 
@@ -45,17 +47,18 @@ type ExploreFilter struct {
 const (
 	exploreFilterHandlingState = "handling_state"
 	exploreFilterRowUnit       = "row_unit"
-	exploreFilterSource        = "source"
 	exploreFilterInboxState    = "inbox_state"
 	exploreFilterReadState     = "read_state"
-	exploreFilterParticipant   = "participant"
-	exploreFilterDomain        = "domain"
-	exploreFilterMessageType   = "message_type"
-	exploreFilterMailingList   = "mailing_list"
-	exploreFilterAfter         = "after"
-	exploreFilterBefore        = "before"
-	exploreFilterDeletion      = "deletion"
-	exploreFilterIdentity      = "identity"
+	exploreFilterAccount       = explorecatalog.FilterAccount
+	exploreFilterSource        = explorecatalog.FilterSource
+	exploreFilterParticipant   = explorecatalog.FilterParticipant
+	exploreFilterDomain        = explorecatalog.FilterDomain
+	exploreFilterMessageType   = explorecatalog.FilterMessageType
+	exploreFilterMailingList   = explorecatalog.FilterMailingList
+	exploreFilterAfter         = explorecatalog.FilterAfter
+	exploreFilterBefore        = explorecatalog.FilterBefore
+	exploreFilterDeletion      = explorecatalog.FilterDeletion
+	exploreFilterIdentity      = explorecatalog.FilterIdentity
 )
 
 var (
@@ -104,18 +107,18 @@ type ExploreHTTPRequest struct {
 	Presentation        string                  `json:"presentation,omitempty" enum:"table,timeline,files"`
 	Sort                []ExploreSort           `json:"sort,omitempty"`
 	Cursor              string                  `json:"cursor,omitempty"`
-	Limit               int                     `json:"limit,omitempty" minimum:"0" maximum:"500"`
+	Limit               int                     `json:"limit,omitzero" minimum:"0" maximum:"500"`
 	CandidateSnapshotID string                  `json:"candidate_snapshot_id,omitempty"`
 }
 
 type ExploreHTTPResponse struct {
 	Rows                   []query.EntryRow       `json:"rows"`
-	TotalCount             *int64                 `json:"total_count,omitempty"`
+	TotalCount             *int64                 `json:"total_count,omitzero" nullable:"false"`
 	CacheRevision          string                 `json:"cache_revision"`
 	SearchProvenance       query.SearchProvenance `json:"search_provenance"`
 	CandidateSnapshotID    string                 `json:"candidate_snapshot_id,omitempty"`
 	NextCursor             string                 `json:"next_cursor,omitempty"`
-	CandidatePoolSaturated bool                   `json:"candidate_pool_saturated,omitempty"`
+	CandidatePoolSaturated bool                   `json:"candidate_pool_saturated,omitzero"`
 	// SearchDeletionScope is "active" when a semantic or hybrid search
 	// narrowed an unrestricted deletion context to active messages only —
 	// vector candidates never include source-deleted messages, and the
@@ -136,7 +139,7 @@ type ExploreGroupsHTTPRequest struct {
 	Presentation string                  `json:"presentation,omitempty" enum:"table"`
 	Sort         []ExploreGroupSort      `json:"sort,omitempty" maxItems:"1"`
 	Cursor       string                  `json:"cursor,omitempty"`
-	Limit        int                     `json:"limit,omitempty" minimum:"0" maximum:"500"`
+	Limit        int                     `json:"limit,omitzero" minimum:"0" maximum:"500"`
 	// GroupKey restricts the response to the single group whose key equals it
 	// exactly, regardless of the group's rank under the predicate. total_count
 	// then reports the matched-row count (0 or 1).
@@ -213,10 +216,10 @@ type exploreCursor struct {
 	Request          string `json:"request"`
 	Revision         string `json:"revision"`
 	SearchRevision   string `json:"search_revision,omitempty"`
-	VisualGeneration int64  `json:"visual_generation,omitempty"`
+	VisualGeneration int64  `json:"visual_generation,omitzero"`
 	VisualRevision   string `json:"visual_revision,omitempty"`
 	Snapshot         string `json:"snapshot,omitempty"`
-	IdentityRevision int64  `json:"identity_revision,omitempty"`
+	IdentityRevision int64  `json:"identity_revision,omitzero"`
 
 	// DecayDate pins the UTC decay date (time.DateOnly) a relationship
 	// listing was first ranked with, so subsequent pages reuse it instead of
@@ -231,7 +234,7 @@ type exploreCursor struct {
 	// including the request hash — maps uniformly to 409 cursor_invalidated
 	// rather than a 400/409 split, per that endpoint's contract.
 	Timezone    string `json:"timezone,omitempty"`
-	CanonicalID int64  `json:"canonical_id,omitempty"`
+	CanonicalID int64  `json:"canonical_id,omitzero"`
 }
 
 type explorePrepared struct {
@@ -290,7 +293,9 @@ func (s *Server) handleExploreWithScope(w http.ResponseWriter, r *http.Request, 
 		}
 		prepared.request.CandidateSnapshotID = cursor.Snapshot
 	}
+	candidatesStarted := time.Now()
 	searchSpec, snapshotID, ok := s.resolveExploreSearch(r.Context(), w, prepared.request)
+	addExploreTiming(w, "candidates", time.Since(candidatesStarted))
 	if !ok {
 		return
 	}
@@ -317,7 +322,9 @@ func (s *Server) handleExploreWithScope(w http.ResponseWriter, r *http.Request, 
 		s.writeExploreUnavailable(r.Context(), w, query.CacheAbsent)
 		return
 	}
+	projectionStarted := time.Now()
 	result, err := explorer.Explore(r.Context(), prepared.query)
+	addExploreTiming(w, "projection", time.Since(projectionStarted))
 	if err != nil {
 		s.writeExploreError(r.Context(), w, err)
 		return
@@ -338,7 +345,10 @@ func (s *Server) handleExploreWithScope(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	if err := s.hydrateExploreIdentityMatches(r.Context(), result.Rows); err != nil {
+	identitiesStarted := time.Now()
+	err = s.hydrateExploreIdentityMatches(r.Context(), result.Rows)
+	addExploreTiming(w, "identities", time.Since(identitiesStarted))
+	if err != nil {
 		if s.writeIfContextError(w, err) {
 			return
 		}
@@ -370,6 +380,15 @@ func (s *Server) handleExploreWithScope(w http.ResponseWriter, r *http.Request, 
 		})
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// addExploreTiming reports milliseconds in the browser's request timing panel.
+// Candidate resolution includes lexical/embedding/retrieval subphases; callers
+// should not add its duration to those component measurements.
+func addExploreTiming(w http.ResponseWriter, name string, duration time.Duration) {
+	w.Header().Add("Server-Timing", fmt.Sprintf(
+		"%s;dur=%.3f", name, float64(duration)/float64(time.Millisecond),
+	))
 }
 
 func (s *Server) hydrateExploreIdentityMatches(ctx context.Context, rows []query.EntryRow) error {
@@ -484,23 +503,8 @@ func (s *Server) handleExploreGroups(w http.ResponseWriter, r *http.Request) {
 	}
 	searchRequest := ExploreHTTPRequest{Filters: request.Filters, Query: request.Query, SearchMode: request.SearchMode}
 	canonicalizeExploreRequest(&searchRequest)
-	var cursor exploreCursor
-	if request.Cursor != "" {
-		cursor, _ = s.decodeExploreCursor(request.Cursor)
-		if request.SearchMode == exploreSearchModeSemantic || request.SearchMode == exploreSearchModeHybrid {
-			if cursor.Snapshot == "" {
-				writeError(w, http.StatusBadRequest, "invalid_cursor", "semantic cursor is missing its candidate snapshot")
-				return
-			}
-			searchRequest.CandidateSnapshotID = cursor.Snapshot
-		}
-	}
-	searchSpec, snapshotID, ok := s.resolveExploreSearch(r.Context(), w, searchRequest)
-	if !ok || !requireCompleteCandidatePool(w, searchSpec) {
-		return
-	}
-	if request.Cursor != "" && cursor.SearchRevision != exploreResolvedSearchRevision(searchSpec) {
-		writeError(w, http.StatusConflict, "search_revision_changed", "The resolved search index revision changed; restart pagination")
+	_, searchSpec, snapshotID, ok := s.resolvePagedExploreSearch(r.Context(), w, request.Cursor, searchRequest)
+	if !ok {
 		return
 	}
 	analyzer, ok := s.queryEngineForContext(r.Context()).(query.Explorer)
@@ -508,11 +512,13 @@ func (s *Server) handleExploreGroups(w http.ResponseWriter, r *http.Request) {
 		s.writeExploreUnavailable(r.Context(), w, query.CacheAbsent)
 		return
 	}
+	groupingStarted := time.Now()
 	result, err := analyzer.ExploreGroups(r.Context(), query.ExploreGroupRequest{
 		Explore: query.ExploreRequest{Context: ctx, Search: searchSpec}, Dimension: string(dimension),
 		GroupKey: request.GroupKey, Sort: sortSpec,
 		Page: query.PageSpec{Limit: request.Limit, Offset: offset},
 	})
+	addExploreTiming(w, "grouping", time.Since(groupingStarted))
 	if err != nil {
 		s.writeExploreError(r.Context(), w, err)
 		return
@@ -1038,6 +1044,15 @@ func exploreContext(filters []ExploreFilter) (query.Context, error) {
 			} else {
 				result.ReadStates = append([]string(nil), filter.Values...)
 			}
+		case exploreFilterAccount:
+			if len(filter.Values) != 1 {
+				return result, errors.New("account filter requires one virtual account key or email address")
+			}
+			scope, err := exploreAccountScope(filter.Values[0])
+			if err != nil {
+				return result, err
+			}
+			result.AccountScopes = append(result.AccountScopes, scope)
 		case exploreFilterSource:
 			ids := make([]int64, len(filter.Values))
 			for i, value := range filter.Values {
@@ -1170,6 +1185,48 @@ func parseExploreIdentityFilter(filters []ExploreFilter) (exploreIdentityFilter,
 	}, nil
 }
 
+// exploreSearchDefinitionError is a search rule violation that depends only
+// on the request, so it carries the error code the Explore endpoints report.
+type exploreSearchDefinitionError struct {
+	code    string
+	message string
+}
+
+func (e *exploreSearchDefinitionError) Error() string { return e.message }
+
+// validateExploreSearchDefinition applies the search rules that depend only on
+// the request and not on the daemon's environment: query syntax, and for the
+// semantic and hybrid modes an active-only deletion scope and free text to
+// embed. The resolvers call it at run time; Saved View writes call it at save
+// time so a definition that can never search is refused before it is stored.
+// Index readiness and vector configuration stay with the resolvers.
+func validateExploreSearchDefinition(
+	request ExploreHTTPRequest, context query.Context,
+) (*search.Query, *exploreSearchDefinitionError) {
+	if request.SearchMode == "" {
+		return nil, nil
+	}
+	parsed := search.Parse(request.Query)
+	if err := parsed.Err(); err != nil {
+		return nil, &exploreSearchDefinitionError{code: "invalid_query", message: err.Error()}
+	}
+	if request.SearchMode == exploreSearchModeFullText {
+		return parsed, nil
+	}
+	if context.Deletion == query.DeletionDeleted {
+		return nil, &exploreSearchDefinitionError{
+			code:    "semantic_deletion_unsupported",
+			message: "Semantic and hybrid search cover active messages only; remove the deletion:deleted filter to search",
+		}
+	}
+	if strings.Join(parsed.TextTerms, " ") == "" {
+		return nil, &exploreSearchDefinitionError{
+			code: "missing_free_text", message: "Semantic and hybrid exploration require free text",
+		}
+	}
+	return parsed, nil
+}
+
 func validateExploreSearchPair(queryText, mode string) error {
 	if (queryText == "") != (mode == "") {
 		return errors.New("query and search_mode must be provided together")
@@ -1218,7 +1275,7 @@ func canonicalizeExploreFilters(filters []ExploreFilter) {
 
 func canonicalExploreHash(request ExploreHTTPRequest) string {
 	request.Cursor = ""
-	data, err := json.Marshal(request)
+	data, err := json.Marshal(request, json.Deterministic(true))
 	if err != nil {
 		panic(fmt.Sprintf("marshal canonical explore request: %v", err))
 	}
@@ -1236,7 +1293,7 @@ func hashCanonicalValue(value any, clearCursor bool) string {
 			value = request
 		}
 	}
-	data, err := json.Marshal(value)
+	data, err := json.Marshal(value, json.Deterministic(true))
 	if err != nil {
 		panic(fmt.Sprintf("marshal canonical explore value: %v", err))
 	}
@@ -1322,6 +1379,33 @@ func (s *Server) prepareResolvedExplorePredicate(
 	return prepared, nil
 }
 
+// resolvePagedExploreSearch resolves a paginated request's search, pinning a
+// semantic cursor's candidate snapshot and rejecting a changed search revision.
+func (s *Server) resolvePagedExploreSearch(
+	ctx context.Context, w http.ResponseWriter, rawCursor string, request ExploreHTTPRequest,
+) (exploreCursor, query.SearchSpec, string, bool) {
+	var cursor exploreCursor
+	if rawCursor != "" {
+		cursor, _ = s.decodeExploreCursor(rawCursor)
+		if request.SearchMode == exploreSearchModeSemantic || request.SearchMode == exploreSearchModeHybrid {
+			if cursor.Snapshot == "" {
+				writeError(w, http.StatusBadRequest, "invalid_cursor", "semantic cursor is missing its candidate snapshot")
+				return exploreCursor{}, query.SearchSpec{}, "", false
+			}
+			request.CandidateSnapshotID = cursor.Snapshot
+		}
+	}
+	searchSpec, snapshotID, ok := s.resolveExploreSearch(ctx, w, request)
+	if !ok || !requireCompleteCandidatePool(w, searchSpec) {
+		return exploreCursor{}, query.SearchSpec{}, "", false
+	}
+	if rawCursor != "" && cursor.SearchRevision != exploreResolvedSearchRevision(searchSpec) {
+		writeError(w, http.StatusConflict, "search_revision_changed", "The resolved search index revision changed; restart pagination")
+		return exploreCursor{}, query.SearchSpec{}, "", false
+	}
+	return cursor, searchSpec, snapshotID, true
+}
+
 func (s *Server) resolveExploreSearch(ctx context.Context, w http.ResponseWriter, request ExploreHTTPRequest) (query.SearchSpec, string, bool) {
 	if request.SearchMode == "" {
 		return query.SearchSpec{}, "", true
@@ -1337,14 +1421,14 @@ func (s *Server) resolveExploreSearch(ctx context.Context, w http.ResponseWriter
 		writeError(w, http.StatusServiceUnavailable, "lexical_index_unavailable", "The full-text index is unavailable")
 		return query.SearchSpec{}, "", false
 	}
-	parsed := search.Parse(request.Query)
-	if err := parsed.Err(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
-		return query.SearchSpec{}, "", false
-	}
 	filters, err := exploreContext(request.Filters)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
+		return query.SearchSpec{}, "", false
+	}
+	parsed, failure := validateExploreSearchDefinition(request, filters)
+	if failure != nil {
+		writeError(w, http.StatusBadRequest, failure.code, failure.message)
 		return query.SearchSpec{}, "", false
 	}
 	// Candidate resolution must cover the same population the analytical
@@ -1359,25 +1443,11 @@ func (s *Server) resolveExploreSearch(ctx context.Context, w http.ResponseWriter
 		candidateCap = query.MaxExploreCandidateMessageIDs
 	}
 	ids := make([]int64, 0)
-	seen := make(map[int64]struct{})
-	offset := 0
 	var reportedTotal int64
-	for matchable {
-		remainingCapacity := candidateCap - len(ids)
-		if remainingCapacity <= 0 {
-			break
-		}
-		pageLimit := min(exploreMaxLimit, remainingCapacity)
-		var (
-			messages []APIMessage
-			total    int64
-			err      error
-		)
-		if searcher, ok := s.store.(ctxMessageSearcher); ok {
-			messages, total, err = searcher.SearchMessagesQueryContext(ctx, parsed, offset, pageLimit)
-		} else {
-			messages, total, err = s.store.SearchMessagesQuery(parsed, offset, pageLimit)
-		}
+	if matchable {
+		started := time.Now()
+		ids, reportedTotal, err = s.store.SearchMessageIDsQueryContext(ctx, parsed, candidateCap)
+		addExploreTiming(w, "lexical", time.Since(started))
 		if err != nil {
 			if s.writeIfContextError(w, err) {
 				return query.SearchSpec{}, "", false
@@ -1385,21 +1455,9 @@ func (s *Server) resolveExploreSearch(ctx context.Context, w http.ResponseWriter
 			writeError(w, http.StatusServiceUnavailable, "lexical_index_unavailable", "The full-text index could not resolve candidates")
 			return query.SearchSpec{}, "", false
 		}
-		reportedTotal = total
-		for _, message := range messages {
-			if _, ok := seen[message.ID]; ok {
-				continue
-			}
-			seen[message.ID] = struct{}{}
-			ids = append(ids, message.ID)
-		}
-		offset += len(messages)
-		if len(messages) == 0 || int64(offset) >= total {
-			break
-		}
 	}
 	slices.Sort(ids)
-	saturated := reportedTotal > int64(offset)
+	saturated := reportedTotal > int64(len(ids))
 	revision := "fts5:" + hashCanonicalValue(struct {
 		ParsedQuery string  `json:"parsed_query"`
 		IDs         []int64 `json:"ids"`
@@ -1433,6 +1491,7 @@ func (s *Server) resolveExploreSearch(ctx context.Context, w http.ResponseWriter
 // combined predicate can match no messages and the resolver should skip
 // the index entirely.
 func applyLexicalFilterPushdown(parsed *search.Query, filters query.Context) bool {
+	parsed.AccountScopes = append(parsed.AccountScopes, search.CloneAccountScopes(filters.AccountScopes)...)
 	if len(filters.SourceIDs) > 0 {
 		if len(parsed.AccountIDs) == 0 {
 			parsed.AccountIDs = slices.Clone(filters.SourceIDs)
@@ -1554,14 +1613,14 @@ func (s *Server) resolveExploreVectorSearch(ctx context.Context, w http.Response
 		writeError(w, http.StatusServiceUnavailable, "vector_not_enabled", "Vector search is not configured")
 		return query.SearchSpec{}, "", false
 	}
-	parsed := search.Parse(request.Query)
-	if err := parsed.Err(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
-		return query.SearchSpec{}, "", false
-	}
 	exploreCtx, err := exploreContext(request.Filters)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error())
+		return query.SearchSpec{}, "", false
+	}
+	parsed, failure := validateExploreSearchDefinition(request, exploreCtx)
+	if failure != nil {
+		writeError(w, http.StatusBadRequest, failure.code, failure.message)
 		return query.SearchSpec{}, "", false
 	}
 	// Participant and domain filters are absent from the vector filter
@@ -1574,10 +1633,6 @@ func (s *Server) resolveExploreVectorSearch(ctx context.Context, w http.Response
 	// endpoints apply their participant/domain scope over semantic
 	// candidates the same way (see applyIdentityScope in
 	// handleExploreWithScope).
-	if exploreCtx.Deletion == query.DeletionDeleted {
-		writeError(w, http.StatusBadRequest, "semantic_deletion_unsupported", "Semantic and hybrid search cover active messages only; remove the deletion:deleted filter to search")
-		return query.SearchSpec{}, "", false
-	}
 	var lexicalSpec query.SearchSpec
 	if request.SearchMode == exploreSearchModeHybrid {
 		var ok bool
@@ -1598,10 +1653,6 @@ func (s *Server) resolveExploreVectorSearch(ctx context.Context, w http.Response
 		}
 	}
 	freeText := strings.Join(parsed.TextTerms, " ")
-	if freeText == "" {
-		writeError(w, http.StatusBadRequest, "missing_free_text", "Semantic and hybrid exploration require free text")
-		return query.SearchSpec{}, "", false
-	}
 	// Mirror the lexical resolver's pushdown semantics: request source and
 	// message-type filters intersect with equivalent query operators, and
 	// date bounds only tighten. Because the vector backends OR the values
@@ -1636,6 +1687,10 @@ func (s *Server) resolveExploreVectorSearch(ctx context.Context, w http.Response
 		s.writeExploreVectorError(w, err)
 		return query.SearchSpec{}, "", false
 	}
+	addExploreTiming(w, "embedding", meta.QueryEmbeddingDuration)
+	w.Header().Add("Server-Timing", fmt.Sprintf("retrieval;dur=%.3f;desc=%q",
+		float64(meta.RetrievalDuration)/float64(time.Millisecond), meta.Accelerator))
+
 	poolSaturated := meta.PoolSaturated || len(hits) >= exploreMaxLimit || lexicalSpec.CandidatePoolSaturated
 	if len(hits) > exploreMaxLimit {
 		hits = hits[:exploreMaxLimit]
@@ -1891,7 +1946,7 @@ func newExploreCursorKey() [32]byte {
 }
 
 func (s *Server) encodeExploreCursor(cursor exploreCursor) string {
-	data, err := json.Marshal(cursor)
+	data, err := json.Marshal(cursor, json.Deterministic(true))
 	if err != nil {
 		panic(fmt.Sprintf("marshal explore cursor: %v", err))
 	}
@@ -1926,13 +1981,13 @@ func (s *Server) decodeExploreCursor(encoded string) (exploreCursor, error) {
 }
 
 func decodeExploreJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
+	decoder := jsontext.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20), json.RejectUnknownMembers(true))
+
+	if err := json.UnmarshalDecode(decoder, dst); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body: "+err.Error())
 		return false
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := json.UnmarshalDecode(decoder, &struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "bad_request", "Request body must contain one JSON object")
 		return false
 	}
@@ -1961,7 +2016,15 @@ func (s *Server) writeExploreError(ctx context.Context, w http.ResponseWriter, e
 		return
 	}
 	s.logger.Error("exploration failed", "error", err)
-	writeError(w, http.StatusInternalServerError, "explore_failed", "Couldn't load results")
+	if duckdbutil.IsOutOfMemory(err) {
+		writeError(w, http.StatusServiceUnavailable, "query_resource_exhausted",
+			"This query ran out of memory or temporary disk space. Try narrowing the results with filters. "+
+				"The person running msgvault can check available resources and increase analytics.query_memory_limit "+
+				"or analytics.query_temp_limit in config.toml, then restart the server.")
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "explore_failed",
+		"Couldn't load results. Try again. If this keeps happening, ask the person running msgvault to check the server logs.")
 }
 
 type ExploreCacheUnavailableResponse struct {
@@ -1987,4 +2050,28 @@ func (s *Server) writeExploreUnavailable(
 		Error: "analytical_cache_unavailable", Message: "The committed analytical cache is unavailable",
 		Readiness: readiness, RecoveryAction: "Run msgvault build-cache --full-rebuild and retry",
 	})
+}
+
+// exploreAccountScope reads one account filter value: a virtual account key
+// from the account catalog, or an exact address matched on every source.
+func exploreAccountScope(value string) (search.AccountScope, error) {
+	if store.IsVirtualAccountKey(value) {
+		sourceID, address, unattributed, err := store.ParseVirtualAccountKey(value)
+		if err != nil {
+			return search.AccountScope{}, err
+		}
+		scope := search.AccountScope{SourceID: &sourceID, Unattributed: unattributed}
+		if !unattributed {
+			if address, err = search.ParseAccountAddress(address); err != nil {
+				return search.AccountScope{}, err
+			}
+			scope.Addresses = []string{address}
+		}
+		return scope, nil
+	}
+	address, err := search.ParseAccountAddress(value)
+	if err != nil {
+		return search.AccountScope{}, fmt.Errorf("account filter: %w", err)
+	}
+	return search.AccountScope{Addresses: []string{address}}, nil
 }

@@ -34,7 +34,7 @@ func (nativePermissions) verifyDirectory(path string) error {
 		return err
 	}
 	defer windows.CloseHandle(handle) //nolint:errcheck // read-only handle
-	return verifyOwnerOnlyHandle(handle)
+	return verifyOwnerOnlyHandle(handle, false)
 }
 
 func (nativePermissions) secureFile(file *os.File) error {
@@ -53,13 +53,13 @@ func (nativePermissions) secureFile(file *os.File) error {
 }
 
 func (nativePermissions) verifyFile(file *os.File) error {
-	return verifyOwnerOnlyHandle(windows.Handle(file.Fd()))
+	return verifyOwnerOnlyHandle(windows.Handle(file.Fd()), false)
 }
 
 func openSecurityHandle(path string, directory bool, access uint32) (windows.Handle, error) {
 	path16, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("encode provider credential path: %w", err)
 	}
 	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	if directory {
@@ -69,15 +69,15 @@ func openSecurityHandle(path string, directory bool, access uint32) (windows.Han
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, flags, 0)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("open provider credential security handle: %w", err)
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		windows.CloseHandle(handle) //nolint:errcheck // original error returned
-		return 0, err
+		_ = windows.CloseHandle(handle)
+		return 0, fmt.Errorf("inspect provider credential handle: %w", err)
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		windows.CloseHandle(handle) //nolint:errcheck // rejection is authoritative
+		_ = windows.CloseHandle(handle)
 		return 0, errors.New("provider credential path must not be a reparse point")
 	}
 	return handle, nil
@@ -106,18 +106,18 @@ func secureOwnerOnlyHandle(handle windows.Handle) error {
 		windows.SECURITY_INFORMATION(securityInfo), nil, nil, acl, nil); err != nil {
 		return fmt.Errorf("set owner-only provider credential DACL: %w", err)
 	}
-	return verifyOwnerOnlyHandleForUser(handle, user.User.Sid)
+	return verifyOwnerOnlyHandleForUser(handle, user.User.Sid, false)
 }
 
-func verifyOwnerOnlyHandle(handle windows.Handle) error {
+func verifyOwnerOnlyHandle(handle windows.Handle, allowReadOnly bool) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("get current user SID: %w", err)
 	}
-	return verifyOwnerOnlyHandleForUser(handle, user.User.Sid)
+	return verifyOwnerOnlyHandleForUser(handle, user.User.Sid, allowReadOnly)
 }
 
-func verifyOwnerOnlyHandleForUser(handle windows.Handle, user *windows.SID) error {
+func verifyOwnerOnlyHandleForUser(handle windows.Handle, user *windows.SID, allowReadOnly bool) error {
 	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -132,7 +132,7 @@ func verifyOwnerOnlyHandleForUser(handle windows.Handle, user *windows.SID) erro
 	}
 	control, _, err := descriptor.Control()
 	if err != nil {
-		return err
+		return fmt.Errorf("read provider credential DACL control: %w", err)
 	}
 	if control&windows.SE_DACL_PROTECTED == 0 {
 		return errors.New("provider credential DACL permits inherited access")
@@ -141,25 +141,20 @@ func verifyOwnerOnlyHandleForUser(handle windows.Handle, user *windows.SID) erro
 	if err != nil || dacl == nil {
 		return errors.New("provider credential DACL is unavailable")
 	}
-	type aclHeader struct {
-		Revision byte
-		Sbz1     byte
-		Size     uint16
-		AceCount uint16
-		Sbz2     uint16
-	}
-	if (*aclHeader)(unsafe.Pointer(dacl)).AceCount != 1 {
+	if dacl.AceCount != 1 {
 		return errors.New("provider credential DACL must contain exactly one access entry")
 	}
 	var ace *windows.ACCESS_ALLOWED_ACE
 	if err := windows.GetAce(dacl, 0, &ace); err != nil {
-		return err
+		return fmt.Errorf("read provider credential ACE: %w", err)
 	}
-	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-		(ace.Mask != windows.GENERIC_ALL && ace.Mask != providerCredentialFileAllAccess) ||
+	fullControl := ace.Mask == windows.GENERIC_ALL || ace.Mask == providerCredentialFileAllAccess
+	readOnly := allowReadOnly && (ace.Mask == windows.GENERIC_READ || ace.Mask == windows.FILE_GENERIC_READ)
+	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || (!fullControl && !readOnly) ||
 		ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
-		return errors.New("provider credential DACL does not grant exactly owner full control")
+		return errors.New("provider credential DACL does not grant the required owner access")
 	}
+	// #nosec G103 -- GetAce supplies an access-allowed ACE whose SidStart is the first word of its contiguous SID.
 	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 	if !aceSID.Equals(user) {
 		return errors.New("provider credential DACL grants another principal")
@@ -174,7 +169,7 @@ func verifyWindowsOwner(owner, user *windows.SID) error {
 	if owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 		member, err := windows.Token(0).IsMember(owner)
 		if err != nil {
-			return err
+			return fmt.Errorf("check provider credential owner membership: %w", err)
 		}
 		if member {
 			return nil
@@ -189,6 +184,12 @@ func openStoreFile(path string) (*os.File, error) {
 		return nil, err
 	}
 	return os.NewFile(uintptr(handle), path), nil
+}
+
+func openSecretFile(path string) (*os.File, error) { return openStoreFile(path) }
+
+func verifySecretFile(file *os.File) error {
+	return verifyOwnerOnlyHandle(windows.Handle(file.Fd()), true)
 }
 
 func withStoreLock(tokenDir string, fn func() error) error {
@@ -209,19 +210,3 @@ func withStoreLock(tokenDir string, fn func() error) error {
 	defer windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped) //nolint:errcheck
 	return fn()
 }
-
-func replaceStoreFile(source, target string) error {
-	from, err := windows.UTF16PtrFromString(source)
-	if err != nil {
-		return err
-	}
-	to, err := windows.UTF16PtrFromString(target)
-	if err != nil {
-		return err
-	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
-}
-
-// MoveFileEx with WRITE_THROUGH is the Windows namespace durability boundary;
-// Windows does not support flushing directory handles.
-func syncStoreDirectory(string) error { return nil }

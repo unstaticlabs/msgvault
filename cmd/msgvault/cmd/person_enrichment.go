@@ -5,7 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/personenrichment"
 	"go.kenn.io/msgvault/internal/providercredentials"
 	"go.kenn.io/msgvault/internal/store"
@@ -29,6 +31,7 @@ func (f personEnrichmentManualWorkerFunc) RunOnce(ctx context.Context, runID int
 }
 
 type personEnrichmentCommandDeps struct {
+	bind               func(context.Context) personEnrichmentCommandDeps
 	config             func() personenrichment.Config
 	openStore          func() (*store.Store, func(), error)
 	lookupEnv          personenrichment.CredentialLookup
@@ -39,17 +42,53 @@ type personEnrichmentCommandDeps struct {
 	clock              func() time.Time
 }
 
-func defaultPersonEnrichmentCommandDeps() personEnrichmentCommandDeps {
+func defaultPersonEnrichmentCommandDeps(contexts ...context.Context) personEnrichmentCommandDeps {
+	if len(contexts) > 0 {
+		state := invocationFromContext(contexts[0])
+		deps := defaultPersonEnrichmentCommandDeps()
+		if state != nil {
+			return deps.bind(contexts[0])
+		}
+	}
 	return personEnrichmentCommandDeps{
-		config: func() personenrichment.Config {
-			if cfg == nil {
-				return personenrichment.Config{}
+		bind: func(ctx context.Context) personEnrichmentCommandDeps {
+			deps := defaultPersonEnrichmentCommandDeps()
+			state := invocationFromContext(ctx)
+			var currentCfg *config.Config
+			if state != nil && state.cfg != nil {
+				currentCfg = state.cfg
 			}
-			return cfg.People.Enrichment
+			deps.config = func() personenrichment.Config {
+				if currentCfg == nil {
+					return personenrichment.Config{}
+				}
+				return currentCfg.People.Enrichment
+			}
+			deps.lookupEnv = func(name string) (string, bool) {
+				return personEnrichmentEnvironmentLookup(currentCfg)(name)
+			}
+			deps.newManualWorker = func(
+				workerCtx context.Context, st *store.Store, enrichmentConfig personenrichment.Config,
+			) (personEnrichmentScheduleWorker, error) {
+				return newPersonEnrichmentCLIWorker(
+					workerCtx, st, enrichmentConfig,
+					personEnrichmentEnvironmentLookup(currentCfg),
+					personEnrichmentProviderCredentialLookup(currentCfg),
+				)
+			}
+			deps.openStore = func() (*store.Store, func(), error) {
+				return openWritableStoreAndInitForInvocation(state)
+			}
+			return deps
 		},
-		openStore: openWritableStoreAndInit,
+		config: func() personenrichment.Config {
+			return personenrichment.Config{}
+		},
+		openStore: func() (*store.Store, func(), error) {
+			return nil, nil, errors.New("configuration is unavailable")
+		},
 		lookupEnv: func(name string) (string, bool) {
-			return personEnrichmentEnvironmentLookup(cfg)(name)
+			return personEnrichmentEnvironmentLookup(nil)(name)
 		},
 		proxyLookupEnv:     os.LookupEnv,
 		isDaemonSubprocess: isDaemonCLISubprocess,
@@ -61,8 +100,8 @@ func defaultPersonEnrichmentCommandDeps() personEnrichmentCommandDeps {
 		) (personEnrichmentScheduleWorker, error) {
 			return newPersonEnrichmentCLIWorker(
 				ctx, st, enrichmentConfig,
-				personEnrichmentEnvironmentLookup(cfg),
-				personEnrichmentProviderCredentialLookup(cfg),
+				personEnrichmentEnvironmentLookup(nil),
+				personEnrichmentProviderCredentialLookup(nil),
 			)
 		},
 		clock: time.Now,
@@ -117,9 +156,9 @@ func proxyPersonEnrichmentCommandWithEnv(
 }
 
 type personEnrichmentStatusOutput struct {
-	Profiles     []personenrichment.ProviderProfile    `json:"profiles"`
-	Consents     []store.PersonEnrichmentConsentStatus `json:"consents"`
-	Suppressions []store.PersonEnrichmentSuppression   `json:"suppressions"`
+	Profiles     []personenrichment.ProviderProfile  `json:"profiles"`
+	Consents     []store.ProviderConsentStatus       `json:"consents"`
+	Suppressions []store.PersonEnrichmentSuppression `json:"suppressions"`
 }
 
 func newPersonEnrichmentStatusCommand(deps personEnrichmentCommandDeps) *cobra.Command {
@@ -128,6 +167,9 @@ func newPersonEnrichmentStatusCommand(deps personEnrichmentCommandDeps) *cobra.C
 	command := &cobra.Command{
 		Use: "status", Args: cobra.NoArgs, Short: "Show bounded enrichment policy and privacy status",
 		RunE: func(command *cobra.Command, args []string) error {
+			if invocationFromContext(command.Context()) != nil && deps.bind != nil {
+				deps = deps.bind(command.Context())
+			}
 			if !deps.isDaemonSubprocess() {
 				return proxyPersonEnrichmentCommand(command, args, deps)
 			}
@@ -157,7 +199,7 @@ func newPersonEnrichmentStatusCommand(deps personEnrichmentCommandDeps) *cobra.C
 				return err
 			}
 			if jsonOutput {
-				return json.NewEncoder(command.OutOrStdout()).Encode(output)
+				return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), output, json.Deterministic(true))
 			}
 			_, err = fmt.Fprintf(command.OutOrStdout(), "Profiles: %d\nSuppressions shown: %d\n",
 				len(output.Profiles), len(output.Suppressions))
@@ -177,6 +219,9 @@ func newPersonEnrichmentProfilesCommand(deps personEnrichmentCommandDeps) *cobra
 	command := &cobra.Command{
 		Use: "profiles", Args: cobra.NoArgs, Short: "List immutable enrichment provider profiles",
 		RunE: func(command *cobra.Command, args []string) error {
+			if invocationFromContext(command.Context()) != nil && deps.bind != nil {
+				deps = deps.bind(command.Context())
+			}
 			if !deps.isDaemonSubprocess() {
 				return proxyPersonEnrichmentCommand(command, args, deps)
 			}
@@ -190,7 +235,7 @@ func newPersonEnrichmentProfilesCommand(deps personEnrichmentCommandDeps) *cobra
 				return err
 			}
 			if jsonOutput {
-				return json.NewEncoder(command.OutOrStdout()).Encode(profiles)
+				return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), profiles, json.Deterministic(true))
 			}
 			for _, profile := range profiles {
 				if _, err := fmt.Fprintf(command.OutOrStdout(), "%s\t%s\t%s\n",
@@ -210,6 +255,9 @@ func newPersonEnrichmentConsentCommand(deps personEnrichmentCommandDeps) *cobra.
 	command := &cobra.Command{
 		Use: "consent <fingerprint>", Args: cobra.ExactArgs(1), Short: "Grant exact enrichment policy consent",
 		RunE: func(command *cobra.Command, args []string) error {
+			if invocationFromContext(command.Context()) != nil && deps.bind != nil {
+				deps = deps.bind(command.Context())
+			}
 			if !deps.isDaemonSubprocess() {
 				return proxyPersonEnrichmentCommand(command, args, deps)
 			}
@@ -224,10 +272,10 @@ func newPersonEnrichmentConsentCommand(deps personEnrichmentCommandDeps) *cobra.
 				return err
 			}
 			if jsonOutput {
-				return json.NewEncoder(command.OutOrStdout()).Encode(struct {
-					Consent *store.PersonEnrichmentConsent `json:"consent"`
-					Created bool                           `json:"created"`
-				}{consent, created})
+				return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), struct {
+					Consent *store.ProviderConsent `json:"consent"`
+					Created bool                   `json:"created"`
+				}{consent, created}, json.Deterministic(true))
 			}
 			_, err = fmt.Fprintf(command.OutOrStdout(), "Consent active for %s\n", consent.ProfileFingerprint)
 			if err != nil {
@@ -246,6 +294,9 @@ func newPersonEnrichmentRevokeCommand(deps personEnrichmentCommandDeps) *cobra.C
 	command := &cobra.Command{
 		Use: "revoke [fingerprint]", Args: cobra.MaximumNArgs(1), Short: "Revoke exact enrichment policy consent",
 		RunE: func(command *cobra.Command, args []string) error {
+			if invocationFromContext(command.Context()) != nil && deps.bind != nil {
+				deps = deps.bind(command.Context())
+			}
 			if all == (len(args) == 1) {
 				return errors.New("revoke requires exactly one fingerprint or --all")
 			}
@@ -271,7 +322,7 @@ func newPersonEnrichmentRevokeCommand(deps personEnrichmentCommandDeps) *cobra.C
 				return err
 			}
 			if jsonOutput {
-				return json.NewEncoder(command.OutOrStdout()).Encode(map[string]int64{"revoked": revoked})
+				return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), map[string]int64{"revoked": revoked}, json.Deterministic(true))
 			}
 			_, err = fmt.Fprintf(command.OutOrStdout(), "Revoked: %d\n", revoked)
 			if err != nil {
@@ -293,6 +344,9 @@ func newPersonEnrichmentRunCommand(deps personEnrichmentCommandDeps) *cobra.Comm
 	command := &cobra.Command{
 		Use: "run", Args: cobra.NoArgs, Short: "Run durable enrichment work for one person and provider",
 		RunE: func(command *cobra.Command, args []string) error {
+			if invocationFromContext(command.Context()) != nil && deps.bind != nil {
+				deps = deps.bind(command.Context())
+			}
 			if personID <= 0 || strings.TrimSpace(providerName) == "" || strings.TrimSpace(idempotencyKey) == "" {
 				return errors.New("run requires --person, --provider, and --idempotency-key")
 			}
@@ -381,7 +435,7 @@ func runPersonEnrichmentManual(
 		return err
 	}
 	if jsonOutput {
-		return json.NewEncoder(command.OutOrStdout()).Encode(stored)
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), stored, json.Deterministic(true))
 	}
 	_, err = fmt.Fprintf(command.OutOrStdout(), "Run %d: %s\n", stored.ID, stored.State)
 	if err != nil {
@@ -403,6 +457,9 @@ func newPersonEnrichmentSuppressCommand(deps personEnrichmentCommandDeps) *cobra
 	command := &cobra.Command{
 		Use: "suppress", Args: cobra.NoArgs, Short: "Suppress enrichment by person or stdin identifier",
 		RunE: func(command *cobra.Command, _ []string) error {
+			if invocationFromContext(command.Context()) != nil && deps.bind != nil {
+				deps = deps.bind(command.Context())
+			}
 			personMode := personID > 0
 			providerMode := strings.TrimSpace(providerName) != "" || strings.TrimSpace(providerNamespace) != ""
 			if personMode == providerMode {
@@ -711,6 +768,7 @@ func newPersonEnrichmentCLIWorker(
 	}
 	factories := make(map[string]personenrichment.ProviderFactory)
 	providerConfigs := make(map[string]personenrichment.ProviderConfig)
+	providerFingerprints := make(map[string]string)
 	for _, configured := range config.Providers {
 		provider := configured
 		if !provider.Enabled {
@@ -724,6 +782,7 @@ func newPersonEnrichmentCLIWorker(
 			return nil, err
 		}
 		providerConfigs[provider.Name] = provider
+		providerFingerprints[provider.Name] = profile.Fingerprint
 		switch provider.Kind {
 		case personenrichment.ProviderExa:
 			factories[provider.Name] = func(config personenrichment.ProviderConfig, credential string) (personenrichment.Provider, error) {
@@ -742,6 +801,8 @@ func newPersonEnrichmentCLIWorker(
 	return personenrichment.NewWorker(st, st, *gate, factories, personenrichment.WorkerOptions{
 		Owner: "daemon-person-enrichment-manual", LeaseDuration: config.LeaseDuration,
 		RenewEvery: config.LeaseDuration / 4, Clock: time.Now,
-		Jitter: func(delay time.Duration) time.Duration { return delay }, ProviderConfigs: providerConfigs,
+		Jitter:               func(delay time.Duration) time.Duration { return delay },
+		ProviderConfigs:      providerConfigs,
+		ProviderFingerprints: providerFingerprints,
 	})
 }

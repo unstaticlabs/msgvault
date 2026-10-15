@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,12 +26,14 @@ import (
 )
 
 func TestGetSettingsUsesAllowlistETagAndSecretStates(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, _ := newSettingsTestServer(t, "# keep\n[web]\ntheme = \"dark\"\n"+
 		"[server]\napi_key = \"test-api-key\"\n"+
 		"[vector.embeddings]\ndocument_prefix = \"search_document: \"\nquery_prefix = \"search_query: \"\n"+
 		"[integrations.tasks]\napi_key = \"task-secret\"\n"+
+		"[integrations.kata]\napi_key = \"kata-secret\"\n"+
 		"[unsupported]\nprivate_value = \"must-not-leak\"\n")
 	resp := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "test-api-key")
 	requirements.Equal(http.StatusOK, resp.Code, resp.Body.String())
@@ -43,9 +46,11 @@ func TestGetSettingsUsesAllowlistETagAndSecretStates(t *testing.T) {
 	requirements.NotNil(byKey["web.theme"].Value)
 	requirements.NotNil(byKey["web.theme"].Value.String)
 	assertions.Equal("dark", *byKey["web.theme"].Value.String)
-	assertions.Equal(&SecretSettingState{Configured: true}, byKey["server.api_key"].Secret)
+	assertions.Equal(&SecretSettingState{Configured: true, Hint: "tes…key"}, byKey["server.api_key"].Secret)
 	assertions.Nil(byKey["server.api_key"].Value)
 	assertions.Equal(&SecretSettingState{Configured: true}, byKey["integrations.tasks.api_key"].Secret)
+	assertions.Equal(&SecretSettingState{Configured: true}, byKey["integrations.kata.api_key"].Secret)
+	assertions.Nil(byKey["integrations.kata.api_key"].Value)
 	requirements.NotNil(byKey["vector.embeddings.api_format"].Value)
 	requirements.NotNil(byKey["vector.embeddings.api_format"].Value.String)
 	assertions.Equal("openai", *byKey["vector.embeddings.api_format"].Value.String)
@@ -83,10 +88,12 @@ func TestGetSettingsUsesAllowlistETagAndSecretStates(t *testing.T) {
 	}
 	assertions.NotContains(resp.Body.String(), "test-api-key")
 	assertions.NotContains(resp.Body.String(), "task-secret")
+	assertions.NotContains(resp.Body.String(), "kata-secret")
 	assertions.NotContains(resp.Body.String(), "must-not-leak")
 }
 
 func TestGetSettingsIsSelfDescribingAndIncludesSafeCatalog(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, "")
@@ -113,19 +120,22 @@ func TestGetSettingsIsSelfDescribingAndIncludesSafeCatalog(t *testing.T) {
 		"log.enabled", "log.level", "log.sql_slow_ms", "log.sql_trace",
 		"analytics.min_rebuild_interval", "analytics.builder_memory_limit",
 		"analytics.builder_threads", "analytics.builder_temp_limit",
-		"server.daemon_idle_timeout", "server.daemon_auto_restart",
+		"server.daemon_idle_timeout", "server.daemon_auto_start", "server.daemon_auto_restart",
 		"activity.timezone", "activity.max_direct_counterparts", "activity.batch_size", "activity.schedule",
 		"backup.zstd_level",
 		"beeper.accounts", "beeper.exclude_accounts", "beeper.rate_limit_qps",
 		"beeper.media", "beeper.media_scope", "beeper.media_max_participants", "beeper.max_media_mb",
 		"slack.enabled", "slack.schedule", "slack.channels", "slack.exclude_channels",
+		"slack.dms", "slack.group_dms",
 		"slack.media", "slack.media_scope", "slack.media_max_participants", "slack.max_media_mb",
 		"discord.media", "discord.media_scope", "discord.media_max_participants", "discord.max_media_mb",
 		"teams.media", "teams.media_scope", "teams.media_max_participants", "teams.max_media_mb",
 		"vector.embeddings.timeout", "vector.preprocess.strip_quotes", "vector.preprocess.strip_signatures",
 		"vector.preprocess.strip_html", "vector.preprocess.strip_base64",
 		"vector.preprocess.strip_url_tracking", "vector.preprocess.collapse_whitespace",
-		"vector.search.max_page_size_hybrid", "vector.embed.backstop_interval",
+		"vector.search.max_page_size_hybrid", "vector.search.sqlite_accelerator",
+		"vector.search.ann_nprobe", "vector.search.ann_oversample", "vector.search.ann_threads",
+		"vector.embed.backstop_interval",
 		"vector.embeddings.api_key", "vector.multimodal.api_key",
 		"people.enrichment.enabled", "people.enrichment.schedule", "people.enrichment.batch_size",
 		"people.enrichment.lease_duration",
@@ -143,9 +153,54 @@ func TestGetSettingsIsSelfDescribingAndIncludesSafeCatalog(t *testing.T) {
 	for _, key := range []string{"chat.server", "chat.model", "chat.max_results"} {
 		assertions.NotContains(byKey, key, "legacy chat settings have no production consumer")
 	}
+	assertions.Equal(map[string]any{"boolean": true}, byKey["server.daemon_auto_start"]["value"])
+}
+
+func TestSlackConversationSelectionSettings(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	srv, path := newSettingsTestServer(t, "")
+
+	get := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
+	requirements.Equal(http.StatusOK, get.Code, get.Body.String())
+	var before SettingsResponse
+	requirements.NoError(json.Unmarshal(get.Body.Bytes(), &before))
+	byKey := settingsByKey(before.Settings)
+	for _, key := range []string{"slack.dms", "slack.group_dms"} {
+		setting, ok := byKey[key]
+		requirements.True(ok, key)
+		requirements.NotNil(setting.Value, key)
+		requirements.NotNil(setting.Value.Boolean, key)
+		assertions.True(*setting.Value.Boolean, key)
+		assertions.True(setting.Inherited, key)
+	}
+
+	patched := patchSettings(t, srv, `{"updates":[`+
+		`{"key":"slack.dms","value":{"boolean":false}},`+
+		`{"key":"slack.group_dms","value":{"boolean":false}}]}`)
+	requirements.Equal(http.StatusOK, patched.Code, patched.Body.String())
+	loaded, err := config.Load(path, "")
+	requirements.NoError(err)
+	assertions.False(loaded.Slack.DMsEnabled())
+	assertions.False(loaded.Slack.GroupDMsEnabled())
+
+	get = performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
+	requirements.Equal(http.StatusOK, get.Code, get.Body.String())
+	var after SettingsResponse
+	requirements.NoError(json.Unmarshal(get.Body.Bytes(), &after))
+	byKey = settingsByKey(after.Settings)
+	for _, key := range []string{"slack.dms", "slack.group_dms"} {
+		setting := byKey[key]
+		requirements.NotNil(setting.Value, key)
+		requirements.NotNil(setting.Value.Boolean, key)
+		assertions.False(*setting.Value.Boolean, key)
+		assertions.False(setting.Inherited, key)
+	}
 }
 
 func TestGetSettingsPublishesValidationMetadataFromRegisteredRouter(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, "")
@@ -170,13 +225,31 @@ func TestGetSettingsPublishesValidationMetadataFromRegisteredRouter(t *testing.T
 
 	backupLevel, ok := byKey["backup.zstd_level"]["validation"].(map[string]any)
 	requirements.True(ok, "backup.zstd_level must publish validation metadata")
-	assertions.InDelta(float64(0), backupLevel["minimum"], 0)
+	assertions.InDelta(float64(0), backupLevel["minimum"], 0, "minimum keeps covering the stored off value for older clients")
 	assertions.InDelta(float64(19), backupLevel["maximum"], 0)
+	backupOff, ok := backupLevel["off"].(map[string]any)
+	requirements.True(ok, "backup.zstd_level must publish zero as its off value")
+	assertions.Equal("0", backupOff["value"])
+	assertions.Equal("Encoder default", backupOff["label"])
+	assertions.InDelta(float64(1), backupOff["on_minimum"], 0)
+	assertions.Nil(backupLevel["hint"], "bounds belong on the control, not in hint text")
 
 	mediaSize, ok := byKey["discord.max_media_mb"]["validation"].(map[string]any)
 	requirements.True(ok, "attachment size controls must publish validation metadata")
 	assertions.InDelta(float64(0), mediaSize["minimum"], 0)
-	assertions.Contains(mediaSize["hint"], "0 uses the Discord default of 50 MiB")
+	mediaOff, ok := mediaSize["off"].(map[string]any)
+	requirements.True(ok, "attachment size controls must publish their provider default as the off state")
+	assertions.Equal("Discord default of 50 MiB", mediaOff["label"])
+	assertions.Equal("50", mediaOff["suggest"])
+	assertions.InDelta(float64(1), mediaOff["on_minimum"], 0)
+	chatSize, ok := byKey["beeper.max_media_mb"]["validation"].(map[string]any)
+	requirements.True(ok)
+	chatOff, ok := chatSize["off"].(map[string]any)
+	requirements.True(ok)
+	assertions.Equal("Beeper default of 250 MiB", chatOff["label"], "the label follows the shared chat default")
+	retries, ok := byKey["vector.embeddings.max_retries"]["validation"].(map[string]any)
+	requirements.True(ok)
+	assertions.Nil(retries["off"], "a zero that loading rewrites to the default cannot be an off state")
 
 	embeddingEndpoint, ok := byKey["vector.embeddings.endpoint"]["validation"].(map[string]any)
 	requirements.True(ok, "provider endpoints must publish safe input guidance")
@@ -185,14 +258,18 @@ func TestGetSettingsPublishesValidationMetadataFromRegisteredRouter(t *testing.T
 
 	activitySchedule, ok := byKey["activity.schedule"]["validation"].(map[string]any)
 	requirements.True(ok, "schedules must identify their accepted format")
-	hint, ok := activitySchedule["hint"].(string)
+	assertions.Equal("cron", activitySchedule["format"])
+	assertions.NotEqual(true, activitySchedule["required"])
+	enrichmentSchedule, ok := byKey["people.enrichment.schedule"]["validation"].(map[string]any)
 	requirements.True(ok)
-	assertions.Contains(strings.ToLower(hint), "five-field cron")
+	assertions.Equal("cron", enrichmentSchedule["format"])
+	assertions.Equal(true, enrichmentSchedule["required"])
 	assertions.NotEqual(true, byKey["integrations.tasks.endpoint"]["testable"],
 		"the daemon has no provider endpoint test operation")
 }
 
 func TestSettingsCatalogDoesNotPublishGenericMetadataFallbacks(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	for _, definition := range settingsCatalog {
 		_, ok := settingsMetadata[definition.key]
@@ -200,7 +277,7 @@ func TestSettingsCatalogDoesNotPublishGenericMetadataFallbacks(t *testing.T) {
 	}
 }
 
-func TestSettingsProviderCredentialsAreWriteOnlyOwnerOnlyAndETagProtected(t *testing.T) {
+func TestSettingsProviderCredentialsAreWriteOnlyOwnerOnlyAndETagProtected(t *testing.T) { //nolint:paralleltest // t.Setenv writes provider API key variables
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	t.Setenv("TEXT_EMBEDDING_KEY", "environment-secret-must-not-leak")
@@ -214,7 +291,7 @@ dimension = 8
 	first := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
 	requirements.Equal(http.StatusOK, first.Code, first.Body.String())
 	assertions.NotContains(first.Body.String(), "environment-secret-must-not-leak")
-	assertions.Equal(map[string]any{"configured": true, "source": "environment"},
+	assertions.Equal(map[string]any{"configured": true, "source": "environment", "hint": "env…eak"},
 		rawEmbeddingSecretState(t, first.Body.Bytes()))
 	configETag := first.Header().Get("ETag")
 	credentialETag := first.Header().Get("Credential-Etag")
@@ -235,7 +312,7 @@ dimension = 8
 
 	stored := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
 	requirements.Equal(http.StatusOK, stored.Code, stored.Body.String())
-	assertions.Equal(map[string]any{"configured": true, "source": "stored"},
+	assertions.Equal(map[string]any{"configured": true, "source": "stored", "hint": "bro…eak"},
 		rawEmbeddingSecretState(t, stored.Body.Bytes()))
 	assertions.Equal(configETag, stored.Header().Get("ETag"), "credential writes must not masquerade as config writes")
 	assertions.Equal(storedCredentialETag, stored.Header().Get("Credential-Etag"))
@@ -265,12 +342,13 @@ dimension = 8
 	assertions.True(clearResponse.PendingRestart)
 	cleared := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
 	requirements.Equal(http.StatusOK, cleared.Code, cleared.Body.String())
-	assertions.Equal(map[string]any{"configured": true, "source": "environment"},
+	assertions.Equal(map[string]any{"configured": true, "source": "environment", "hint": "env…eak"},
 		rawEmbeddingSecretState(t, cleared.Body.Bytes()))
 	assertions.NotContains(cleared.Body.String(), "environment-secret-must-not-leak")
 }
 
 func TestPatchSettingsPersistsSafeScalarAndAttachmentPolicies(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, "")
@@ -283,6 +361,7 @@ func TestPatchSettingsPersistsSafeScalarAndAttachmentPolicies(t *testing.T) {
 		{"key": "analytics.min_rebuild_interval", "value": map[string]any{"string": "2h"}},
 		{"key": "analytics.builder_threads", "value": map[string]any{"integer": 3}},
 		{"key": "server.daemon_idle_timeout", "value": map[string]any{"string": "30m"}},
+		{"key": "server.daemon_auto_start", "value": map[string]any{"boolean": false}},
 		{"key": "server.daemon_auto_restart", "value": map[string]any{"string": "always"}},
 		{"key": "activity.timezone", "value": map[string]any{"string": "America/New_York"}},
 		{"key": "activity.max_direct_counterparts", "value": map[string]any{"integer": 50}},
@@ -318,8 +397,12 @@ func TestPatchSettingsPersistsSafeScalarAndAttachmentPolicies(t *testing.T) {
 
 	resp := patchSettings(t, srv, string(body))
 	requirements.Equal(http.StatusOK, resp.Code, resp.Body.String())
+	var updated SettingsResponse
+	requirements.NoError(json.Unmarshal(resp.Body.Bytes(), &updated))
+	assertions.Equal(&SettingValue{Boolean: new(false)}, settingsByKey(updated.Settings)["server.daemon_auto_start"].Value)
 	loaded, err := config.Load(path, "")
 	requirements.NoError(err)
+	assertions.False(loaded.Server.DaemonAutoStartEnabled())
 	assertions.Equal(12, loaded.Sync.RateLimitQPS)
 	assertions.Equal("debug", loaded.Log.Level)
 	assertions.Equal(int64(250), loaded.Log.SQLSlowMs)
@@ -342,6 +425,7 @@ func TestPatchSettingsPersistsSafeScalarAndAttachmentPolicies(t *testing.T) {
 }
 
 func TestPatchSettingsRejectsInvalidAttachmentPolicy(t *testing.T) {
+	t.Parallel()
 	srv, _ := newSettingsTestServer(t, "")
 	resp := patchSettings(t, srv,
 		`{"updates":[{"key":"teams.media_max_participants","value":{"integer":-1}}]}`)
@@ -350,6 +434,7 @@ func TestPatchSettingsRejectsInvalidAttachmentPolicy(t *testing.T) {
 }
 
 func TestPatchSettingsRejectsHostAndAuthSettings(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key   string
 		value string
@@ -381,6 +466,7 @@ func TestPatchSettingsRejectsHostAndAuthSettings(t *testing.T) {
 }
 
 func TestPutSettingsPersonEnrichmentProviderPreservesStableNamesAndOrder(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, `[people.enrichment]
@@ -449,6 +535,7 @@ max_requests_per_day = 50
 }
 
 func TestPatchSettingsFirstEnrichmentEnableGeneratesPrivateSuppressionKey(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, `[people.enrichment]
@@ -486,7 +573,74 @@ max_requests_per_day = 100
 	assertions.Greater(len(credentialBytes), 64)
 }
 
+func TestPatchSettingsFirstEnrichmentEnableUsesStoredSuppressionFirst(t *testing.T) { //nolint:paralleltest // process environment
+	const storedKey = "stored-suppression-key-32bytes-123"
+	const environmentKey = "environment-suppression-key-32bytes"
+	for _, tc := range []struct {
+		name, stored, environment string
+		wantStatus                int
+	}{
+		{"stored with missing environment", storedKey, "", http.StatusOK},
+		{"stored with short environment", storedKey, "short", http.StatusOK},
+		{"environment fallback", "", environmentKey, http.StatusOK},
+		{"missing environment without stored key", "", "", http.StatusUnprocessableEntity},
+		{"short environment without stored key", "", "short", http.StatusUnprocessableEntity},
+		{"invalid stored key with valid environment", "short", environmentKey, http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			const environmentName = "MSGVAULT_TEST_SETTINGS_SUPPRESSION_KEY"
+			t.Setenv(environmentName, tc.environment)
+			if tc.environment == "" {
+				require.NoError(os.Unsetenv(environmentName))
+			}
+			srv, path := newSettingsTestServer(t, `[people.enrichment]
+enabled = false
+suppression_key_env = "MSGVAULT_TEST_SETTINGS_SUPPRESSION_KEY"
+
+[[people.enrichment.providers]]
+name = "exa-primary"
+kind = "exa"
+enabled = true
+api_key_env = "EXA_KEY"
+allowed_identifiers = ["name", "email"]
+target_keys = ["attribute:bio"]
+retention_posture = "zero_retention"
+training_posture = "no_training"
+refresh_interval = "24h"
+max_requests_per_run = 10
+max_requests_per_day = 100
+`)
+			credentials, err := providercredentials.Read(srv.cfg.TokensDir())
+			require.NoError(err)
+			if tc.stored != "" {
+				credentials, err = providercredentials.PutSuppression(srv.cfg.TokensDir(), credentials.ETag, tc.stored)
+				require.NoError(err)
+			}
+
+			resp := patchSettings(t, srv,
+				`{"updates":[{"key":"people.enrichment.enabled","value":{"boolean":true}}]}`)
+			require.Equal(tc.wantStatus, resp.Code, resp.Body.String())
+			loaded, err := config.Load(path, "")
+			require.NoError(err)
+			assert.Equal(tc.wantStatus == http.StatusOK, loaded.People.Enrichment.Enabled)
+			if tc.wantStatus == http.StatusOK {
+				wantEnvironment := environmentName
+				if tc.stored != "" {
+					wantEnvironment = providercredentials.StoredSuppressionEnvironment
+				}
+				assert.Equal(wantEnvironment, loaded.People.Enrichment.SuppressionKeyEnv)
+			}
+			after, err := providercredentials.Read(srv.cfg.TokensDir())
+			require.NoError(err)
+			assert.Equal(credentials.ETag, after.ETag, "enabling must not replace an existing key or store the environment fallback")
+		})
+	}
+}
+
 func TestPatchSettingsRejectedFirstEnrichmentEnableLeavesCredentialStoreUnchanged(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name       string
 		editorErr  error
@@ -530,7 +684,7 @@ max_requests_per_day = 100
 	}
 }
 
-func TestSettingsProviderCredentialStoreFailsClosedWhenUnsafeOrCorrupt(t *testing.T) {
+func TestSettingsProviderCredentialStoreFailsClosedWhenUnsafeOrCorrupt(t *testing.T) { //nolint:paralleltest // t.Setenv writes provider API key variables
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	t.Setenv("TEXT_EMBEDDING_KEY", "environment-fallback-must-not-be-used")
@@ -551,6 +705,7 @@ dimension = 8
 }
 
 func TestSettingsStoredCredentialIsBoundToEndpointOrigin(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, `[vector.embeddings]
@@ -576,6 +731,7 @@ dimension = 8
 }
 
 func TestPatchSettingsHardensSecretBearingConfigFile(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows owner-only DACL coverage lives in platform-specific config tests")
@@ -595,6 +751,7 @@ func TestPatchSettingsHardensSecretBearingConfigFile(t *testing.T) {
 }
 
 func TestPatchSettingsPreservesUntouchedMediaPointerAndOpaqueOverrides(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, `[discord]
@@ -612,10 +769,14 @@ max_media_mb = 30
 	for _, setting := range document.Settings {
 		if setting["key"] == "discord.media" {
 			assertions.Equal(true, setting["inherited"], "omitted provider policy must be identified as inherited/default")
-			assertions.Equal("Provider default is enabled; changes affect future downloads only.", setting["description"])
+			assertions.Contains(setting["description"], "future", "media policy copy must say it only affects future syncs")
 		}
 		if setting["key"] == "discord.max_media_mb" {
-			assertions.Contains(setting["description"], "0 uses the Discord default of 50 MiB")
+			validation, ok := setting["validation"].(map[string]any)
+			requirements.True(ok, "discord.max_media_mb must publish its provider default as its off state")
+			off, ok := validation["off"].(map[string]any)
+			requirements.True(ok)
+			assertions.Equal("Discord default of 50 MiB", off["label"])
 		}
 	}
 
@@ -632,6 +793,7 @@ max_media_mb = 30
 }
 
 func TestSettingsRejectsAndRedactsCredentialBearingEmbeddingEndpoints(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, `[vector.embeddings]
@@ -664,6 +826,7 @@ dimension = 8
 }
 
 func TestPatchSettingsExposesCompleteSemanticPersonOptInPolicy(t *testing.T) {
+	t.Parallel()
 	check := assert.New(t)
 	must := require.New(t)
 	srv, path := newSettingsTestServer(t, "[vector]\n"+
@@ -687,6 +850,7 @@ func TestPatchSettingsExposesCompleteSemanticPersonOptInPolicy(t *testing.T) {
 }
 
 func TestGetSettingsExposesReadOnlyCardDAVAccountStateWithoutCredential(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
@@ -695,6 +859,8 @@ base_url = "https://contacts.example/dav"
 username = "alice"
 schedule = "0 3 * * *"
 enabled = true
+trusted_origin = "https://contacts.example"
+trusted_addresses = ["10.1.2.3"]
 `)
 	st := testutil.NewTestStore(t)
 	account, _, err := st.ReplaceCardDAVDiscoveryContext(t.Context(), store.CardDAVDiscoveryInput{
@@ -724,6 +890,9 @@ enabled = true
 	}
 	assertions.Equal(&SecretSettingState{Configured: true}, byKey["carddav.password"].Secret)
 	assertions.NotContains(resp.Body.String(), "must-not-cross-api")
+	assertions.NotContains(resp.Body.String(), "10.1.2.3")
+	assertions.NotContains(byKey, "carddav.trusted_origin")
+	assertions.NotContains(byKey, "carddav.trusted_addresses")
 
 	patch := performSettingsRequest(t, srv, http.MethodPatch, settingsPath,
 		[]byte(`{"updates":[{"key":"carddav.enabled","value":{"boolean":false}}]}`),
@@ -732,6 +901,7 @@ enabled = true
 }
 
 func TestGetSettingsReportsStaleCardDAVCredentialAsNotConfigured(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 
@@ -771,6 +941,7 @@ enabled = true
 }
 
 func TestPatchSettingsSelectsVoyageContextualEmbeddingFormat(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t, "[vector.embeddings]\n"+
@@ -788,7 +959,7 @@ func TestPatchSettingsSelectsVoyageContextualEmbeddingFormat(t *testing.T) {
 	assertions.Contains(string(got), `model = "voyage-context-4"`)
 }
 
-func TestGetSettingsExposesMultimodalPolicyWithoutCredentialState(t *testing.T) {
+func TestGetSettingsExposesMultimodalPolicyWithoutCredentialState(t *testing.T) { //nolint:paralleltest // t.Setenv writes provider API key variables
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	t.Setenv("SYNTHETIC_VOYAGE_KEY", "synthetic-key-value")
@@ -815,6 +986,7 @@ include_video = true
 }
 
 func TestPatchSettingsRequiresMatchingETag(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, "[web]\ntheme = \"system\"\n")
 
@@ -831,6 +1003,7 @@ func TestPatchSettingsRequiresMatchingETag(t *testing.T) {
 }
 
 func TestPatchSettingsPreservesFileAndReturnsNewETag(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t, "# operator comment\n[unknown]\nkeep = true\n\n"+
@@ -860,6 +1033,7 @@ func TestPatchSettingsPreservesFileAndReturnsNewETag(t *testing.T) {
 }
 
 func TestPatchSettingsValidatesWholeCandidateAndRejectsUnknownKeys(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		body   string
@@ -897,6 +1071,7 @@ func TestPatchSettingsValidatesWholeCandidateAndRejectsUnknownKeys(t *testing.T)
 }
 
 func TestPatchSettingsRejectsHostManagedServerAPIKeyUpdates(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requests := []string{
 		`{"updates":[{"key":"server.api_key","value":{"string":"new-key"}}]}`,
@@ -919,6 +1094,7 @@ func TestPatchSettingsRejectsHostManagedServerAPIKeyUpdates(t *testing.T) {
 }
 
 func TestPatchSettingsClearsTaskAPIKeyWhenEndpointOriginChanges(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t,
@@ -941,7 +1117,49 @@ func TestPatchSettingsClearsTaskAPIKeyWhenEndpointOriginChanges(t *testing.T) {
 	assertions.True(body.PendingRestart)
 }
 
+func TestPatchSettingsKataConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		endpoint    string
+		replacement string
+		wantKey     string
+	}{
+		{name: "new origin clears credential", endpoint: "https://other.example.com"},
+		{name: "same origin keeps credential", endpoint: "https://kata.example.com/v2", wantKey: "kata-secret"},
+		{name: "new origin with replacement", endpoint: "https://other.example.com", replacement: "new-kata-secret", wantKey: "new-kata-secret"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			srv, path := newSettingsTestServer(t,
+				"[integrations.tasks]\napi_key = 'task-secret'\n"+
+					"[integrations.kata]\nendpoint = 'https://kata.example.com'\napi_key = 'kata-secret'\n")
+			updates := fmt.Sprintf(`{"key":"integrations.kata.endpoint","value":{"string":%q}},`+
+				`{"key":"integrations.kata.enabled","value":{"boolean":true}},`+
+				`{"key":"integrations.kata.default_project","value":{"string":"people"}}`, tt.endpoint)
+			if tt.replacement != "" {
+				updates += fmt.Sprintf(`,{"key":"integrations.kata.api_key","secret":{"action":"set","value":%q}}`, tt.replacement)
+			}
+			resp := patchSettings(t, srv, `{"updates":[`+updates+`]}`)
+			require.Equal(http.StatusOK, resp.Code, resp.Body.String())
+			cfg, err := config.Load(path, "")
+			require.NoError(err)
+			assert.Equal(config.TaskIntegrationConfig{
+				Enabled: true, Endpoint: tt.endpoint, APIKey: tt.wantKey, DefaultProject: "people",
+			}, cfg.Integrations.Kata)
+			assert.Equal("task-secret", cfg.Integrations.Tasks.APIKey)
+			var body SettingsResponse
+			require.NoError(json.Unmarshal(resp.Body.Bytes(), &body))
+			assert.True(body.PendingRestart)
+			assert.NotContains(resp.Body.String(), "kata-secret")
+			assert.NotContains(resp.Body.String(), "task-secret")
+		})
+	}
+}
+
 func TestPatchSettingsKeepsNewTaskAPIKeyProvidedWithEndpointChange(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t,
@@ -960,11 +1178,12 @@ func TestPatchSettingsKeepsNewTaskAPIKeyProvidedWithEndpointChange(t *testing.T)
 
 	var body SettingsResponse
 	requirements.NoError(json.Unmarshal(resp.Body.Bytes(), &body))
-	assertions.Equal(&SecretSettingState{Configured: true},
+	assertions.Equal(&SecretSettingState{Configured: true, Hint: "rot…ret"},
 		settingsByKey(body.Settings)["integrations.tasks.api_key"].Secret)
 }
 
 func TestPatchSettingsRetainsTaskAPIKeyWhenEndpointOriginIsUnchanged(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		endpoint string
@@ -996,6 +1215,7 @@ func TestPatchSettingsRetainsTaskAPIKeyWhenEndpointOriginIsUnchanged(t *testing.
 }
 
 func TestPatchSettingsEndpointChangeWithoutStoredCredentialAddsNoKey(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t,
@@ -1012,6 +1232,7 @@ func TestPatchSettingsEndpointChangeWithoutStoredCredentialAddsNoKey(t *testing.
 }
 
 func TestPatchSettingsRetainsEmbeddingsAPIKeyEnvWhenEndpointOriginChanges(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t,
@@ -1035,6 +1256,7 @@ func TestPatchSettingsRetainsEmbeddingsAPIKeyEnvWhenEndpointOriginChanges(t *tes
 }
 
 func TestPatchSettingsRetainsMultimodalAPIKeyEnvWhenEndpointOriginChanges(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t,
@@ -1059,6 +1281,7 @@ func TestPatchSettingsRetainsMultimodalAPIKeyEnvWhenEndpointOriginChanges(t *tes
 }
 
 func TestPatchSettingsEditableChangeSucceedsWhileReadOnlySettingIsConfigured(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t, "[web]\ntheme = \"system\"\n"+
@@ -1078,6 +1301,7 @@ func TestPatchSettingsEditableChangeSucceedsWhileReadOnlySettingIsConfigured(t *
 }
 
 func TestPatchSettingsRejectsEmbeddingsAPIKeyEnvUpdates(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	before := "[vector.embeddings]\nendpoint = \"https://embed.example.com/v1\"\napi_key_env = \"MSGVAULT_EMBED_API_KEY\"\n"
@@ -1094,6 +1318,7 @@ func TestPatchSettingsRejectsEmbeddingsAPIKeyEnvUpdates(t *testing.T) {
 }
 
 func TestSettingsErrorsAreNotCached(t *testing.T) {
+	t.Parallel()
 	srv, _ := newSettingsTestServer(t, "[web]\ntheme = \"system\"\n")
 	resp := performSettingsRequest(t, srv, http.MethodPatch, settingsPath,
 		[]byte(`{"updates":[{"key":"web.theme","value":{"string":"dark"}}]}`), "", "")
@@ -1103,6 +1328,7 @@ func TestSettingsErrorsAreNotCached(t *testing.T) {
 }
 
 func TestSettingsMiddlewareErrorsAreNotCached(t *testing.T) {
+	t.Parallel()
 	srv, _ := newSettingsTestServer(t, "[server]\napi_key = \"test-api-key\"\n")
 	login := performSessionRequest(t, srv, http.MethodPost, sessionLoginPath,
 		[]byte(`{"api_key":"test-api-key"}`), nil, false)
@@ -1117,6 +1343,7 @@ func TestSettingsMiddlewareErrorsAreNotCached(t *testing.T) {
 }
 
 func TestPatchSettingsRejectsTrailingJSON(t *testing.T) {
+	t.Parallel()
 	srv, _ := newSettingsTestServer(t, "[web]\ntheme = \"system\"\n")
 	get := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
 	resp := performSettingsRequest(t, srv, http.MethodPatch, settingsPath,
@@ -1127,6 +1354,7 @@ func TestPatchSettingsRejectsTrailingJSON(t *testing.T) {
 }
 
 func TestPatchSettingsClassifiesFilesystemFailureAsServerError(t *testing.T) {
+	t.Parallel()
 	srv, path := newSettingsTestServer(t, "[web]\ntheme = \"system\"\n")
 	get := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
 	blockSettingsConfigFilesystem(t, path)
@@ -1140,6 +1368,7 @@ func TestPatchSettingsClassifiesFilesystemFailureAsServerError(t *testing.T) {
 }
 
 func TestPatchSettingsMarksRestartPendingWhenPublishedWriteReturnsError(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	srv, path := newSettingsTestServer(t, "[server]\ndaemon_idle_timeout = \"15m\"\n")
@@ -1165,6 +1394,7 @@ func TestPatchSettingsMarksRestartPendingWhenPublishedWriteReturnsError(t *testi
 }
 
 func TestPatchSettingsMarksRestartPendingBeforeLoadingCommittedSnapshot(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, "[server]\ndaemon_idle_timeout = \"15m\"\n")
 	get := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
@@ -1186,6 +1416,7 @@ func TestPatchSettingsMarksRestartPendingBeforeLoadingCommittedSnapshot(t *testi
 }
 
 func TestPatchSettingsPrefersChangedOutcomeOverConflictClassification(t *testing.T) {
+	t.Parallel()
 	srv, _ := newSettingsTestServer(t, "[web]\ntheme = \"system\"\n")
 	get := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
 	srv.settingsConfigEditor = func(string, string, []config.Edit) (config.ConfigFile, error) {
@@ -1199,6 +1430,7 @@ func TestPatchSettingsPrefersChangedOutcomeOverConflictClassification(t *testing
 }
 
 func TestSettingsOpenAPIContract(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	doc := OpenAPIDocument()
@@ -1229,9 +1461,13 @@ func TestSettingsOpenAPIContract(t *testing.T) {
 	setting := doc.Components.Schemas.Map()["Setting"]
 	requirements.NotNil(setting)
 	assertions.ElementsMatch([]any{
-		"browser", "server", "archive", "sync", "logging", "search", "sources", "attachments",
-		"activity", "backup", "enrichment", "integrations",
+		"browser", "server", "archive", "search", "sources", "attachments", "enrichment", "integrations",
+		"sync", "logging", "activity", "backup",
 	}, setting.Properties["group"].Enum)
+	for _, group := range settingsGroups {
+		assertions.NotContains(legacySettingsGroupIDs, group.ID, "legacy IDs are compatibility-only")
+	}
+	assertions.NotNil(setting.Properties["section"], "settings publish their section for sectioned groups")
 	assertions.ElementsMatch([]any{"string", "integer", "number", "boolean", "string_array", "secret"}, setting.Properties["kind"].Enum)
 	patchRequest := doc.Components.Schemas.Map()["SettingsPatchRequest"]
 	requirements.NotNil(patchRequest)
@@ -1333,6 +1569,7 @@ func storeVectorEmbeddingsCredential(t *testing.T, srv *Server, value string) st
 }
 
 func TestPatchSettingsSeversStoredCredentialOnlyWhenEndpointOriginChanges(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, settingsStoredVectorConfig)
@@ -1341,7 +1578,7 @@ func TestPatchSettingsSeversStoredCredentialOnlyWhenEndpointOriginChanges(t *tes
 	samePath := patchSettings(t, srv,
 		`{"updates":[{"key":"vector.embeddings.endpoint","value":{"string":"https://first.example.test/v2"}}]}`)
 	requirements.Equal(http.StatusOK, samePath.Code, samePath.Body.String())
-	assertions.Equal(map[string]any{"configured": true, "source": "stored"},
+	assertions.Equal(map[string]any{"configured": true, "source": "stored", "hint": "ori…ret"},
 		rawEmbeddingSecretState(t, samePath.Body.Bytes()))
 	retained, err := providercredentials.Read(srv.cfg.TokensDir())
 	requirements.NoError(err)
@@ -1368,6 +1605,7 @@ func TestPatchSettingsSeversStoredCredentialOnlyWhenEndpointOriginChanges(t *tes
 }
 
 func TestDeleteProviderCredentialOutlivesConfiguredProvider(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, settingsStoredVectorConfig)
@@ -1393,6 +1631,7 @@ func TestDeleteProviderCredentialOutlivesConfiguredProvider(t *testing.T) {
 }
 
 func TestPutPersonEnrichmentProviderSeversStoredCredentialWhenOriginChanges(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, `[people.enrichment]
@@ -1435,7 +1674,7 @@ max_requests_per_day = 100
 	var retainedResponse SettingsResponse
 	requirements.NoError(json.Unmarshal(samePath.Body.Bytes(), &retainedResponse))
 	requirements.Len(retainedResponse.PersonEnrichmentProviders, 1)
-	assertions.Equal(&SecretSettingState{Configured: true, Source: "stored"},
+	assertions.Equal(&SecretSettingState{Configured: true, Source: "stored", Hint: "exa…ret"},
 		retainedResponse.PersonEnrichmentProviders[0].Credential)
 
 	moved := performSettingsRequest(t, srv, http.MethodPut,
@@ -1455,6 +1694,7 @@ max_requests_per_day = 100
 }
 
 func TestPutPersonEnrichmentProviderRollsBackConfigWhenCredentialCleanupConflicts(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	const before = `[people.enrichment]
@@ -1513,6 +1753,7 @@ max_requests_per_day = 100
 }
 
 func TestPatchSettingsRemovesStaleStoredCredentialOnLaterWrite(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, settingsStoredVectorConfig)
@@ -1542,7 +1783,43 @@ func TestPatchSettingsRemovesStaleStoredCredentialOnLaterWrite(t *testing.T) {
 	assertions.Equal(severed.ETag, unrelated.Header().Get("Credential-Etag"))
 }
 
+func TestPatchSettingsCredentialConflictCanFollowCommittedSlackPolicy(t *testing.T) {
+	t.Parallel()
+	requirements, assertions := require.New(t), assert.New(t)
+	initial := settingsStoredVectorConfig + "\n[slack]\ndms = true\n"
+	srv, path := newSettingsTestServer(t, initial)
+	credentialETag := storeVectorEmbeddingsCredential(t, srv, "stale-origin-secret")
+	moved := strings.Replace(initial, "https://first.example.test/v1", "https://second.example.test/v1", 1)
+	requirements.NoError(os.WriteFile(path, []byte(moved), 0o600))
+	srv.settingsConfigEditor = func(configPath, ifMatch string, edits []config.Edit) (config.ConfigFile, error) {
+		snapshot, err := config.EditConfigFile(configPath, ifMatch, edits)
+		if err != nil {
+			return snapshot, err
+		}
+		// Interleave a real credential write between config commit and cleanup.
+		_, err = providercredentials.Put(srv.cfg.TokensDir(), credentialETag,
+			providercredentials.VectorEmbeddingsID, "https://first.example.test/v1", "rotated-secret")
+		requirements.NoError(err)
+		return snapshot, nil
+	}
+
+	response := patchSettings(t, srv, `{"updates":[{"key":"slack.dms","value":{"boolean":false}}]}`)
+	requirements.Equal(http.StatusPreconditionFailed, response.Code, response.Body.String())
+	var failure map[string]any
+	requirements.NoError(json.Unmarshal(response.Body.Bytes(), &failure))
+	assertions.Equal("credential_conflict", failure["error"])
+	loaded, err := config.Load(path, "")
+	requirements.NoError(err)
+	assertions.False(loaded.Slack.DMsEnabled())
+	credentials, err := providercredentials.Read(srv.cfg.TokensDir())
+	requirements.NoError(err)
+	value, _, err := credentials.Resolve(providercredentials.VectorEmbeddingsID, "https://first.example.test/v1", "", nil)
+	requirements.NoError(err)
+	assertions.Equal("rotated-secret", value)
+}
+
 func TestPatchSettingsRemovesStaleNamedProviderCredentialsAfterHostEdit(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	const initial = `[people.enrichment]
@@ -1621,6 +1898,7 @@ max_requests_per_day = 100
 }
 
 func TestPutPersonEnrichmentProviderRequiresValidKindEvenWhenDisabled(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, path := newSettingsTestServer(t, "[people.enrichment]\nenabled = false\n")
@@ -1644,6 +1922,7 @@ func TestPutPersonEnrichmentProviderRequiresValidKindEvenWhenDisabled(t *testing
 }
 
 func TestSettingsReadsAndRepairsInvalidDisabledPersonEnrichmentProvider(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	srv, _ := newSettingsTestServer(t, `[people.enrichment]
@@ -1696,4 +1975,203 @@ max_requests_per_day = 100
 	requirements.Len(after.PersonEnrichmentProviders, 1)
 	assertions.Equal("https://api.exa.example/search", after.PersonEnrichmentProviders[0].Endpoint)
 	assertions.NotNil(after.PersonEnrichmentProviders[0].Credential)
+}
+
+func TestSettingsSectionsAreConsistentWithTheirGroups(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	groupsByID := make(map[string]SettingGroup, len(settingsGroups))
+	for _, group := range settingsGroups {
+		groupsByID[group.ID] = group
+	}
+	populated := make(map[string]map[string]bool)
+	for _, definition := range settingsCatalog {
+		group, ok := groupsByID[definition.group]
+		if !assertions.True(ok, "%s uses undeclared group %q", definition.key, definition.group) {
+			continue
+		}
+		section := metadataForSetting(definition.key).section
+		if len(group.Sections) == 0 {
+			assertions.Empty(section, "%s names a section but group %q has none", definition.key, group.ID)
+			continue
+		}
+		known := false
+		for _, candidate := range group.Sections {
+			known = known || candidate.ID == section
+		}
+		assertions.True(known, "%s names section %q that group %q does not declare", definition.key, section, group.ID)
+		if populated[group.ID] == nil {
+			populated[group.ID] = make(map[string]bool)
+		}
+		populated[group.ID][section] = true
+	}
+	for _, group := range settingsGroups {
+		for _, section := range group.Sections {
+			assertions.True(populated[group.ID][section.ID], "section %s/%s has no settings", group.ID, section.ID)
+		}
+	}
+}
+
+func TestSettingsOffValuesPassBoundsChecks(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	requirements.NoError(validateSettingBounds("backup.zstd_level", 0), "the off value sits outside the on range")
+	requirements.NoError(validateSettingBounds("backup.zstd_level", 19))
+	requirements.Error(validateSettingBounds("backup.zstd_level", 20))
+	requirements.Error(validateSettingBounds("backup.zstd_level", -1))
+	requirements.NoError(validateSettingBounds("discord.max_media_mb", 0))
+	requirements.NoError(validateSettingBounds("beeper.rate_limit_qps", 0.0))
+	requirements.Error(validateSettingBounds("beeper.rate_limit_qps", 0.05), "on values start at 0.1; PATCH raises smaller rates")
+	requirements.NoError(validateSettingBounds("beeper.rate_limit_qps", 0.5))
+	requirements.Error(validateSettingBounds("beeper.rate_limit_qps", -1.0))
+	requirements.Error(validateSettingBounds("sync.rate_limit_qps", 0), "settings without an off value keep their minimum")
+	for key, validation := range settingsValidation {
+		if validation.Off == nil || validation.Off.OnMinimum == nil {
+			continue
+		}
+		requirements.NotNil(validation.Minimum, "%s: minimum must stay published for clients that ignore off", key)
+		off, err := strconv.ParseFloat(validation.Off.text(), 64)
+		requirements.NoError(err, key)
+		assertions.LessOrEqual(*validation.Minimum, off, "%s: minimum must include the off value", key)
+		assertions.Greater(*validation.Off.OnMinimum, off, "%s: the on range must exclude the off value", key)
+	}
+	for key, validation := range settingsValidation {
+		if validation.Off == nil {
+			continue
+		}
+		assertions.NotEmpty(validation.Off.Label, "%s off state needs a label", key)
+		assertions.NotContains(strings.ToLower(validation.Hint), " 0 ", "%s hint must not restate its off value", key)
+	}
+}
+
+func TestSettingsPatchEnforcesRequiredAndCronFormat(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	srv, _ := newSettingsTestServer(t, "[people.enrichment]\nschedule = \"*/15 * * * *\"\n")
+
+	empty := patchSettings(t, srv, `{"updates":[{"key":"people.enrichment.schedule","value":{"string":""}}]}`)
+	assertions.Equal(http.StatusUnprocessableEntity, empty.Code, empty.Body.String())
+
+	invalid := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":"0 25 * * *"}}]}`)
+	assertions.Equal(http.StatusUnprocessableEntity, invalid.Code, invalid.Body.String())
+
+	off := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":""}}]}`)
+	assertions.Equal(http.StatusOK, off.Code, off.Body.String())
+
+	valid := patchSettings(t, srv, `{"updates":[{"key":"people.enrichment.schedule","value":{"string":"0 4 * * mon-fri"}}]}`)
+	assertions.Equal(http.StatusOK, valid.Code, valid.Body.String())
+
+	zoned := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":"CRON_TZ=Europe/Berlin 0 4 * * *"}}]}`)
+	assertions.Equal(http.StatusOK, zoned.Code, zoned.Body.String())
+
+	emptyList := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":"0 3 * * ,"}}]}`)
+	assertions.Equal(http.StatusUnprocessableEntity, emptyList.Code, emptyList.Body.String())
+}
+
+func TestSettingsPatchTrimsCronSchedules(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	srv, path := newSettingsTestServer(t, "[beeper]\nschedule = \"0 2 * * *\"\n")
+
+	padded := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":"  0 3 * * *  "}}]}`)
+	requirements.Equal(http.StatusOK, padded.Code, padded.Body.String())
+	assertions.Equal("0 3 * * *", currentSettingString(t, srv, "beeper.schedule"))
+
+	blank := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":"   "}}]}`)
+	requirements.Equal(http.StatusOK, blank.Code, blank.Body.String())
+	assertions.Empty(currentSettingString(t, srv, "beeper.schedule"))
+
+	zoneOnly := patchSettings(t, srv, `{"updates":[{"key":"beeper.schedule","value":{"string":"CRON_TZ=UTC"}}]}`)
+	requirements.Equal(http.StatusOK, zoneOnly.Code, zoneOnly.Body.String())
+	assertions.Empty(currentSettingString(t, srv, "beeper.schedule"), "a zone with no fields is no schedule")
+
+	cfg, err := config.Load(path, "")
+	requirements.NoError(err)
+	assertions.Empty(cfg.Beeper.Schedule)
+}
+
+func TestSettingsPatchRaisesRatesBelowTheOnMinimum(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	srv, path := newSettingsTestServer(t, "[beeper]\nrate_limit_qps = 5\n")
+
+	small := patchSettings(t, srv, `{"updates":[{"key":"beeper.rate_limit_qps","value":{"number":0.05}}]}`)
+	requirements.Equal(http.StatusOK, small.Code, small.Body.String())
+	cfg, err := config.Load(path, "")
+	requirements.NoError(err)
+	assertions.InDelta(0.1, cfg.Beeper.RateLimitQPS, 1e-9, "a positive rate below the on minimum is raised, not rejected")
+
+	off := patchSettings(t, srv, `{"updates":[{"key":"beeper.rate_limit_qps","value":{"number":0}}]}`)
+	requirements.Equal(http.StatusOK, off.Code, off.Body.String())
+	cfg, err = config.Load(path, "")
+	requirements.NoError(err)
+	assertions.Zero(cfg.Beeper.RateLimitQPS, "zero stays the off value")
+
+	negative := patchSettings(t, srv, `{"updates":[{"key":"beeper.rate_limit_qps","value":{"number":-1}}]}`)
+	assertions.Equal(http.StatusUnprocessableEntity, negative.Code, negative.Body.String())
+}
+
+func currentSettingString(t *testing.T, srv *Server, key string) string {
+	t.Helper()
+	get := performSettingsRequest(t, srv, http.MethodGet, settingsPath, nil, "", "")
+	require.Equal(t, http.StatusOK, get.Code, get.Body.String())
+	var body SettingsResponse
+	require.NoError(t, json.Unmarshal(get.Body.Bytes(), &body))
+	setting, ok := settingsByKey(body.Settings)[key]
+	require.True(t, ok, key)
+	require.NotNil(t, setting.Value, key)
+	require.NotNil(t, setting.Value.String, key)
+	return *setting.Value.String
+}
+
+func TestSettingsBoundHintsLiveOnTheControl(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	for key, validation := range settingsValidation {
+		hint := strings.ToLower(validation.Hint)
+		for _, phrase := range []string{"at least", "or more", " to ", "between"} {
+			assertions.NotContains(hint, phrase, "%s spells out a bound in text; use minimum, maximum, or off", key)
+		}
+		if validation.Format != "" {
+			assertions.Empty(validation.Hint, "%s has a format; the control explains the syntax", key)
+		}
+	}
+}
+
+func TestSettingsHintsDoNotRepeatDescriptions(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	for key, validation := range settingsValidation {
+		hint := strings.TrimSpace(validation.Hint)
+		if hint == "" {
+			continue
+		}
+		description := metadataForSetting(key).description
+		assertions.NotContains(strings.ToLower(description), strings.ToLower(strings.TrimSuffix(hint, ".")),
+			"%s repeats its hint inside its description", key)
+	}
+}
+
+func TestSecretHint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "empty", value: "", want: ""},
+		{name: "eleven characters is too short", value: "task-secret", want: ""},
+		{name: "twelve characters", value: "test-api-key", want: "tes…key"},
+		{name: "long key", value: "sk-live-0123456789abcdefx9Q", want: "sk-…x9Q"},
+		{name: "multibyte characters count as one", value: "ééé-secret-ключ", want: "ééé…люч"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, secretHint(tc.value))
+		})
+	}
 }

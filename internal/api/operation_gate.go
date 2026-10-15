@@ -3,7 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +23,8 @@ const cliRunGateInspectionMaxBytes = 1 << 20
 var operationGateWaitLimit = 10 * time.Second
 
 var errCLIRunGateInspectionBodyTooLarge = errors.New("cli run request body is too large to inspect before routing")
+
+var errMutationGateBusy = errors.New("archive is busy or shutting down")
 
 // OperationGate serializes daemon-owned mutating work.
 type OperationGate interface {
@@ -273,7 +275,8 @@ func (g *SerialOperationGate) state() (chan struct{}, chan struct{}) {
 // that fail it pass straight through — without registering as request
 // waiters, triggering scheduler yields, or observing operation state — and
 // are rejected by the API auth layer below. A nil authorized gates every
-// request.
+// request. The cached request security identifies delegated callers so their
+// busy responses omit the holder label.
 func operationGateMiddleware(gate OperationGate, authorized func(*http.Request) bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if gate == nil {
@@ -284,7 +287,9 @@ func operationGateMiddleware(gate OperationGate, authorized func(*http.Request) 
 				next.ServeHTTP(w, r)
 				return
 			}
-			shouldGate, label, err := operationGateRequest(r)
+			security, _ := securityFromRequest(r)
+			auth := security.auth
+			shouldGate, label, err := operationGateRequest(r, auth)
 			if err != nil {
 				if errors.Is(err, errCLIRunGateInspectionBodyTooLarge) {
 					writeError(w, http.StatusRequestEntityTooLarge, "request_too_large",
@@ -300,7 +305,7 @@ func operationGateMiddleware(gate OperationGate, authorized func(*http.Request) 
 			}
 			done, ok := beginGateWorkBounded(r.Context(), gate, label)
 			if !ok {
-				writeOperationGateBusy(w, gate)
+				writeOperationGateBusy(w, r, gate)
 				return
 			}
 			defer done()
@@ -321,7 +326,20 @@ func beginGateWorkBounded(ctx context.Context, gate OperationGate, label string)
 	return gate.BeginWorkContext(waitCtx)
 }
 
-func writeOperationGateBusy(w http.ResponseWriter, gate OperationGate) {
+func (s *Server) beginMutation(label string) func(context.Context) (func(), error) {
+	return func(ctx context.Context) (func(), error) {
+		if s.operationGate == nil {
+			return func() {}, nil
+		}
+		done, ok := beginGateWorkBounded(ctx, s.operationGate, label)
+		if !ok {
+			return nil, errMutationGateBusy
+		}
+		return done, nil
+	}
+}
+
+func writeOperationGateBusy(w http.ResponseWriter, r *http.Request, gate OperationGate) {
 	lg, ok := gate.(LabeledOperationGate)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "server_busy", "server is busy or shutting down")
@@ -332,17 +350,22 @@ func writeOperationGateBusy(w http.ResponseWriter, gate OperationGate) {
 		return
 	}
 	message := "another operation is running"
-	if label, since, held := lg.Holder(); held && label != "" {
-		message = fmt.Sprintf("%s has been running for %s",
-			label, time.Since(since).Round(time.Second))
+	security, _ := securityFromRequest(r)
+	if security.auth.Mode != AuthModeDelegated && security.auth.Mode != AuthModeRemoteClient {
+		if label, since, held := lg.Holder(); held && label != "" {
+			message = fmt.Sprintf("%s has been running for %s",
+				label, time.Since(since).Round(time.Second))
+		}
 	}
 	writeError(w, http.StatusServiceUnavailable, "operation_in_progress", message)
 }
 
 // operationGateExemptPaths bypass the generic mutation gate. Most only read;
-// the session endpoints mutate process-local authentication state. Verify is
-// NOT exempt: its subprocess opens the store read-write and runs schema
-// init/migrations.
+// Session and agent-token endpoints mutate process-local authentication state.
+// Google OAuth endpoints manage pending authorization under their own mutex and
+// write token files without changing the archive. They remain available during
+// archive work. Verify is NOT exempt: its subprocess opens the store read-write
+// and runs schema init/migrations.
 //
 // Backup freeze begin, meeting import, and historical import jobs coordinate
 // the gate in their handlers.
@@ -350,6 +373,9 @@ func writeOperationGateBusy(w http.ResponseWriter, gate OperationGate) {
 // authenticated upload cannot hold the gate. Backup freeze end bypasses the
 // gate so it can release the freeze held by begin. Routing these through the
 // generic middleware would deadlock their coordination.
+//
+// DELETE /api/v1/agent-tokens/{id} uses a dynamic path; its exemption is
+// handled by the strings.HasPrefix check in operationGateRequest below.
 var operationGateExemptPaths = map[string]bool{
 	queryEndpointPath:                true,
 	sessionPath:                      true,
@@ -365,6 +391,19 @@ var operationGateExemptPaths = map[string]bool{
 	// Minting an inbox-archive confirmation token reads the selection and
 	// seals it; the archive itself is a separate, gated request.
 	inboxArchiveAuthorizePath: true,
+	// Calendar control acquires the gate after parsing, authorization, and preview.
+	"/api/v1/calendar/control": true,
+	// Scoring coordinates the gate around local mutations, never provider I/O.
+	"/api/v1/identity/scoring/run":     true,
+	"/api/v1/identity/scoring/consent": true,
+	"/api/v1/identity/scoring/revoke":  true,
+	"/api/v1/carddav/google/authorize": true,
+	"/api/v1/carddav/google/callback":  true,
+	archiveQueryEndpointPath:           true,
+	agentTokensPath:                    true,
+	muesliImportEndpointPath:           true,
+	// Telemetry changes no archive state; gating it would make opening the app yield a running sync.
+	telemetryEventsPath: true,
 }
 
 // readOnlyPostRoutePatterns lists the analytical POST routes whose handlers
@@ -386,21 +425,28 @@ var operationGateExemptPaths = map[string]bool{
 // The remote-image proxy and CardDAV account test are the non-Exploration
 // entries. Both perform SSRF-validated outbound reads without changing
 // archive or persistent configuration state, so they must stay available
-// while a long archive operation holds the gate.
+// while a long archive operation holds the gate. Kata evidence preparation
+// only reads message bodies and extracted document text. Message tag reads and
+// previews bypass the gate here; their handler takes it for actual writes.
 const cardDAVAccountTestPath = "/api/v1/carddav/account/test"
 
 var readOnlyPostRoutePatterns = []string{
 	"/api/v1/explore/email-work/preview",
 	"/api/v1/explore/email-work/members",
 	"/api/v1/explore/email-work/export",
+	"/api/v1/saved-views/{id}/run",
 	remoteImagePath,
 	cardDAVAccountTestPath,
+	kataEvidencePreparePath,
+	"/api/v1/messages/{id}/tags",
 	"/api/v1/explore",
 	"/api/v1/explore/groups",
 	"/api/v1/explore/preflight",
 	"/api/v1/explore/match-counts",
 	"/api/v1/explore/files",
 	"/api/v1/files/search",
+	"/api/v1/files/suggest",
+	"/api/v1/people/{id}/files/suggest",
 	// Visual attachment search reads the committed vector index and calls
 	// the embedding provider; it mutates nothing, and gating it would hold
 	// pure reads (and the mutation gate) hostage to provider latency.
@@ -427,8 +473,8 @@ var (
 	readOnlyPostRouteMux  *http.ServeMux
 )
 
-// readOnlyPostRouteRequest reports whether r targets one of the read-only
-// analytical POST routes. Matching goes through a net/http ServeMux built
+// readOnlyPostRouteRequest reports whether r targets a POST route that bypasses
+// the middleware gate. Matching goes through a net/http ServeMux built
 // from readOnlyPostRoutePatterns so the path-parameter routes ({id},
 // {domain}) match with the same semantics as the API router itself.
 func readOnlyPostRouteRequest(r *http.Request) bool {
@@ -442,7 +488,55 @@ func readOnlyPostRouteRequest(r *http.Request) bool {
 	return pattern != ""
 }
 
-func operationGateRequest(r *http.Request) (bool, string, error) {
+// syncTriggerRoutePattern is the route handleTriggerSync serves.
+const syncTriggerRoutePattern = "/api/v1/sync/{account}"
+
+var (
+	syncTriggerRouteOnce sync.Once
+	syncTriggerRouteMux  *http.ServeMux
+)
+
+// genericSyncTriggerRequest reports whether r triggers a generic
+// (non-account) scheduled job, such as the Apple WhatsApp or iMessage import.
+// handleTriggerSync only reserves or queues such a job in the scheduler and
+// returns; the run itself takes the gate later, in the scheduler. The request
+// therefore must not wait on the gate: while a long import holds it, a
+// gated trigger would be turned away with operation_in_progress before it
+// could coalesce into a follow-up run or return its disposition. It must not
+// count as a request waiter either, or the running job would yield to it.
+//
+// Account-sync triggers stay gated: they answer 409 on a running sync and
+// their gate behaviour is unchanged.
+//
+// The account is matched through a ServeMux built from the route pattern so
+// an escaped identifier (a calendar source is "<email>/<calendar>") resolves
+// exactly as the API router resolves it.
+func genericSyncTriggerRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	syncTriggerRouteOnce.Do(func() {
+		syncTriggerRouteMux = http.NewServeMux()
+		syncTriggerRouteMux.HandleFunc("POST "+syncTriggerRoutePattern, func(http.ResponseWriter, *http.Request) {})
+	})
+	// ServeMux.Handler does not expose path values, so serve a shallow copy
+	// and read them from it; r itself is left for the real router.
+	probe := r.WithContext(r.Context())
+	syncTriggerRouteMux.ServeHTTP(discardResponseWriter{}, probe)
+	account := probe.PathValue("account")
+	if account == "" {
+		return false
+	}
+	return classifySourceScheduling(r.URL.Query().Get("source_type"), account).kind == sourceScheduleGeneric
+}
+
+type discardResponseWriter struct{}
+
+func (discardResponseWriter) Header() http.Header         { return http.Header{} }
+func (discardResponseWriter) Write(p []byte) (int, error) { return len(p), nil }
+func (discardResponseWriter) WriteHeader(int)             {}
+
+func operationGateRequest(r *http.Request, auth requestAuthentication) (bool, string, error) {
 	if r.URL.Path == DaemonShutdownPath {
 		return false, "", nil
 	}
@@ -450,10 +544,19 @@ func operationGateRequest(r *http.Request) (bool, string, error) {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return false, "", nil
 	}
-	if operationGateExemptPaths[r.URL.Path] {
+	if operationGateExemptPaths[r.URL.Path] || strings.HasPrefix(r.URL.Path, agentTokensPath+"/") {
 		return false, "", nil
 	}
 	if readOnlyPostRouteRequest(r) {
+		return false, "", nil
+	}
+	if genericSyncTriggerRequest(r) {
+		return false, "", nil
+	}
+	// Provider handlers take the gate only for their local mutations. Device
+	// authorization and synthetic network checks must not block archive work.
+	if r.Method == http.MethodPost && (r.URL.Path == "/api/v1/settings/people-inference/codex/login" ||
+		(strings.HasPrefix(r.URL.Path, "/api/v1/settings/people-inference/providers/") && strings.HasSuffix(r.URL.Path, "/check"))) {
 		return false, "", nil
 	}
 	if r.URL.Path == "/api/v1/cli/repair-message" {
@@ -467,7 +570,7 @@ func operationGateRequest(r *http.Request) (bool, string, error) {
 		return true, label, nil
 	}
 	if r.URL.Path == "/api/v1/cli/run" {
-		label, skip, err := cliRunGateDecision(r)
+		label, skip, err := cliRunGateDecision(r, auth)
 		if err != nil {
 			return false, "", err
 		}
@@ -507,12 +610,13 @@ func cliRepairMessageGateDecision(r *http.Request) (label string, skip bool, err
 // cliRunReadOnlyCommands are proxied CLI commands that only read. Keys are
 // the leading command-path words of CLIRunRequest args (flags follow them).
 var cliRunReadOnlyCommands = map[string]bool{
+	"draft-get":        true,
+	"draft-send-as":    true,
 	"logs":             true,
 	"list-deletions":   true,
 	"show-deletion":    true,
 	"embeddings list":  true,
 	"documents search": true,
-	"documents status": true,
 }
 
 // cliRunSelfGatedCommands are proxied CLI commands that acquire the
@@ -524,7 +628,7 @@ var cliRunSelfGatedCommands = map[string]bool{
 	"backup create": true,
 }
 
-func cliRunGateDecision(r *http.Request) (label string, skip bool, err error) {
+func cliRunGateDecision(r *http.Request, auth requestAuthentication) (label string, skip bool, err error) {
 	if r == nil || r.Body == nil {
 		return "", false, nil
 	}
@@ -543,6 +647,11 @@ func cliRunGateDecision(r *http.Request) (label string, skip bool, err error) {
 		Args []string `json:"args"`
 	}
 	if json.Unmarshal(body, &req) == nil && len(req.Args) > 0 {
+		// Delegated callers are admitted by the same command and permission
+		// predicate as the handler, so rejected work never takes a gate slot.
+		if auth.Mode == AuthModeDelegated && !delegatedCLIRunAdmitted(req.Args, auth.Grant) {
+			return "", true, nil
+		}
 		command := cliRunCommandWords(req.Args)
 		if cliRunReadOnlyCommands[command] || cliRunSelfGatedCommands[command] {
 			return "", true, nil
@@ -550,6 +659,10 @@ func cliRunGateDecision(r *http.Request) (label string, skip bool, err error) {
 		if command != "" {
 			return "msgvault " + command, false, nil
 		}
+	}
+	if auth.Mode == AuthModeDelegated {
+		// Unparseable or empty-args body: the handler rejects it; do not gate.
+		return "", true, nil
 	}
 	return "msgvault CLI command", false, nil
 }

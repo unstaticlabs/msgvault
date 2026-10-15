@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,13 +15,18 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/oauth"
 	extOAuth2 "golang.org/x/oauth2"
 )
 
+func TestSanitizeArgsDraftBody(t *testing.T) {
+	assert.Equal(t, []string{"draft-reply", "42", "--body", "<redacted>", "--body=<redacted>"}, sanitizeArgs([]string{"draft-reply", "42", "--body", "body-secret-731", "--body=body-secret-731"}))
+}
+
 func TestErrOAuthNotConfigured(t *testing.T) {
 	assert := assert.New(t)
-	err := errOAuthNotConfigured()
+	err := errOAuthNotConfigured(config.NewDefaultConfig())
 	require.Error(t, err, "errOAuthNotConfigured()")
 
 	msg := err.Error()
@@ -42,22 +48,26 @@ func TestErrOAuthNotConfigured(t *testing.T) {
 }
 
 func TestWrapOAuthError_NotExist(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
 	originalErr := fmt.Errorf("open /path/to/secrets.json: %w", os.ErrNotExist)
 
-	wrapped := wrapOAuthError(originalErr)
+	wrapped := wrapOAuthError(originalErr, config.NewDefaultConfig())
 
 	msg := wrapped.Error()
 
 	// Should contain accessible message (not "not found" anymore)
-	assert.Contains(t, msg, "not accessible", "missing 'not accessible'")
+	assert.Contains(msg, "not accessible", "missing 'not accessible'")
 	// Should contain setup hint
-	assert.Contains(t, msg, "https://msgvault.io/guides/oauth-setup/", "missing setup URL")
+	assert.Contains(msg, "https://msgvault.io/guides/oauth-setup/", "missing setup URL")
+	require.ErrorIs(wrapped, originalErr)
+	assert.True(strings.HasSuffix(msg, oauthSetupHint(config.NewDefaultConfig())))
 }
 
 func TestWrapOAuthError_Permission(t *testing.T) {
 	originalErr := fmt.Errorf("open /path/to/secrets.json: %w", os.ErrPermission)
 
-	wrapped := wrapOAuthError(originalErr)
+	wrapped := wrapOAuthError(originalErr, config.NewDefaultConfig())
 
 	msg := wrapped.Error()
 
@@ -70,7 +80,7 @@ func TestWrapOAuthError_Permission(t *testing.T) {
 func TestWrapOAuthError_OtherError(t *testing.T) {
 	originalErr := errors.New("some other error")
 
-	wrapped := wrapOAuthError(originalErr)
+	wrapped := wrapOAuthError(originalErr, config.NewDefaultConfig())
 
 	// Should return the original error unchanged
 	assert.Equal(t, originalErr, wrapped, "wrapOAuthError() changed unrelated error")
@@ -81,7 +91,7 @@ func TestWrapOAuthError_NestedNotExist(t *testing.T) {
 	innerErr := fmt.Errorf("file error: %w", os.ErrNotExist)
 	outerErr := fmt.Errorf("oauth manager: %w", innerErr)
 
-	wrapped := wrapOAuthError(outerErr)
+	wrapped := wrapOAuthError(outerErr, config.NewDefaultConfig())
 
 	msg := wrapped.Error()
 
@@ -95,6 +105,13 @@ func newTestRootCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "msgvault",
 		Short: "Offline email, chat, and meeting archive tool",
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if prepareInvocation(cmd) == nil {
+				return errors.New("missing invocation state")
+			}
+			cmd.SetContext(cmd.Root().Context())
+			return nil
+		},
 	}
 }
 
@@ -425,6 +442,16 @@ func (fakeTokenSource) Token() (*extOAuth2.Token, error) {
 }
 
 func TestGetTokenSourceWithReauth(t *testing.T) {
+	t.Run("malformed file token", func(t *testing.T) {
+		tokenPath, restore := seedTokenEnv(t, "{")
+		defer restore()
+		mgr, err := oauth.NewManagerWithCredentials(t.Context(), config.OAuthApp{ClientSecrets: filepath.Join(filepath.Dir(filepath.Dir(tokenPath)), "client_secret.json")}, filepath.Dir(tokenPath), config.OAuthTokenCommands{}, nil, oauth.Scopes)
+		require.NoError(t, err)
+		_, err = getTokenSourceWithReauth(t.Context(), mgr, scopeEscalationAccount, false, gmailReauthHint)
+		require.ErrorIs(t, err, oauth.ErrInvalidTokenJSON)
+		assert.ErrorContains(t, err, "add-account")
+	})
+
 	invalidGrant := &extOAuth2.RetrieveError{ErrorCode: "invalid_grant"}
 	genericErr := errors.New("transient network error")
 
@@ -452,7 +479,7 @@ func TestGetTokenSourceWithReauth(t *testing.T) {
 			name: "no token at all",
 			mock: &mockReauthorizer{
 				tokenSourceFn: func(_ context.Context, _ string) (extOAuth2.TokenSource, error) {
-					return nil, errors.New("no token")
+					return nil, os.ErrNotExist
 				},
 				hasTokenVal: false,
 			},
@@ -638,4 +665,73 @@ func TestGetTokenSourceWithReauthUsesScopePreservingReauth(t *testing.T) {
 	assert.NotNil(ts)
 	assert.Equal(1, m.authorizePreserveCount, "scope-preserving reauth call count")
 	assert.Equal(0, m.authorizeManualCount, "plain reauth call count")
+}
+
+// withAgentFlags binds agent-mode options to the test invocation.
+func withAgentFlags(t *testing.T) context.Context {
+	t.Helper()
+	return testInvocationContext(t.Context(), config.NewDefaultConfig(), invocationOptions{
+		agentURL:          "http://daemon.example:8080",
+		agentTokenFile:    "/tmp/token",
+		agentURLChanged:   true,
+		agentTokenChanged: true,
+	})
+}
+
+// TestAgentDelegatedCapableCommandSucceeds verifies that delegated-capable
+// draft commands with agent flags pass the PersistentPreRunE early-return path.
+func TestAgentDelegatedCapableCommandSucceeds(t *testing.T) {
+	for _, name := range []string{
+		"draft-reply", "draft-compose", "draft-get", "draft-edit", "draft-delete", "mcp", "search", "stats", "show-message",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := withAgentFlags(t)
+			cmd := &cobra.Command{Use: name}
+			root := &cobra.Command{Use: "msgvault"}
+			root.SetContext(ctx)
+			root.AddCommand(cmd)
+			err := rootCmd.PersistentPreRunE(cmd, nil)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestAgentDelegatedSendAsCommandRefused(t *testing.T) {
+	ctx := withAgentFlags(t)
+	cmd := &cobra.Command{Use: "draft-send-as"}
+	cmd.SetContext(ctx)
+	err := rootCmd.PersistentPreRunE(cmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not available in agent-delegated mode")
+}
+
+func TestAgentDelegatedRecoveryCommandSucceeds(t *testing.T) {
+	ctx := withAgentFlags(t)
+
+	cmd := &cobra.Command{Use: "draft-recover"}
+	cmd.SetContext(ctx)
+	err := rootCmd.PersistentPreRunE(cmd, nil)
+	require.NoError(t, err)
+}
+
+// TestAgentDelegatedNonCapableCommandReturnsError verifies that a command
+// not in the delegated-capable set (serve) returns "not available in
+// agent-delegated mode" when agent flags are present.
+func TestAgentDelegatedNonCapableCommandReturnsError(t *testing.T) {
+	for _, tc := range []struct{ parent, name string }{{"", "serve"}, {"documents", "search"}, {"person", "search"}, {"multimodal", "search"}} {
+		t.Run(strings.TrimSpace(tc.parent+" "+tc.name), func(t *testing.T) {
+			root := &cobra.Command{Use: "msgvault"}
+			root.SetContext(withAgentFlags(t))
+			cmd := &cobra.Command{Use: tc.name}
+			if tc.parent == "" {
+				root.AddCommand(cmd)
+			} else {
+				parent := &cobra.Command{Use: tc.parent}
+				root.AddCommand(parent)
+				parent.AddCommand(cmd)
+			}
+			err := rootCmd.PersistentPreRunE(cmd, nil)
+			require.ErrorContains(t, err, tc.name+" is not available in agent-delegated mode")
+		})
+	}
 }

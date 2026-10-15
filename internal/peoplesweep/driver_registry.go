@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,15 +24,27 @@ var ErrCodexIsolationUnreleased = errors.New("codex app-server isolation is not 
 // configured at selection time because its executable is operational config,
 // not part of the immutable provider profile.
 type DriverRegistry struct {
-	drivers   map[Protocol]StructuredDriver
-	commands  CommandStarter
-	isolation CodexIsolationGate
+	drivers       map[Protocol]StructuredDriver
+	commands      CommandStarter
+	isolation     CodexIsolationGate
+	codexAuthHome string
 }
 
 func NewDriverRegistry(
 	httpClient *http.Client,
 	commands CommandStarter,
 	isolation CodexIsolationGate,
+) (*DriverRegistry, error) {
+	return NewDriverRegistryWithCodexAuthHome(httpClient, commands, isolation, "")
+}
+
+// NewDriverRegistryWithCodexAuthHome binds an explicitly selected daemon
+// credential directory to Codex drivers. Other protocols ignore this path.
+func NewDriverRegistryWithCodexAuthHome(
+	httpClient *http.Client,
+	commands CommandStarter,
+	isolation CodexIsolationGate,
+	authHome string,
 ) (*DriverRegistry, error) {
 	drivers := map[Protocol]StructuredDriver{
 		ProtocolOpenAIChat:            NewOpenAIChatDriver(httpClient),
@@ -42,7 +54,7 @@ func NewDriverRegistry(
 	}
 	return &DriverRegistry{
 		drivers:  drivers,
-		commands: commands, isolation: isolation,
+		commands: commands, isolation: isolation, codexAuthHome: authHome,
 	}, nil
 }
 
@@ -105,7 +117,7 @@ func (r *DriverRegistry) Driver(
 	if err := attestation.Close(); err != nil {
 		return nil, err
 	}
-	return NewCodexAppServerDriver(canonical, r.commands, r.isolation)
+	return NewCodexAppServerDriverWithAuthHome(canonical, r.commands, r.isolation, r.codexAuthHome)
 }
 
 // CanonicalCodexProviderVersion derives a safe provider identity from the
@@ -129,7 +141,7 @@ func CanonicalCodexProviderVersion(attestation CodexAttestation) (string, error)
 		Version: attestation.Version, ExecutableSHA256: digest,
 		ExecutionBoundary: attestation.ExecutionBoundary,
 		LaunchArtifact:    string(attestation.LaunchArtifact),
-	})
+	}, json.Deterministic(true))
 	if err != nil {
 		return "", errors.New("encode codex provider version")
 	}

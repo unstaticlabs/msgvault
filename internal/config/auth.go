@@ -128,9 +128,8 @@ func (c *Config) applyAuthEnvOverrides(lookupEnv func(string) string) error {
 	if value := strings.TrimSpace(lookupEnv("MSGVAULT_REMOTE_URL")); value != "" {
 		c.Remote.URL = value
 	}
-	if value := lookupEnv("MSGVAULT_REMOTE_API_KEY"); value != "" {
-		c.Remote.APIKey = value
-	}
+	// Remote credentials are resolved by the native runtime credential layer.
+	// Copying an environment secret into APIKey would persist it on Save.
 	if value := strings.TrimSpace(lookupEnv("MSGVAULT_REMOTE_ALLOW_INSECURE")); value != "" {
 		c.Remote.AllowInsecure = !strings.EqualFold(value, "false") && value != "0"
 	}

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -57,18 +58,20 @@ func serveTrackedNoContent(t *testing.T, tracker *IdleTracker) *httptest.Respons
 }
 
 func TestIdleTrackerExternalRequestResetsIdle(t *testing.T) {
-	f := newIdleTrackerFixture(t, 200*time.Millisecond)
-	f.run(t)
-
-	time.Sleep(50 * time.Millisecond)
-	rec := serveTrackedNoContent(t, f.tracker)
-	require.Equal(t, http.StatusNoContent, rec.Code)
-
-	f.requireNotFiredWithin(t, 100*time.Millisecond, "idle fired before reset timeout elapsed")
-	f.requireFiredWithin(t, 300*time.Millisecond, "idle did not fire after external activity")
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		f := newIdleTrackerFixture(t, 200*time.Millisecond)
+		f.run(t)
+		synctest.Sleep(50 * time.Millisecond)
+		rec := serveTrackedNoContent(t, f.tracker)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		f.requireNotFiredWithin(t, 100*time.Millisecond, "idle fired before reset timeout elapsed")
+		f.requireFiredWithin(t, 300*time.Millisecond, "idle did not fire after external activity")
+	})
 }
 
 func TestIdleTrackerInternalWorkBlocksIdle(t *testing.T) {
+	t.Parallel()
 	f := newIdleTrackerFixture(t, 20*time.Millisecond)
 	done, ok := f.tracker.BeginWork()
 	require.True(t, ok, "BeginWork")
@@ -81,6 +84,7 @@ func TestIdleTrackerInternalWorkBlocksIdle(t *testing.T) {
 }
 
 func TestIdleTrackerRejectsRequestsAfterDrainStarts(t *testing.T) {
+	t.Parallel()
 	f := newIdleTrackerFixture(t, 1*time.Millisecond)
 	f.run(t)
 

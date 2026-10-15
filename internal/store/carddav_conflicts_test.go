@@ -176,7 +176,7 @@ func refreshedCardDAVTombstonePlan(
 	mapping *store.CardDAVResource,
 ) (store.CardDAVSyncPlan, store.CardDAVRemoteResource) {
 	t.Helper()
-	books, err := st.ListCardDAVAddressBooksContext(t.Context())
+	books, err := st.ListCardDAVAddressBooksContext(t.Context(), store.AllCardDAVAccounts)
 	require.NoError(t, err)
 	require.Len(t, books, 1)
 	latest := remoteResource(mapping.Href, "remote-alice", "Alice Latest", "latest@example.test", `"latest"`)
@@ -211,7 +211,7 @@ func TestCardDAVOversizedConflictDoesNotAdvanceMapping(t *testing.T) {
 	after, err := st.GetCardDAVResourceContext(t.Context(), mapping.AddressBookID, mapping.Href)
 	require.NoError(err)
 	assert.Equal(mapping.MappingRevision, after.MappingRevision)
-	conflicts, err := st.ListCardDAVConflictsContext(t.Context(), true)
+	conflicts, err := st.ListCardDAVConflictsContext(t.Context(), true, store.AllCardDAVAccounts)
 	require.NoError(err)
 	assert.Empty(conflicts)
 }
@@ -235,7 +235,7 @@ func TestCardDAVConflictRefreshKeepsOneUnresolvedRowPerMapping(t *testing.T) {
 	assert.Equal(first.MappingRevision+1, second.MappingRevision)
 	assert.Equal(refreshedCapture.RemoteETag, second.RemoteETag)
 	assert.Equal(refreshedCapture.RemoteBody, second.RemoteBody)
-	conflicts, err := st.ListCardDAVConflictsContext(t.Context(), true)
+	conflicts, err := st.ListCardDAVConflictsContext(t.Context(), true, store.AllCardDAVAccounts)
 	require.NoError(err)
 	require.Len(conflicts, 1)
 }
@@ -245,7 +245,14 @@ func TestCardDAVKeepRemoteResolutionAppliesRetainedSnapshotAndAuditsChoice(t *te
 	require := require.New(t)
 
 	st, _, _, mapping := seededCardDAVConflictMapping(t)
+	person, err := st.GetPersonContext(t.Context(), *mapping.PersonID)
+	require.NoError(err)
+	_, err = st.UpdatePersonDisplayNameContext(t.Context(), person.ID, person.Revision, nil)
+	require.NoError(err)
+	snapshot, err := st.LoadPersonVCardSnapshotContext(t.Context(), person.ID)
+	require.NoError(err)
 	capture := conflictCapture(mapping)
+	capture.LocalHash = snapshot.Fingerprint
 	conflict, err := st.RecordCardDAVConflictContext(t.Context(), capture)
 	require.NoError(err)
 	retained := parseCardDAVRemoteForStoreTest(mapping.Href, capture.RemoteETag, capture.RemoteBody)
@@ -264,7 +271,11 @@ func TestCardDAVKeepRemoteResolutionAppliesRetainedSnapshotAndAuditsChoice(t *te
 	assert.Equal(capture.RemoteBody, after.RemoteBody)
 	assert.Equal(capture.RemoteETag, after.RemoteETag)
 	require.NotNil(after.PersonID)
-	snapshot, err := st.LoadPersonVCardSnapshotContext(t.Context(), *after.PersonID)
+	assert.True(after.OwnsDisplayName)
+	person, err = st.GetPersonContext(t.Context(), *after.PersonID)
+	require.NoError(err)
+	assert.Equal(new("Remote"), person.DisplayName)
+	snapshot, err = st.LoadPersonVCardSnapshotContext(t.Context(), *after.PersonID)
 	require.NoError(err)
 	assert.Equal(snapshot.Fingerprint, after.LocalHash)
 }
@@ -485,7 +496,7 @@ func TestCardDAVKeepRemoteAndPullUseCanonicalPostgresLockOrder(t *testing.T) {
 	latestCapture := conflictCapture(current)
 	latestCapture.RemoteETag = latestRemote.RemoteETag
 	latestCapture.RemoteBody = latestRemote.RemoteBody
-	books, err := st.ListCardDAVAddressBooksContext(t.Context())
+	books, err := st.ListCardDAVAddressBooksContext(t.Context(), store.AllCardDAVAccounts)
 	require.NoError(err)
 	require.Len(books, 1)
 
@@ -615,7 +626,7 @@ func TestCardDAVKeepRemoteReconcilesUnboundMappingByBookRole(t *testing.T) {
 				assert.Nil(after.PersonID)
 				assert.Equal(store.CardDAVMappingUnbound, after.MappingStatus)
 			}
-			publicationIDs, err := st.ListCardDAVPublicationPersonIDsContext(t.Context())
+			publicationIDs, err := st.ListCardDAVPublicationPersonIDsContext(t.Context(), store.AllCardDAVAccounts)
 			require.NoError(err)
 			assert.Empty(publicationIDs, "keep-remote must not synthesize publication replay state")
 		})

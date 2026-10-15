@@ -32,11 +32,15 @@ import (
 )
 
 func TestProbeMistralCommandWritesCompleteSanitizedManifest(t *testing.T) {
+	cfg := testConfigValue()
+
 	require := require.New(t)
 	assert := assert.New(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Data.DataDir = t.TempDir()
 	cfg.Attachments.Documents.Enabled = true
 	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
@@ -55,12 +59,13 @@ func TestProbeMistralCommandWritesCompleteSanitizedManifest(t *testing.T) {
 		},
 	}
 	command := newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	var output bytes.Buffer
 	command.SetOut(&output)
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{"probe-mistral", "--fixtures", "synthetic-fixtures"})
 
-	require.NoError(command.ExecuteContext(t.Context()))
+	require.NoError(command.ExecuteContext(testCtx))
 	assert.True(probeCalled)
 	manifest, err := mistral.DecodeCapabilityManifest(bytes.NewReader(output.Bytes()))
 	require.NoError(err)
@@ -70,10 +75,14 @@ func TestProbeMistralCommandWritesCompleteSanitizedManifest(t *testing.T) {
 }
 
 func TestProbeMistralValidateOnlyNeedsNoProviderConfiguration(t *testing.T) {
+	cfg := testConfigValue()
+
 	assert := assert.New(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Data.DataDir = t.TempDir()
 	providerCalled := false
 	validationCalled := false
@@ -89,12 +98,13 @@ func TestProbeMistralValidateOnlyNeedsNoProviderConfiguration(t *testing.T) {
 		},
 	}
 	command := newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	var output bytes.Buffer
 	command.SetOut(&output)
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{"probe-mistral", "--fixtures", "synthetic-fixtures", "--validate-only"})
 
-	require.NoError(t, command.ExecuteContext(t.Context()))
+	require.NoError(t, command.ExecuteContext(testCtx))
 	assert.False(providerCalled)
 	assert.True(validationCalled)
 	assert.Contains(output.String(), "Validated 26 private Mistral fixture(s) locally")
@@ -103,14 +113,19 @@ func TestProbeMistralValidateOnlyNeedsNoProviderConfiguration(t *testing.T) {
 }
 
 func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T) {
+	cfg := testConfigValue()
+
 	require := require.New(t)
 	assert := assert.New(t)
 	markDaemonCLISubprocessForTest(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Data.DataDir = t.TempDir()
 	cfg.Attachments.Documents.Enabled = true
+	cfg.Attachments.Documents.Conversion.CSV.Enabled = true
 	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
 	cfg.Attachments.Documents.TrainingPosture = documentindex.TrainingOptedOut
 	cfg.Attachments.Documents.EstimatedCostUSDPerKUnits = 4
@@ -121,7 +136,7 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	hash := sha256.Sum256(content)
 	digest := hex.EncodeToString(hash[:])
 	messageID := fixture.CreateMessage("documents-command")
-	require.NoError(fixture.Store.UpsertAttachmentRecord(t.Context(), messageID, store.AttachmentWrite{
+	require.NoError(fixture.Store.UpsertAttachmentRecord(testCtx, messageID, store.AttachmentWrite{
 		Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: int64(len(content)),
 		StoragePath: digest[:2] + "/" + digest, ContentHash: digest,
 		Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceImporterSemantics,
@@ -134,10 +149,13 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 		newMistralProcessor: func(*documentindex.DocumentsConfig) (documentindex.MistralProcessor, error) {
 			return processor, nil
 		},
-		openStore: func() (*store.Store, func(), error) {
+		openStore: func(context.Context) (*store.Store, func(), error) {
 			return fixture.Store, func() {}, nil
 		},
-		openAttachments: func(*store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) {
+			return fixture.Store, func() {}, nil
+		},
+		openAttachments: func(context.Context, *store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
 			attachmentOpened = true
 			return commandAttachmentOpener{content: content}, func() error { return nil }, nil
 		},
@@ -148,8 +166,9 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	unconfirmedConsent.SetOut(&disclosureOutput)
 	unconfirmedConsent.SetErr(&bytes.Buffer{})
 	unconfirmedConsent.SetArgs([]string{"consent-mistral", "--capabilities", manifestPath})
-	require.ErrorContains(unconfirmedConsent.ExecuteContext(t.Context()), "requires --yes")
-	assert.Contains(disclosureOutput.String(), "Complete original document bytes")
+	require.ErrorContains(unconfirmedConsent.ExecuteContext(testCtx), "requires --yes")
+	assert.Contains(disclosureOutput.String(), "source text/csv is converted locally; generated application/pdf bytes are sent")
+	assert.Contains(disclosureOutput.String(), "original application/pdf bytes and media type are sent")
 	assert.Contains(disclosureOutput.String(), "retention=standard, training=opted-out")
 	assert.Contains(disclosureOutput.String(), "local archive database")
 	assert.Contains(disclosureOutput.String(), "does not enable hosted document text embeddings")
@@ -160,7 +179,7 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	consent.SetOut(&consentOutput)
 	consent.SetErr(&bytes.Buffer{})
 	consent.SetArgs([]string{"consent-mistral", "--capabilities", manifestPath, "--yes"})
-	require.NoError(consent.ExecuteContext(t.Context()))
+	require.NoError(consent.ExecuteContext(testCtx))
 	assert.Contains(consentOutput.String(), "Recorded Mistral document consent")
 	assert.NotContains(consentOutput.String(), manifestPath)
 	assert.Equal(1, commandDocumentOccurrenceCount(t, fixture.Store),
@@ -171,9 +190,9 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	build.SetOut(&buildOutput)
 	build.SetErr(&bytes.Buffer{})
 	build.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--limit", "5"})
-	require.ErrorContains(build.ExecuteContext(t.Context()), "requires --yes")
+	require.ErrorContains(build.ExecuteContext(testCtx), "requires --yes")
 	assert.Contains(buildOutput.String(), "Document build upload preflight")
-	assert.Contains(buildOutput.String(), "Complete original document bytes")
+	assert.Contains(buildOutput.String(), "source text/csv is converted locally; generated application/pdf bytes are sent")
 	assert.False(attachmentOpened)
 	assert.Zero(processor.calls)
 
@@ -182,7 +201,7 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	build.SetOut(&buildOutput)
 	build.SetErr(&bytes.Buffer{})
 	build.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--limit", "5", "--yes"})
-	require.NoError(build.ExecuteContext(t.Context()))
+	require.NoError(build.ExecuteContext(testCtx))
 	assert.Contains(buildOutput.String(), "indexed 1 document(s), 1 unit(s), skipped 0, failed 0")
 	assert.Equal(1, processor.calls)
 
@@ -191,7 +210,7 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	search.SetOut(&searchOutput)
 	search.SetErr(&bytes.Buffer{})
 	search.SetArgs([]string{"search", "Synthetic", "--json"})
-	require.NoError(search.ExecuteContext(t.Context()))
+	require.NoError(search.ExecuteContext(testCtx))
 	var searchResponse store.DocumentSearchResponse
 	require.NoError(json.Unmarshal(searchOutput.Bytes(), &searchResponse))
 	require.Len(searchResponse.Results, 1)
@@ -204,20 +223,20 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	resume.SetOut(&resumeOutput)
 	resume.SetErr(&bytes.Buffer{})
 	resume.SetArgs([]string{"resume", "--capabilities", manifestPath, "--limit", "5", "--yes"})
-	require.NoError(resume.ExecuteContext(t.Context()))
+	require.NoError(resume.ExecuteContext(testCtx))
 	assert.Contains(resumeOutput.String(), "indexed 0 document(s)")
 	assert.Equal(1, processor.calls)
 
 	rebuild := newDocumentsCmd(deps)
 	rebuild.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--full-rebuild"})
-	require.ErrorContains(rebuild.ExecuteContext(t.Context()), "requires --yes")
+	require.ErrorContains(rebuild.ExecuteContext(testCtx), "requires --yes")
 	assert.Equal(1, processor.calls)
 	rebuild = newDocumentsCmd(deps)
 	var rebuildOutput bytes.Buffer
 	rebuild.SetOut(&rebuildOutput)
 	rebuild.SetErr(&bytes.Buffer{})
 	rebuild.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--full-rebuild", "--yes"})
-	require.NoError(rebuild.ExecuteContext(t.Context()))
+	require.NoError(rebuild.ExecuteContext(testCtx))
 	assert.Contains(rebuildOutput.String(), "indexed 1 document(s)")
 	assert.Equal(2, processor.calls)
 	search = newDocumentsCmd(deps)
@@ -225,7 +244,7 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	search.SetOut(&searchOutput)
 	search.SetErr(&bytes.Buffer{})
 	search.SetArgs([]string{"search", "Replacement", "--json"})
-	require.NoError(search.ExecuteContext(t.Context()))
+	require.NoError(search.ExecuteContext(testCtx))
 	require.NoError(json.Unmarshal(searchOutput.Bytes(), &searchResponse))
 	require.Len(searchResponse.Results, 1)
 	assert.Equal(messageID, searchResponse.Results[0].MessageID)
@@ -235,7 +254,7 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	status.SetOut(&statusOutput)
 	status.SetErr(&bytes.Buffer{})
 	status.SetArgs([]string{"status", "--capabilities", manifestPath})
-	require.NoError(status.ExecuteContext(t.Context()))
+	require.NoError(status.ExecuteContext(testCtx))
 	assert.Contains(statusOutput.String(), "Exact consent: true")
 	assert.Contains(statusOutput.String(), "Coverage: 1 ready")
 	assert.Contains(statusOutput.String(), "Extraction accounting: 2 attempt(s), 2 successful, 0 failed")
@@ -248,10 +267,10 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	statusJSON.SetOut(&statusJSONOutput)
 	statusJSON.SetErr(&bytes.Buffer{})
 	statusJSON.SetArgs([]string{"status", "--capabilities", manifestPath, "--json"})
-	require.NoError(statusJSON.ExecuteContext(t.Context()))
+	require.NoError(statusJSON.ExecuteContext(testCtx))
 	var structuredStatus documentStatusOutput
 	require.NoError(json.Unmarshal(statusJSONOutput.Bytes(), &structuredStatus))
-	assert.Equal(1, structuredStatus.AuthenticatedFormats)
+	assert.Equal(2, structuredStatus.AuthenticatedFormats)
 	assert.True(structuredStatus.Status.ExactConsent)
 	assert.Equal(int64(1), structuredStatus.Status.ReadyOwners)
 	assert.Equal(int64(1), structuredStatus.Status.EligibleOwners)
@@ -274,21 +293,21 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	require.NotNil(structuredStatus.EstimatedSuccessfulCostUSD)
 	assert.InDelta(0.008, *structuredStatus.EstimatedSuccessfulCostUSD, 0.000001)
 
-	profile, err := configuredDocumentProfileOnly(manifestPath)
+	profile, err := configuredDocumentProfileOnly(manifestPath, invocationFromContext(testCtx))
 	require.NoError(err)
 	retry := newDocumentsCmd(deps)
 	retry.SetArgs([]string{"retry", "--capabilities", manifestPath, "--hash", digest})
-	require.ErrorContains(retry.ExecuteContext(t.Context()), "already current")
+	require.ErrorContains(retry.ExecuteContext(testCtx), "already current")
 
 	retire := newDocumentsCmd(deps)
 	retire.SetArgs([]string{"retire", profile.ID})
-	require.ErrorContains(retire.ExecuteContext(t.Context()), "requires --yes")
+	require.ErrorContains(retire.ExecuteContext(testCtx), "requires --yes")
 	retire = newDocumentsCmd(deps)
 	var retireOutput bytes.Buffer
 	retire.SetOut(&retireOutput)
 	retire.SetErr(&bytes.Buffer{})
 	retire.SetArgs([]string{"retire", profile.ID, "--yes"})
-	require.NoError(retire.ExecuteContext(t.Context()))
+	require.NoError(retire.ExecuteContext(testCtx))
 	assert.Contains(retireOutput.String(), "Retired document extraction profile")
 
 	search = newDocumentsCmd(deps)
@@ -296,29 +315,81 @@ func TestDocumentsConsentBuildAndStatusUseExactAuthenticatedProfile(t *testing.T
 	search.SetOut(&searchOutput)
 	search.SetErr(&bytes.Buffer{})
 	search.SetArgs([]string{"search", "Synthetic", "--json"})
-	require.NoError(search.ExecuteContext(t.Context()))
+	require.NoError(search.ExecuteContext(testCtx))
 	require.NoError(json.Unmarshal(searchOutput.Bytes(), &searchResponse))
 	assert.Empty(searchResponse.Results)
 
 	purge := newDocumentsCmd(deps)
 	purge.SetArgs([]string{"purge-derived", "--hash", digest})
-	require.ErrorContains(purge.ExecuteContext(t.Context()), "requires --yes")
+	require.ErrorContains(purge.ExecuteContext(testCtx), "requires --yes")
 	purge = newDocumentsCmd(deps)
 	var purgeOutput bytes.Buffer
 	purge.SetOut(&purgeOutput)
 	purge.SetErr(&bytes.Buffer{})
 	purge.SetArgs([]string{"purge-derived", "--hash", digest, "--yes"})
-	require.NoError(purge.ExecuteContext(t.Context()))
+	require.NoError(purge.ExecuteContext(testCtx))
 	assert.Contains(purgeOutput.String(), "Purged 2 extraction(s) and 1 current head(s)")
 }
 
+func TestDocumentBuildPreflightNamesCSVSourceBytesSeparately(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	documentsConfig := documentindex.DefaultDocumentsConfig()
+	documentsConfig.Conversion.CSV.Enabled = true
+	csvPolicy, err := documentsConfig.CSVPolicy()
+	require.NoError(err)
+	inputPolicy := documentindex.ResolvedInputPolicy{
+		AllowedMediaTypes: []string{"text/csv"},
+		Routes: map[string]documentindex.InputRoute{
+			"text/csv": {Conversion: &csvPolicy},
+		},
+	}
+	var output bytes.Buffer
+	printDocumentBuildPreflight(&output, &documentsConfig, store.DocumentExtractionProfile{}, inputPolicy,
+		store.DocumentIndexStatus{EligibleOccurrences: 1, EligibleOwners: 1, EligibleBytes: 32}, 1,
+		documentBuildIncremental)
+
+	assert.Contains(output.String(), "32B of source bytes")
+	assert.Contains(output.String(), "generated PDF upload bytes are recorded after each request")
+	assert.NotContains(output.String(), "of original bytes")
+}
+
+func TestDocumentConsentDisclosureListsResolvedUploadRoutes(t *testing.T) {
+	require := require.New(t)
+	config := documentindex.DefaultDocumentsConfig()
+	config.Conversion.CSV.Enabled = true
+	csvPolicy, err := config.CSVPolicy()
+	require.NoError(err)
+	pdf, found := mistral.CandidateFormatByID("pdf")
+	require.True(found)
+	inputPolicy := documentindex.ResolvedInputPolicy{
+		AllowedMediaTypes: []string{pdf.MediaType, "text/csv"},
+		Routes: map[string]documentindex.InputRoute{
+			pdf.MediaType: {Format: pdf},
+			"text/csv":    {Format: pdf, Conversion: &csvPolicy},
+		},
+	}
+	var output bytes.Buffer
+	printDocumentConsentDisclosure(&output, &config, store.DocumentExtractionProfile{
+		Endpoint: "https://example.invalid", Region: "eu",
+	}, inputPolicy)
+
+	assert := assert.New(t)
+	assert.Contains(output.String(), "original application/pdf bytes and media type are sent")
+	assert.Contains(output.String(), "source text/csv is converted locally; generated application/pdf bytes are sent")
+}
+
 func TestDocumentBuildRepairsHistoricalMIMERolesBeforePreflight(t *testing.T) {
+	cfg := testConfigValue()
+
 	markDaemonCLISubprocessForTest(t)
 	require := require.New(t)
 	assert := assert.New(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Data.DataDir = t.TempDir()
 	cfg.Attachments.Documents.Enabled = true
 	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
@@ -348,16 +419,18 @@ func TestDocumentBuildRepairsHistoricalMIMERolesBeforePreflight(t *testing.T) {
 
 	manifestPath := writeCommandCapabilityManifest(t, cfg.Attachments.Documents.MaxPagesPerDocument)
 	deps := documentsCommandDeps{
-		openStore: func() (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
-		openAttachments: func(*store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
+		openStore:            func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openAttachments: func(context.Context, *store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
 			return nil, func() error { return nil }, errors.New("synthetic stop after repair")
 		},
 	}
 	command := newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	command.SetOut(&bytes.Buffer{})
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath})
-	require.ErrorContains(command.ExecuteContext(t.Context()), "requires --yes")
+	require.ErrorContains(command.ExecuteContext(testCtx), "requires --yes")
 
 	var role, roleSource string
 	var partKey *string
@@ -372,12 +445,13 @@ func TestDocumentBuildRepairsHistoricalMIMERolesBeforePreflight(t *testing.T) {
 	consent.SetOut(&bytes.Buffer{})
 	consent.SetErr(&bytes.Buffer{})
 	consent.SetArgs([]string{"consent-mistral", "--capabilities", manifestPath, "--yes"})
-	require.NoError(consent.ExecuteContext(t.Context()))
+	require.NoError(consent.ExecuteContext(testCtx))
 	command = newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	command.SetOut(&bytes.Buffer{})
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--yes"})
-	require.ErrorContains(command.ExecuteContext(t.Context()), "synthetic stop after repair")
+	require.ErrorContains(command.ExecuteContext(testCtx), "synthetic stop after repair")
 
 	require.NoError(fixture.Store.DB().QueryRow(fixture.Store.Rebind(`
 		SELECT attachment_role, role_source, source_part_key
@@ -392,7 +466,8 @@ func TestDocumentsSearchDoesNotRegisterUnconsentedJournalConsumer(t *testing.T) 
 	require := require.New(t)
 	fixture := storetest.New(t)
 	deps := documentsCommandDeps{
-		openStore: func() (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openStore:            func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
 	}
 	command := newDocumentsCmd(deps)
 	var output bytes.Buffer
@@ -412,7 +487,8 @@ func TestDocumentsSearchDoesNotRegisterUnconsentedJournalConsumer(t *testing.T) 
 func TestDocumentsSearchLocalExplicitSemanticNeverMasqueradesAsLexical(t *testing.T) {
 	fixture := storetest.New(t)
 	command := newDocumentsCmd(documentsCommandDeps{
-		openStore: func() (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openStore:            func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
 	})
 	command.SetArgs([]string{"search", "evidence", "--mode", "semantic", "--candidate-limit", "25"})
 	err := command.ExecuteContext(t.Context())
@@ -440,7 +516,7 @@ func TestDocumentsSearchUsesConfiguredReadClient(t *testing.T) {
 		},
 	}
 	command := newDocumentsCmd(documentsCommandDeps{
-		openStore: func() (*store.Store, func(), error) {
+		openStore: func(context.Context) (*store.Store, func(), error) {
 			openStoreCalled = true
 			return nil, func() {}, errors.New("local store must not be opened")
 		},
@@ -493,10 +569,14 @@ func TestDocumentsSearchRejectsNonPositivePersonScopeBeforeDispatch(t *testing.T
 }
 
 func TestDocumentsStatusUsesConfiguredReadClient(t *testing.T) {
+	cfg := testConfigValue()
+
 	assert := assert.New(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Attachments.Documents.Enabled = true
 	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
 	cfg.Attachments.Documents.TrainingPosture = documentindex.TrainingOptedOut
@@ -517,7 +597,7 @@ func TestDocumentsStatusUsesConfiguredReadClient(t *testing.T) {
 		},
 	}
 	command := newDocumentsCmd(documentsCommandDeps{
-		openStore: func() (*store.Store, func(), error) {
+		openStore: func(context.Context) (*store.Store, func(), error) {
 			openStoreCalled = true
 			return nil, func() {}, errors.New("local store must not be opened")
 		},
@@ -525,21 +605,26 @@ func TestDocumentsStatusUsesConfiguredReadClient(t *testing.T) {
 			return reader, func() { cleanupCalled = true }, nil
 		},
 	})
+	command.SetContext(testCtx)
 	var output bytes.Buffer
 	command.SetOut(&output)
 	command.SetErr(&bytes.Buffer{})
 	command.SetArgs([]string{"status", "--capabilities", manifestPath, "--json"})
-	require.NoError(t, command.ExecuteContext(t.Context()))
+	require.NoError(t, command.ExecuteContext(testCtx))
 	assert.False(openStoreCalled)
 	assert.True(cleanupCalled)
 	assert.Contains(output.String(), `"ready_owners":3`)
 }
 
 func TestDocumentsBuildRefusesAPIUseBeforeExactConsent(t *testing.T) {
+	cfg := testConfigValue()
+
 	markDaemonCLISubprocessForTest(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Data.DataDir = t.TempDir()
 	cfg.Attachments.Documents.Enabled = true
 	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
@@ -551,23 +636,29 @@ func TestDocumentsBuildRefusesAPIUseBeforeExactConsent(t *testing.T) {
 			providerCalled = true
 			return &commandBuildProcessor{}, nil
 		},
-		openStore: func() (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openStore:            func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
 	}
 	manifestPath := writeCommandCapabilityManifest(t, cfg.Attachments.Documents.MaxPagesPerDocument)
 	command := newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	command.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--yes"})
-	err := command.ExecuteContext(t.Context())
+	err := command.ExecuteContext(testCtx)
 	require.ErrorContains(t, err, "requires exact consent")
 	assert.False(t, providerCalled)
 }
 
 func TestDocumentFullRebuildResumesDurableTargetSnapshot(t *testing.T) {
+	cfg := testConfigValue()
+
 	markDaemonCLISubprocessForTest(t)
 	require := require.New(t)
 	assert := assert.New(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	cfg.Data.DataDir = t.TempDir()
 	cfg.Attachments.Documents.Enabled = true
 	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
@@ -582,7 +673,7 @@ func TestDocumentFullRebuildResumesDurableTargetSnapshot(t *testing.T) {
 		digest := hex.EncodeToString(digestBytes[:])
 		contents[digest] = content
 		messageID := fixture.CreateMessage("documents-rebuild-" + string(rune('a'+index)))
-		require.NoError(fixture.Store.UpsertAttachmentRecord(t.Context(), messageID, store.AttachmentWrite{
+		require.NoError(fixture.Store.UpsertAttachmentRecord(testCtx, messageID, store.AttachmentWrite{
 			Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: int64(len(content)),
 			StoragePath: digest[:2] + "/" + digest, ContentHash: digest,
 			Role: store.AttachmentRoleStandalone, RoleSource: store.AttachmentRoleSourceImporterSemantics,
@@ -595,17 +686,18 @@ func TestDocumentFullRebuildResumesDurableTargetSnapshot(t *testing.T) {
 		newMistralProcessor: func(*documentindex.DocumentsConfig) (documentindex.MistralProcessor, error) {
 			return processor, nil
 		},
-		openStore: func() (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
-		openAttachments: func(*store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
+		openStore:            func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openAttachments: func(context.Context, *store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
 			return commandAttachmentMapOpener{contents: contents}, func() error { return nil }, nil
 		},
 	}
 	consent := newDocumentsCmd(deps)
 	consent.SetArgs([]string{"consent-mistral", "--capabilities", manifestPath, "--yes"})
-	require.NoError(consent.ExecuteContext(t.Context()))
+	require.NoError(consent.ExecuteContext(testCtx))
 	initial := newDocumentsCmd(deps)
 	initial.SetArgs([]string{documentBuildSubcommand, "--capabilities", manifestPath, "--limit", "2", "--yes"})
-	require.NoError(initial.ExecuteContext(t.Context()))
+	require.NoError(initial.ExecuteContext(testCtx))
 	assert.Equal(2, processor.calls)
 
 	rebuild := newDocumentsCmd(deps)
@@ -616,13 +708,13 @@ func TestDocumentFullRebuildResumesDurableTargetSnapshot(t *testing.T) {
 		documentBuildSubcommand, "--capabilities", manifestPath,
 		"--full-rebuild", "--yes", "--limit", "1",
 	})
-	require.NoError(rebuild.ExecuteContext(t.Context()))
+	require.NoError(rebuild.ExecuteContext(testCtx))
 	assert.Contains(rebuildOutput.String(), "1 current owner(s) remaining")
 	assert.Equal(3, processor.calls)
-	profile, err := configuredDocumentProfileOnly(manifestPath)
+	profile, err := configuredDocumentProfileOnly(manifestPath, invocationFromContext(testCtx))
 	require.NoError(err)
 	privateRebuild, err := fixture.Store.GetActiveDocumentExtractionRebuild(
-		t.Context(), profile.ID, "original",
+		testCtx, profile.ID, "original",
 	)
 	require.NoError(err)
 	status := newDocumentsCmd(deps)
@@ -630,7 +722,7 @@ func TestDocumentFullRebuildResumesDurableTargetSnapshot(t *testing.T) {
 	status.SetOut(&statusOutput)
 	status.SetErr(&bytes.Buffer{})
 	status.SetArgs([]string{"status", "--capabilities", manifestPath, "--json"})
-	require.NoError(status.ExecuteContext(t.Context()))
+	require.NoError(status.ExecuteContext(testCtx))
 	var structuredStatus documentStatusOutput
 	require.NoError(json.Unmarshal(statusOutput.Bytes(), &structuredStatus))
 	require.NotNil(structuredStatus.ActiveRebuild)
@@ -642,10 +734,10 @@ func TestDocumentFullRebuildResumesDurableTargetSnapshot(t *testing.T) {
 	resume.SetOut(&resumeOutput)
 	resume.SetErr(&bytes.Buffer{})
 	resume.SetArgs([]string{"resume", "--capabilities", manifestPath, "--limit", "1", "--yes"})
-	require.NoError(resume.ExecuteContext(t.Context()))
+	require.NoError(resume.ExecuteContext(testCtx))
 	assert.Contains(resumeOutput.String(), "Full document rebuild completed")
 	assert.Equal(4, processor.calls)
-	_, err = fixture.Store.GetActiveDocumentExtractionRebuild(t.Context(), profile.ID, "original")
+	_, err = fixture.Store.GetActiveDocumentExtractionRebuild(testCtx, profile.ID, "original")
 	require.ErrorIs(err, store.ErrDocumentExtractionRebuildMissing)
 	runs := operationRunsForKind(t, fixture.Store, operations.KindDocumentExtraction)
 	require.Len(runs, 3, "incremental, rebuild, and resume are separate bounded passes")
@@ -683,7 +775,7 @@ func TestDocumentBuildRecordsOversizedCandidateAndContinues(t *testing.T) {
 	manifestPath := writeCommandCapabilityManifest(t, documentsConfig.MaxPagesPerDocument)
 	manifest, err := loadDocumentCapabilityManifest(manifestPath)
 	require.NoError(err)
-	allowed, profile, err := documentProfileForConfig(&documentsConfig, manifest)
+	inputPolicy, profile, err := documentProfileForConfig(&documentsConfig, manifest)
 	require.NoError(err)
 	_, err = fixture.Store.EnsureDocumentExtractionProfile(t.Context(), profile)
 	require.NoError(err)
@@ -695,7 +787,7 @@ func TestDocumentBuildRecordsOversizedCandidateAndContinues(t *testing.T) {
 	result, err := executeDocumentBuild(
 		t.Context(), fixture.Store, testOperationPassScope("document:oversized"),
 		fixture.Store, commandAttachmentMapOpener{contents: contents},
-		&commandBuildProcessor{}, &documentsConfig, manifest, allowed, profile, 2,
+		&commandBuildProcessor{}, &documentsConfig, manifest, inputPolicy.AllowedMediaTypes, profile, 2,
 		"documents-isolation-test", t.TempDir(), documentBuildIncremental, nil,
 	)
 	require.ErrorContains(err, "1 extraction failure")
@@ -802,7 +894,7 @@ func TestDocumentBuildStopsOnCancellation(t *testing.T) {
 	manifestPath := writeCommandCapabilityManifest(t, documentsConfig.MaxPagesPerDocument)
 	manifest, err := loadDocumentCapabilityManifest(manifestPath)
 	require.NoError(err)
-	allowed, profile, err := documentProfileForConfig(&documentsConfig, manifest)
+	inputPolicy, profile, err := documentProfileForConfig(&documentsConfig, manifest)
 	require.NoError(err)
 	_, err = fixture.Store.EnsureDocumentExtractionProfile(t.Context(), profile)
 	require.NoError(err)
@@ -815,7 +907,7 @@ func TestDocumentBuildStopsOnCancellation(t *testing.T) {
 	result, err := executeDocumentBuild(
 		ctx, fixture.Store, testOperationPassScope("document:cancelled"),
 		fixture.Store, commandAttachmentMapOpener{contents: map[string][]byte{digest: content}},
-		commandCancelingProcessor{cancel: cancel}, &documentsConfig, manifest, allowed, profile, 1,
+		commandCancelingProcessor{cancel: cancel}, &documentsConfig, manifest, inputPolicy.AllowedMediaTypes, profile, 1,
 		"documents-cancellation-test", t.TempDir(), documentBuildIncremental, nil,
 	)
 	require.ErrorIs(err, context.Canceled)
@@ -859,7 +951,7 @@ func TestDocumentBuildContinuesAfterProviderTimeout(t *testing.T) {
 	manifestPath := writeCommandCapabilityManifest(t, documentsConfig.MaxPagesPerDocument)
 	manifest, err := loadDocumentCapabilityManifest(manifestPath)
 	require.NoError(err)
-	allowed, profile, err := documentProfileForConfig(&documentsConfig, manifest)
+	inputPolicy, profile, err := documentProfileForConfig(&documentsConfig, manifest)
 	require.NoError(err)
 	_, err = fixture.Store.EnsureDocumentExtractionProfile(t.Context(), profile)
 	require.NoError(err)
@@ -872,7 +964,7 @@ func TestDocumentBuildContinuesAfterProviderTimeout(t *testing.T) {
 		t.Context(), fixture.Store, testOperationPassScope("document:timeout"),
 		fixture.Store, commandAttachmentMapOpener{contents: contents},
 		&commandBuildProcessor{firstErr: context.DeadlineExceeded},
-		&documentsConfig, manifest, allowed, profile, 2,
+		&documentsConfig, manifest, inputPolicy.AllowedMediaTypes, profile, 2,
 		"documents-timeout-test", t.TempDir(), documentBuildIncremental, nil,
 	)
 	require.ErrorContains(err, "1 extraction failure")
@@ -1002,11 +1094,15 @@ func TestScheduledDocumentReconcilePreservesExistingConsentWhenExtractionDisable
 }
 
 func TestProbeMistralCommandRequiresExplicitEnablementAndPosture(t *testing.T) {
+	cfg := testConfigValue()
+
 	require := require.New(t)
 	assert := assert.New(t)
 	previousConfig := cfg
 	t.Cleanup(func() { cfg = previousConfig })
 	cfg = config.NewDefaultConfig()
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	providerCalled := false
 	deps := documentsCommandDeps{
 		newMistralClient: func(*documentindex.DocumentsConfig) (*mistral.Client, error) {
@@ -1016,15 +1112,17 @@ func TestProbeMistralCommandRequiresExplicitEnablementAndPosture(t *testing.T) {
 	}
 
 	command := newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	command.SetArgs([]string{"probe-mistral", "--fixtures", "synthetic-fixtures"})
-	err := command.ExecuteContext(t.Context())
+	err := command.ExecuteContext(testCtx)
 	require.ErrorContains(err, "enabled=true")
 	assert.False(providerCalled)
 
 	cfg.Attachments.Documents.Enabled = true
 	command = newDocumentsCmd(deps)
+	command.SetContext(testCtx)
 	command.SetArgs([]string{"probe-mistral", "--fixtures", "synthetic-fixtures"})
-	err = command.ExecuteContext(t.Context())
+	err = command.ExecuteContext(testCtx)
 	require.ErrorContains(err, "explicit retention_posture and training_posture")
 	assert.False(providerCalled)
 }
@@ -1163,4 +1261,67 @@ func commandMistralResult(markdown string) mistral.Result {
 		ReturnedModel: mistral.DefaultModel, UnitsProcessed: 1,
 		Metrics: mistral.RequestMetrics{Requests: 1, Latency: time.Millisecond},
 	}
+}
+
+func TestInlineDocumentConsentRescansAndReportsMalformedSource(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	markDaemonCLISubprocessForTest(t)
+	cfg := testConfigValue()
+	cfg.Data.DataDir = t.TempDir()
+	cfg.Attachments.Documents.Enabled = true
+	cfg.Attachments.Documents.RetentionPosture = documentindex.RetentionStandard
+	cfg.Attachments.Documents.TrainingPosture = documentindex.TrainingOptedOut
+	testCtx := withTestConfig(t, cfg)
+	fixture := storetest.New(t)
+	content := []byte("%PDF-1.4\nsynthetic malformed PDF\n")
+	sum := sha256.Sum256(content)
+	hash := hex.EncodeToString(sum[:])
+	msg := fixture.CreateMessage("inline-malformed-document")
+	require.NoError(fixture.Store.UpsertAttachmentRecord(t.Context(), msg, store.AttachmentWrite{Filename: "synthetic.pdf", MIMEType: "application/pdf", Size: int64(len(content)), StoragePath: hash[:2] + "/" + hash, ContentHash: hash, Role: store.AttachmentRoleInline, RoleSource: store.AttachmentRoleSourceRawMIMERepair}))
+	manifestPath := writeCommandCapabilityManifest(t, cfg.Attachments.Documents.MaxPagesPerDocument)
+	processor := &commandBuildProcessor{}
+	deps := documentsCommandDeps{
+		newMistralProcessor:  func(*documentindex.DocumentsConfig) (documentindex.MistralProcessor, error) { return processor, nil },
+		openStore:            func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openInitializedStore: func(context.Context) (*store.Store, func(), error) { return fixture.Store, func() {}, nil },
+		openAttachments: func(context.Context, *store.Store) (documentindex.DocumentAttachmentOpener, func() error, error) {
+			return commandAttachmentOpener{content: content}, func() error { return nil }, nil
+		},
+		openReadClient: func(context.Context) (documentReadClient, func(), error) {
+			return localDocumentReadClient{store: fixture.Store}, func() {}, nil
+		},
+	}
+	run := func(args ...string) (string, error) {
+		command := newDocumentsCmd(deps)
+		var output bytes.Buffer
+		command.SetOut(&output)
+		command.SetErr(&bytes.Buffer{})
+		command.SetArgs(args)
+		err := command.ExecuteContext(testCtx)
+		return output.String(), err
+	}
+	_, err := run("consent-mistral", "--capabilities", manifestPath, "--yes")
+	require.NoError(err)
+	// Simulate an old completed journal bootstrap that never retained inline rows.
+	_, err = fixture.Store.DB().Exec("DELETE FROM document_occurrences")
+	require.NoError(err)
+	cfg.Attachments.Documents.Scope.IncludeInline = true
+	disclosure, err := run("consent-mistral", "--capabilities", manifestPath)
+	require.ErrorContains(err, "requires --yes")
+	assert.Contains(disclosure, "standalone and inline document attachments")
+	_, err = run("consent-mistral", "--capabilities", manifestPath, "--yes")
+	require.NoError(err)
+	assert.Equal(1, commandDocumentOccurrenceCount(t, fixture.Store))
+	_, err = run("build", "--capabilities", manifestPath, "--yes")
+	require.ErrorContains(err, "PDF structure is malformed")
+	assert.Zero(processor.calls)
+	human, err := run("status", "--capabilities", manifestPath)
+	require.NoError(err)
+	assert.Contains(human, "invalid_local_source")
+	assert.Contains(human, "PDF structure is malformed")
+	encoded, err := run("status", "--capabilities", manifestPath, "--json")
+	require.NoError(err)
+	assert.Contains(encoded, `"reason_code":"invalid_local_source"`)
+	assert.Contains(encoded, "PDF structure is malformed")
 }

@@ -7,7 +7,7 @@ import (
 
 func TestCanonicalDraftRoleDoesNotUseDisplayNames(t *testing.T) {
 	assertions := assert.New(t)
-	assertions.Equal("draft", SystemRoleForLabelID("DRAFT"))
+	assertions.Equal("drafts", SystemRoleForLabelID("DRAFT"))
 	assertions.Equal("sent", SystemRoleForLabelID("SENT"))
 	assertions.Empty(SystemRoleForLabelID("draft"))
 	assertions.Empty(SystemRoleForLabelID("Label_custom_drafts"))

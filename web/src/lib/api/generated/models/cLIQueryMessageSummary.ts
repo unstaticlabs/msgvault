@@ -7,6 +7,7 @@ import type { CLIQueryMessageSummaryReadState } from "./cLIQueryMessageSummaryRe
 
 export interface CLIQueryMessageSummary {
   attachment_count: number;
+  attachment_names?: string[];
   bcc?: Address[];
   body_text?: string;
   cc?: Address[];
@@ -20,6 +21,7 @@ export interface CLIQueryMessageSummary {
   id: number;
   inbox_state?: CLIQueryMessageSummaryInboxState;
   labels: string[];
+  match_snippet?: string;
   message_type?: string;
   read_state?: CLIQueryMessageSummaryReadState;
   sent_at: string;
@@ -30,5 +32,6 @@ export interface CLIQueryMessageSummary {
   source_message_id: string;
   subject: string;
   to?: Address[];
+  web_url?: string;
   [key: string]: unknown;
 }

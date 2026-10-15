@@ -77,6 +77,8 @@ describe('CardDAVOperations', () => {
     await controller.load();
     render(CardDAVOperations, { controller });
 
+    expect(screen.getByText(/one write target across all CardDAV connections/)).toBeDefined();
+    expect(screen.getByText(/clears the previous write target, including a book on another connection/)).toBeDefined();
     await fireEvent.click(screen.getByRole('checkbox', { name: 'Publish here for Personal' }));
     expect(screen.getByText('Publishing here also enables contact sync for this book.')).toBeDefined();
     expect((screen.getByRole('checkbox', { name: 'Sync contacts for Personal' }) as HTMLInputElement).checked).toBe(true);
@@ -87,10 +89,14 @@ describe('CardDAVOperations', () => {
     controller.destroy();
   });
 
-  it('shows fixed repair copy and keeps sync disabled without a ready runtime', async () => {
+  it.each([
+    { reason: 'credential_missing', available: false, message: 'No CardDAV credential is stored. Connect the account in CardDAV settings and save it.' },
+    { reason: 'google_authorization_required', available: true, message: 'Connect Google in CardDAV account settings, or run msgvault carddav authorize-google with your account email and OAuth app, then try again.' },
+    { reason: 'microsoft_authorization_required', available: true, message: 'Run msgvault carddav authorize-microsoft with your account email, then try again.' },
+  ])('shows repair instructions for $reason and keeps sync disabled', async ({ reason, available, message }) => {
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const path = new URL((input instanceof Request ? input : new Request(input)).url).pathname;
-      if (path.endsWith('/status')) return Response.json({ configured: true, available: false, credential_configured: false, enabled: true, scheduled: false, schedule: '', repair_reason: 'credential_missing' });
+      if (path.endsWith('/status')) return Response.json({ configured: true, available, credential_configured: false, enabled: true, scheduled: false, schedule: '', repair_reason: reason });
       if (path.endsWith('/books')) return Response.json({ books: [] });
       return Response.json({ runs: [] });
     });
@@ -98,17 +104,19 @@ describe('CardDAVOperations', () => {
     await controller.load();
     render(CardDAVOperations, { controller });
 
-    expect(screen.getByRole('alert').textContent).toContain('No CardDAV password is stored. Enter the password and save the account.');
+    expect(screen.getByRole('alert').textContent).toContain(message);
     expect((screen.getByRole('button', { name: 'Sync now' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('No discovered address books.')).toBeDefined();
     controller.destroy();
   });
 
   it('keeps retained books read-only until status confirms runtime readiness', async () => {
+    let statusReads = 0;
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const request = input instanceof Request ? input : new Request(input);
       const path = new URL(request.url).pathname;
       if (path.endsWith('/status')) {
+        if (statusReads++ === 0) return Response.json({ configured: true, available: true, credential_configured: true, enabled: false, scheduled: false, schedule: '' });
         return Response.json({ error: 'unavailable', message: 'unsafe status detail' }, { status: 503 });
       }
       if (path.endsWith('/books')) {
@@ -125,6 +133,7 @@ describe('CardDAVOperations', () => {
     });
     const controller = new CardDAVController(createAPIClient(fetchFn));
     await controller.load();
+    await controller.retryStatus();
     render(CardDAVOperations, { controller });
 
     expect((screen.getByRole('button', { name: 'Retry CardDAV status' }) as HTMLButtonElement).disabled).toBe(false);
@@ -135,4 +144,33 @@ describe('CardDAVOperations', () => {
     expect((screen.getByRole('button', { name: 'Apply roles for Retained book' }) as HTMLButtonElement).disabled).toBe(true);
     controller.destroy();
   });
+});
+
+
+it('labels history from the API connection rather than the account ID', async () => {
+  const client = createAPIClient(async (input) => {
+    const request = input instanceof Request ? input : new Request(input);
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/status')) return Response.json({
+      configured: false, available: false, credential_configured: false,
+      enabled: false, scheduled: false, schedule: ''
+    });
+    if (path.endsWith('/runs')) return Response.json({ runs: [
+      { id: 3, account_id: 1, connection: 'work' },
+      { id: 2, account_id: 7, connection: 'default' },
+      { id: 1, account_id: 1 }
+    ].map(run => ({
+      ...run, trigger: 'manual', full: false, state: 'succeeded',
+      started_at: '2026-08-28T09:00:00Z', books: 1, created: 0, updated: 0, removed: 0
+    })) });
+    throw new Error(`Unexpected ${request.method} ${path}`);
+  });
+  const controller = new CardDAVController(client);
+  await controller.load();
+  render(CardDAVOperations, { controller });
+
+  expect(screen.getAllByRole('row').slice(1).map(row => row.querySelector('td')?.textContent)).toEqual([
+    'work', 'default', 'Unknown connection'
+  ]);
+  controller.destroy();
 });

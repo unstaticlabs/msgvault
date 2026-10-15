@@ -12,7 +12,7 @@ import (
 	"go.kenn.io/msgvault/internal/mime"
 )
 
-func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, raw []byte, format string) error {
+func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, raw []byte, format string, existingMessage bool) error {
 	var messageType string
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(lower(message_type), ''), 'email') FROM messages WHERE id = ?`, messageID).Scan(&messageType); err != nil {
 		return err
@@ -40,11 +40,11 @@ func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, message
 	if err == nil && version == mime.EmailLinkageVersion && oldFingerprint == fingerprint && hasSeed {
 		return nil
 	}
-	_, err = s.storeEmailLinkageTx(ctx, tx, messageID, mime.ExtractEmailLinkage(raw), fingerprint)
+	_, err = s.storeEmailLinkageTx(ctx, tx, messageID, mime.ExtractEmailLinkage(raw), fingerprint, existingMessage)
 	return err
 }
 
-func (s *Store) storeEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, evidence mime.EmailLinkage, fingerprint string) (bool, error) {
+func (s *Store) storeEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, evidence mime.EmailLinkage, fingerprint string, existingMessage bool) (bool, error) {
 	encoded, err := json.Marshal(evidence)
 	if err != nil {
 		return false, err
@@ -65,10 +65,12 @@ func (s *Store) storeEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID
  outcome = excluded.outcome, facts = excluded.facts, raw_sha256 = excluded.raw_sha256`, messageID, evidence.Version, evidence.Outcome, string(encoded), fingerprint); err != nil {
 		return false, err
 	}
-	if changed {
+	// New messages are already published by the append boundary. Only edits
+	// to previously visible evidence invalidate the existing cache population.
+	if changed && existingMessage {
 		return true, s.bumpDerivedDataRevision(tx)
 	}
-	return false, nil
+	return changed, nil
 }
 
 // EmailLinkageEvidence returns saved explicit facts; a missing extraction stays
@@ -188,7 +190,7 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 					fingerprint = hex.EncodeToString(sum[:])
 				}
 			}
-			changed, err := s.storeEmailLinkageTx(ctx, tx, id, evidence, fingerprint)
+			changed, err := s.storeEmailLinkageTx(ctx, tx, id, evidence, fingerprint, true)
 			if err != nil {
 				return err
 			}

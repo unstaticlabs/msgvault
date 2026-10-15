@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -23,20 +24,30 @@ type importEMLFlags struct {
 }
 
 func newImportEMLCommand() *cobra.Command {
+	return newImportRawDirectoryCommand("eml", importer.ImportEMLDir)
+}
+
+func newImportRawDirectoryCommand(format string, runImport func(context.Context, *store.Store, string, importer.EMLImportOptions) (*importer.EMLImportSummary, error)) *cobra.Command {
 	var flags importEMLFlags
 	cmd := &cobra.Command{
-		Use:   "import-eml <mail-dir>",
+		Use:   "import-" + format + " <mail-dir>",
 		Short: "Import a tree of RFC 5322 .eml files",
 		Long: `Import RFC 5322 .eml files stored in MailMate-style .mailbox
 directories. Nested mailbox names become slash-separated labels, and exact
 duplicate messages receive every mailbox label where they appear.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if len(args) != 1 {
-				return usageErr(cmd, errors.New("import-eml requires exactly 1 arg: <mail-dir>"))
+				return usageErr(cmd, fmt.Errorf("import-%s requires exactly 1 arg: <mail-dir>", format))
 			}
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			state := invocationFromCommand(cmd)
+			if state == nil || state.cfg == nil {
+				return errors.New("configuration is unavailable")
+			}
+			cfg := state.cfg
+			logger := state.logger
 			if !isDaemonCLISubprocess() {
 				return runDaemonCLICommandHTTPFromCobraWithLocalFiles(cmd, args, nil)
 			}
@@ -46,7 +57,7 @@ duplicate messages receive every mailbox label where they appear.`,
 
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
-			st, cleanup, err := openWritableStoreAndInitForIngest()
+			st, cleanup, err := openWritableStoreAndInitForIngestInvocation(state)
 			if err != nil {
 				return err
 			}
@@ -57,22 +68,23 @@ duplicate messages receive every mailbox label where they appear.`,
 				attachmentsDir = ""
 			}
 			dbPath := cfg.DatabaseDSN()
-			summary, importErr := importer.ImportEMLDir(ctx, st, args[0], importer.EMLImportOptions{
+			summary, importErr := runImport(ctx, st, args[0], importer.EMLImportOptions{
 				SourceType:         flags.sourceType,
 				Identifier:         flags.identifier,
 				NoResume:           flags.noResume,
 				CheckpointInterval: flags.checkpointInterval,
 				AttachmentsDir:     attachmentsDir,
+				RemoteImages:       configuredRemoteImageFetcher(cfg),
 				Logger:             logger,
 			})
 			if importErr != nil {
-				return errors.Join(importErr, rebuildCacheAfterWrite(dbPath))
+				return errors.Join(importErr, rebuildCacheAfterWrite(dbPath, state))
 			}
 
 			if err := runEMLPostImportMigrations(
-				cmd.OutOrStdout(), st, summary, flags,
+				cmd.OutOrStdout(), st, summary, flags, state,
 			); err != nil {
-				return errors.Join(err, rebuildCacheAfterWrite(dbPath))
+				return errors.Join(err, rebuildCacheAfterWrite(dbPath, state))
 			}
 
 			out := cmd.OutOrStdout()
@@ -87,12 +99,23 @@ duplicate messages receive every mailbox label where they appear.`,
 			if resultErr == nil && summary.HardErrors {
 				resultErr = fmt.Errorf("import completed with %d errors", summary.Errors)
 			}
-			return errors.Join(resultErr, rebuildCacheAfterWrite(dbPath))
+			return errors.Join(resultErr, rebuildCacheAfterWrite(dbPath, state))
 		},
 	}
 
+	if format == "maildir" {
+		cmd.Short = "Import a Maildir or Maildir++ archive"
+		cmd.Long = `Import raw MIME messages from Maildir cur and new directories.
+Nested folders become slash-separated labels. Exact duplicate messages collect
+all folder and flag labels. The importer never modifies mailbox files and
+ignores tmp directories and symlinks. Import a stable mailbox snapshot.
+
+Example:
+  msgvault import-maildir ~/Maildir --identifier you@example.com`
+	}
+
 	cmd.Flags().StringVar(&flags.identifier, "identifier", "", "Account identifier for imported messages (required)")
-	cmd.Flags().StringVar(&flags.sourceType, "source-type", "eml", "Source type stored for imported messages")
+	cmd.Flags().StringVar(&flags.sourceType, "source-type", format, "Source type stored for imported messages")
 	cmd.Flags().BoolVar(&flags.noResume, "no-resume", false, "Start a new import instead of resuming an active checkpoint")
 	cmd.Flags().IntVar(&flags.checkpointInterval, "checkpoint-interval", 200, "Save progress after this many messages")
 	cmd.Flags().BoolVar(&flags.noAttachments, "no-attachments", false, "Do not write attachment files")
@@ -105,9 +128,14 @@ func runEMLPostImportMigrations(
 	st *store.Store,
 	summary *importer.EMLImportSummary,
 	flags importEMLFlags,
+	state *invocation,
 ) error {
 	if summary == nil || summary.SourceID == 0 {
 		return nil
+	}
+	state = invocationState(context.Background(), state)
+	if state == nil || state.logger == nil {
+		return errors.New("invocation state is required")
 	}
 	// Establish the source identifier before retrying the legacy migration,
 	// including after a partial import. Otherwise migrated legacy identities
@@ -116,9 +144,10 @@ func runEMLPostImportMigrations(
 		confirmDefaultIdentity(
 			out, st, summary.SourceID,
 			flags.identifier, flags.identifier, "account-identifier",
+			state.logger,
 		)
 	}
-	if err := runPostSourceCreateMigrations(st); err != nil {
+	if err := runPostSourceCreateMigrationsForInvocation(st, state); err != nil {
 		return fmt.Errorf("post-source-create migrations: %w", err)
 	}
 	return nil

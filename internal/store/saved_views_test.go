@@ -114,6 +114,29 @@ func TestSavedViewsRejectDuplicateNamesAndStaleRevisions(t *testing.T) {
 	assertions.ErrorIs(st.DeleteSavedView(ctx, updated.ID, updated.Revision), store.ErrSavedViewNotFound)
 }
 
+func TestSavedViewsPreserveInspectorPreference(t *testing.T) {
+	for _, state := range []string{`{}`, `{"inspector_pinned":true}`, `{"inspector_pinned":false}`} {
+		t.Run(state, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			st := testutil.NewTestStore(t)
+			input := savedViewInput("Inspector preference")
+			input.CanonicalState = json.RawMessage(state)
+			created, err := st.CreateSavedView(t.Context(), input)
+			requirements.NoError(err)
+			assertions.JSONEq(state, string(created.CanonicalState))
+
+			loaded, err := st.GetSavedView(t.Context(), created.ID)
+			requirements.NoError(err)
+			assertions.JSONEq(state, string(loaded.CanonicalState))
+
+			updated, err := st.UpdateSavedView(t.Context(), loaded.ID, loaded.Revision, input)
+			requirements.NoError(err)
+			assertions.JSONEq(state, string(updated.CanonicalState))
+		})
+	}
+}
+
 func TestSavedViewsValidateCanonicalStateBeforePersistence(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)

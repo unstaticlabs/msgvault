@@ -447,25 +447,49 @@ func truncateBytesRuneSafe(s string) string {
 // callers treat the returned error as warn-only on the sync path (search_fts
 // stays NULL), so a bad input can never wedge FTS.
 func (d *PostgreSQLDialect) FTSUpsert(q querier, doc FTSDoc) error {
-	subject := truncateBytesRuneSafe(doc.Subject)
-	body := truncateBytesRuneSafe(doc.Body)
-	fromAddr := truncateBytesRuneSafe(doc.FromAddr)
-	toAddrs := truncateBytesRuneSafe(doc.ToAddrs)
-	ccAddrs := truncateBytesRuneSafe(doc.CcAddrs)
-	charCap := strconv.Itoa(maxFTSBodyChars)
+	vector, args := pgFTSVector(doc)
 	_, err := q.Exec(
-		`UPDATE messages SET search_fts =
-			setweight(to_tsvector('simple', LEFT(COALESCE($2, ''), `+charCap+`)), 'A') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($4, ''), `+charCap+`)), 'B') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($5, ''), `+charCap+`)), 'C') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($6, ''), `+charCap+`)), 'C') ||
-			setweight(to_tsvector('simple', LEFT(COALESCE($3, ''), `+charCap+`)), 'D'),
+		`UPDATE messages SET search_fts = `+vector+`,
 			indexing_version = `+strconv.Itoa(CurrentFTSIndexingVersion)+`
 		WHERE id = $1`,
-		doc.MessageID, subject, body,
-		fromAddr, toAddrs, ccAddrs,
+		args...,
 	)
 	return err
+}
+
+// FTSMatches compares the stored tsvector with the one FTSUpsert would write.
+func (d *PostgreSQLDialect) FTSMatches(q querier, doc FTSDoc) (bool, error) {
+	vector, args := pgFTSVector(doc)
+	var matches bool
+	err := q.QueryRow(
+		`SELECT COALESCE(search_fts = `+vector+`
+			AND indexing_version = `+strconv.Itoa(CurrentFTSIndexingVersion)+`, FALSE)
+		FROM messages WHERE id = $1`,
+		args...,
+	).Scan(&matches)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return matches, err
+}
+
+// pgFTSVector returns the bounded tsvector expression for doc and its
+// arguments, with $1 bound to doc.MessageID.
+func pgFTSVector(doc FTSDoc) (string, []any) {
+	charCap := strconv.Itoa(maxFTSBodyChars)
+	vector := `setweight(to_tsvector('simple', LEFT(COALESCE($2, ''), ` + charCap + `)), 'A') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($4, ''), ` + charCap + `)), 'B') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($5, ''), ` + charCap + `)), 'C') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($6, ''), ` + charCap + `)), 'C') ||
+			setweight(to_tsvector('simple', LEFT(COALESCE($3, ''), ` + charCap + `)), 'D')`
+	return vector, []any{
+		doc.MessageID,
+		truncateBytesRuneSafe(doc.Subject),
+		truncateBytesRuneSafe(doc.Body),
+		truncateBytesRuneSafe(doc.FromAddr),
+		truncateBytesRuneSafe(doc.ToAddrs),
+		truncateBytesRuneSafe(doc.CcAddrs),
+	}
 }
 
 // FTSSearchClause returns SQL fragments for tsvector full-text search.
@@ -551,13 +575,17 @@ func postgresFTSNeedsBackfillSQL() string {
 // partial btree index created by EnsureFTSIndex makes even the false
 // case index-served and self-pruning as backfill completes.
 func (d *PostgreSQLDialect) FTSNeedsBackfill(db *sql.DB) bool {
+	needs, _ := d.FTSNeedsBackfillContext(context.Background(), db)
+	return needs
+}
+func (d *PostgreSQLDialect) FTSNeedsBackfillContext(ctx context.Context, db *sql.DB) (bool, error) {
 	var exists bool
-	if err := db.QueryRow(
+	if err := ReadDBContext(ctx, db).QueryRowContext(ctx,
 		postgresFTSNeedsBackfillSQL(),
 	).Scan(&exists); err != nil {
-		return false
+		return false, fmt.Errorf("probe FTS completeness: %w", err)
 	}
-	return exists
+	return exists, nil
 }
 
 // FTSNeedsBackfillQuick uses the same exact EXISTS probe as FTSNeedsBackfill:
@@ -621,6 +649,12 @@ func (d *PostgreSQLDialect) FTSRebuildSchema(ctx context.Context, q contextQueri
 //	TEXT → TEXT, DATETIME → TIMESTAMPTZ, JSON → JSONB.
 func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 	return []ColumnMigration{
+		{`ALTER TABLE carddav_resources ADD COLUMN IF NOT EXISTS owns_display_name BOOLEAN NOT NULL DEFAULT FALSE`, "carddav_resources.owns_display_name"},
+		{`ALTER TABLE person_match_judgment_cursor ADD COLUMN IF NOT EXISTS started_at_zero BOOLEAN NOT NULL DEFAULT FALSE`, "person_match_judgment_cursor.started_at_zero"},
+		{`ALTER TABLE carddav_publications ADD COLUMN IF NOT EXISTS outgoing_envelope_metadata BYTEA`, "carddav_publications.outgoing_envelope_metadata"},
+		{`ALTER TABLE carddav_publications ADD COLUMN IF NOT EXISTS approved_body_sha256 TEXT`, "carddav_publications.approved_body_sha256"},
+		{`ALTER TABLE carddav_publications ADD COLUMN IF NOT EXISTS approved_inference_revision BIGINT`, "carddav_publications.approved_inference_revision"},
+		{`ALTER TABLE carddav_publications ADD COLUMN IF NOT EXISTS approved_mutation_revision BIGINT`, "carddav_publications.approved_mutation_revision"},
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN IF NOT EXISTS backstop_upper_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.backstop_upper_key"},
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN IF NOT EXISTS backstop_after_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.backstop_after_key"},
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN IF NOT EXISTS optimistic_document_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.optimistic_document_key"},
@@ -628,6 +662,13 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE person_sweep_cursors ADD COLUMN IF NOT EXISTS backstop_document_key TEXT NOT NULL DEFAULT ''`, "person_sweep_cursors.backstop_document_key"},
 		{`ALTER TABLE carddav_address_books ADD COLUMN IF NOT EXISTS needs_full_reconcile BOOLEAN NOT NULL DEFAULT FALSE`, "carddav_address_books.needs_full_reconcile"},
 		{`ALTER TABLE carddav_address_books ADD COLUMN IF NOT EXISTS sync_token TEXT NOT NULL DEFAULT ''`, "carddav_address_books.sync_token"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS review_revision BIGINT NOT NULL DEFAULT 1`, "carddav_conflicts.review_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS local_inference_revision BIGINT`, "carddav_conflicts.local_inference_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS approved_local_body_sha256 TEXT`, "carddav_conflicts.approved_local_body_sha256"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS approved_local_inference_revision BIGINT`, "carddav_conflicts.approved_local_inference_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS approved_conflict_revision BIGINT`, "carddav_conflicts.approved_conflict_revision"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS local_envelope_metadata BYTEA`, "carddav_conflicts.local_envelope_metadata"},
+		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS local_mutation_intent BYTEA`, "carddav_conflicts.local_mutation_intent"},
 		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS pending_operation TEXT CHECK (pending_operation IN ('delete'))`, "carddav_conflicts.pending_operation"},
 		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS connection_generation BIGINT`, "carddav_conflicts.connection_generation"},
 		{`ALTER TABLE carddav_conflicts ADD COLUMN IF NOT EXISTS book_sync_revision BIGINT`, "carddav_conflicts.book_sync_revision"},
@@ -640,6 +681,9 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE imap_folder_state ADD COLUMN IF NOT EXISTS highest_modseq NUMERIC(20, 0) NOT NULL DEFAULT 0`, "imap_folder_state.highest_modseq"},
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS rfc822_message_id TEXT`, "rfc822_message_id"},
 		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS list_id TEXT`, "list_id"},
+		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS account_address TEXT`, "account_address"},
+		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS account_path TEXT`, "account_path"},
+		{`ALTER TABLE messages ADD COLUMN IF NOT EXISTS draft_authored BOOLEAN NOT NULL DEFAULT FALSE`, "draft_authored"},
 		{`ALTER TABLE sources ADD COLUMN IF NOT EXISTS oauth_app TEXT`, "oauth_app"},
 		{`ALTER TABLE participants ADD COLUMN IF NOT EXISTS phone_number TEXT`, "phone_number"},
 		{`ALTER TABLE participants ADD COLUMN IF NOT EXISTS canonical_id TEXT`, "canonical_id"},
@@ -699,6 +743,9 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE attachments ADD COLUMN IF NOT EXISTS role_source TEXT NOT NULL DEFAULT 'unknown' CHECK (role_source IN ('mime_disposition', 'provider_explicit', 'importer_semantics', 'legacy_api', 'raw_mime_repair', 'unknown'))`, "attachments.role_source"},
 		{`ALTER TABLE attachments ADD COLUMN IF NOT EXISTS source_part_key TEXT CHECK (source_part_key IS NULL OR source_part_key != '')`, "attachments.source_part_key"},
 		{`ALTER TABLE attachments ADD COLUMN IF NOT EXISTS content_id TEXT`, "attachments.content_id"},
+		{`ALTER TABLE document_extraction_profiles ADD COLUMN IF NOT EXISTS include_inline BOOLEAN NOT NULL DEFAULT FALSE`, "document_extraction_profiles.include_inline"},
+		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS failure_reason TEXT`, "document_extractions.failure_reason"},
+		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS failure_detail TEXT`, "document_extractions.failure_detail"},
 		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS rebuild_id TEXT REFERENCES document_extraction_rebuilds(id) ON DELETE SET NULL`, "document_extractions.rebuild_id"},
 		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0)`, "document_extractions.request_count"},
 		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0 AND retry_count <= request_count)`, "document_extractions.retry_count"},
@@ -707,6 +754,7 @@ func (d *PostgreSQLDialect) LegacyColumnMigrations() []ColumnMigration {
 		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS document_family TEXT`, "document_extractions.document_family"},
 		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS unit_kind TEXT`, "document_extractions.unit_kind"},
 		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS normalized_truncated BOOLEAN NOT NULL DEFAULT FALSE`, "document_extractions.normalized_truncated"},
+		{`ALTER TABLE document_extractions ADD COLUMN IF NOT EXISTS source_media_type TEXT`, "document_extractions.source_media_type"},
 		{`ALTER TABLE document_units ADD COLUMN IF NOT EXISTS heading_marks JSONB NOT NULL DEFAULT '[]'::jsonb`, "document_units.heading_marks"},
 		{`ALTER TABLE document_index_state ADD COLUMN IF NOT EXISTS target_profile_id TEXT`, "document_index_state.target_profile_id"},
 		{`ALTER TABLE attachments ADD COLUMN IF NOT EXISTS attachment_state TEXT`, "attachments.attachment_state"},
@@ -2209,6 +2257,12 @@ func (d *PostgreSQLDialect) SchemaFiles() []string {
 // CheckpointWAL is a no-op for PostgreSQL (no WAL checkpoint needed).
 func (d *PostgreSQLDialect) CheckpointWAL(db *sql.DB) error { return nil }
 
+// CheckpointWALContext is a no-op for PostgreSQL.
+func (d *PostgreSQLDialect) CheckpointWALContext(ctx context.Context, db *sql.DB) error { return nil }
+
+// CheckpointWALPassive is a no-op for PostgreSQL.
+func (d *PostgreSQLDialect) CheckpointWALPassive(ctx context.Context, db *sql.DB) error { return nil }
+
 // SchemaStaleCheck returns the SQL to check whether migrations are needed.
 // PostgreSQL uses information_schema instead of pragma_table_info.
 func (d *PostgreSQLDialect) SchemaStaleCheck() string {
@@ -2301,13 +2355,18 @@ func (d *PostgreSQLDialect) IsFTSValueTooLargeError(err error) bool {
 // collections is included (despite not being a direct sources cascade target)
 // so a concurrent collection rename cannot race the collection_sources cascade.
 var exclusiveLockTables = []string{
+	// Scoped writes fence sync_runs first. Source-first sync transactions take
+	// lockSyncMaintenanceGate before their source lock, so maintenance waits
+	// here without holding tables those transactions still need.
 	"sync_runs", "sources", "conversations", "conversation_participants",
 	"messages", "message_recipients", "message_labels", "message_bodies", "message_raw",
 	// Work evidence/aliases cascade from messages; preparation checkpoints
 	// cascade from sources. Local journal writes share the maintained barrier.
 	"email_linkage_checkpoints", "email_work_seeds", "email_linkage_facts",
 	"email_work_actions", "email_work_action_targets",
-	"attachments", "document_occurrences", "labels", "participants", "participant_identifiers", "reactions",
+	"message_delivery_addresses",
+	"meeting_details", "meeting_action_items",
+	"attachments", "document_occurrences", "labels", "participants", "participant_identifiers", "reactions", "reaction_source_events",
 	"participant_contact_observations", identityMatchCandidatesTableName, identityMatchCandidateSourcesTableName,
 	identityMatchEvidenceTableName, identityMatchEvidenceSourcesTableName,
 	// persons and person_participants: MergeParticipants (reached from the
@@ -2323,10 +2382,10 @@ var exclusiveLockTables = []string{
 	"collections", "collection_sources", "account_identities", "applied_migrations",
 	"sync_operations",
 	"source_import_items", "sync_run_items", "sync_checkpoints",
-	"imap_folder_state", "imap_message_memberships",
 	// Per-user source visibility cascades from sources, so a serialized
 	// source removal deletes these rows and must hold the table.
 	"user_sources",
+	"imap_folder_state", "imap_message_memberships", "imap_drafts", "gmail_drafts", "chat_drafts", "beeper_drafts",
 }
 
 // BeginExclusive opens a transaction on conn and locks every table the

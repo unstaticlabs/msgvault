@@ -6,7 +6,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"net"
@@ -86,7 +87,7 @@ func (s *ProviderSelection) UnmarshalTOML(value any) error {
 }
 
 func (s *ProviderSelection) MarshalTOML() ([]byte, error) {
-	return json.Marshal(s.Name)
+	return json.Marshal(s.Name, json.Deterministic(true))
 }
 
 // Config controls the model-backed people sweep. Disabled is the safe default.
@@ -106,9 +107,30 @@ type Config struct {
 	RetryBase            time.Duration             `toml:"retry_base"`
 	RetryMax             time.Duration             `toml:"retry_max"`
 	Budgets              BudgetConfig              `toml:"budgets"`
+	Brief                BriefConfig               `toml:"brief"`
 	Provider             ProviderSelection         `toml:"provider"`
 	Providers            map[string]ProviderConfig `toml:"providers"`
 }
+
+// BriefConfig bounds the "last time we talked" person brief. Enrollment is the
+// real opt-in, so the lane defaults on; this table lets an operator turn the
+// feature off globally without unenrolling anybody.
+//
+// Enabled is a pointer so a nil value still means "default"; an explicit
+// enabled = false in the file survives ApplyDefaults.
+type BriefConfig struct {
+	Enabled          *bool         `toml:"enabled"`
+	MinInterval      time.Duration `toml:"min_interval"`
+	PreCallWindow    time.Duration `toml:"pre_call_window"`
+	MaxItems         int           `toml:"max_items"`
+	MaxBytes         int           `toml:"max_bytes"`
+	OverlapItems     int           `toml:"overlap_items"`
+	MaxOutputTokens  int64         `toml:"max_output_tokens"`
+	MaxRenderedRunes int           `toml:"max_rendered_runes"`
+}
+
+// IsEnabled reports whether briefs may be generated. An unset value is enabled.
+func (b BriefConfig) IsEnabled() bool { return b.Enabled == nil || *b.Enabled }
 
 // BudgetConfig caps hosted-inference usage. Costs are integer micro-USD so
 // accounting stays exact without floating-point conversions.
@@ -131,6 +153,7 @@ type BudgetConfig struct {
 // ProviderConfig contains runtime settings and the exact outbound-data policy
 // that must be consented before use.
 type ProviderConfig struct {
+	PresetID            string           `toml:"preset_id,omitempty"`
 	Protocol            Protocol         `toml:"protocol"`
 	Endpoint            string           `toml:"endpoint,omitempty"`
 	Model               string           `toml:"model"`
@@ -185,6 +208,7 @@ func ProviderTOMLValues(provider ProviderConfig) map[string]any {
 // timeout.
 type ProviderProfile struct {
 	Fingerprint           string           `json:"fingerprint"`
+	PresetID              string           `json:"preset_id,omitempty"`
 	Protocol              Protocol         `json:"protocol"`
 	Endpoint              string           `json:"endpoint"`
 	Model                 string           `json:"model"`
@@ -206,7 +230,7 @@ type ProviderProfile struct {
 	PacketRendererPolicy  string           `json:"packet_renderer_policy"`
 	ProgramFingerprint    string           `json:"program_fingerprint"`
 	DisclosedPacketFields []string         `json:"disclosed_packet_fields"`
-	PolicyJSON            json.RawMessage  `json:"-"`
+	PolicyJSON            jsontext.Value   `json:"-"`
 }
 
 // ApplyDefaults fills operational defaults without enabling inference.
@@ -231,6 +255,17 @@ func (c *Config) ApplyDefaults() {
 	setDefaultInt(&c.Budgets.MaxRequestsPerDay, 500)
 	setDefaultInt64(&c.Budgets.MaxInputTokensPerDay, 5_000_000)
 	setDefaultInt64(&c.Budgets.MaxOutputTokensPerDay, 800_000)
+	if c.Brief.Enabled == nil {
+		enabled := true
+		c.Brief.Enabled = &enabled
+	}
+	setDefaultDuration(&c.Brief.MinInterval, 168*time.Hour)
+	setDefaultDuration(&c.Brief.PreCallWindow, 72*time.Hour)
+	setDefaultInt(&c.Brief.MaxItems, 40)
+	setDefaultInt(&c.Brief.MaxBytes, 65_536)
+	setDefaultInt(&c.Brief.OverlapItems, 8)
+	setDefaultInt64(&c.Brief.MaxOutputTokens, briefMaxOutputTokens)
+	setDefaultInt(&c.Brief.MaxRenderedRunes, briefDefaultMaxRenderedRunes)
 
 	if c.Provider.Name == "" && len(c.Providers) == 0 {
 		c.Provider.Name = "default"
@@ -250,6 +285,54 @@ func defaultProviderConfig() ProviderConfig {
 		Auth: AuthBearer, Credential: CredentialEnv, CredentialEnv: "OPENAI_API_KEY",
 		OutputMode: OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
 	}
+}
+
+// PresetProviderConfig binds a named HTTP provider to its first-party API base.
+// The caller still supplies the credential source and explicit disclosure policy.
+func PresetProviderConfig(id, model string) (ProviderConfig, error) {
+	if strings.TrimSpace(model) == "" {
+		return ProviderConfig{}, errors.New("people provider preset requires a model")
+	}
+	endpoint, ok := presetEndpoint(id)
+	if !ok {
+		return ProviderConfig{}, fmt.Errorf("unsupported people provider preset %q", id)
+	}
+	return ProviderConfig{
+		PresetID: id, Protocol: ProtocolOpenAIChat, Endpoint: endpoint,
+		Model: model, Auth: AuthBearer, Credential: CredentialStored,
+		OutputMode: OutputModeNativeJSONSchema, TokenLimitParameter: "max_completion_tokens",
+	}, nil
+}
+
+func presetEndpoint(id string) (string, bool) {
+	switch id {
+	case "openai":
+		return "https://api.openai.com/v1", true
+	case "openrouter":
+		return "https://openrouter.ai/api/v1", true
+	case "venice":
+		return "https://api.venice.ai/api/v1", true
+	default:
+		return "", false
+	}
+}
+
+func validateProviderPreset(provider ProviderConfig) error {
+	if provider.PresetID == "" {
+		return nil
+	}
+	endpoint, ok := presetEndpoint(provider.PresetID)
+	if !ok {
+		return fmt.Errorf("unsupported people provider preset %q", provider.PresetID)
+	}
+	if provider.Endpoint != endpoint || provider.Protocol != ProtocolOpenAIChat || provider.Auth != AuthBearer {
+		return fmt.Errorf("people provider preset %q requires endpoint %q, protocol %q, and bearer auth",
+			provider.PresetID, endpoint, ProtocolOpenAIChat)
+	}
+	if provider.Credential == CredentialNone {
+		return fmt.Errorf("people provider preset %q requires a credential", provider.PresetID)
+	}
+	return nil
 }
 
 func applyProviderDefaults(provider *ProviderConfig) {
@@ -359,6 +442,9 @@ func (c Config) validateOperationalConfig() error {
 	if c.Budgets.MaxOutputTokensPerPerson < extractionMaxOutputTokens {
 		return fmt.Errorf("invalid [people.sweep.budgets] max_output_tokens_per_person: must be at least %d", extractionMaxOutputTokens)
 	}
+	if err := c.Brief.validate(c.Budgets); err != nil {
+		return err
+	}
 	if c.Budgets.MaxEstimatedCostMicroUSDPerRun < 0 || c.Budgets.MaxEstimatedCostMicroUSDPerDay < 0 ||
 		c.Budgets.InputCostMicroUSDPerMillionTokens < 0 || c.Budgets.OutputCostMicroUSDPerMillionTokens < 0 {
 		return errors.New("invalid [people.sweep.budgets] cost values must not be negative")
@@ -371,6 +457,9 @@ func (c Config) validateOperationalConfig() error {
 }
 
 func (c Config) validateProvider(provider ProviderConfig) error {
+	if err := validateProviderPreset(provider); err != nil {
+		return err
+	}
 	var capability ProtocolCapability
 	if provider.Protocol == ProtocolCodexAppServer {
 		if err := requireCodexIsolationFields(provider); err != nil {
@@ -522,6 +611,7 @@ func (c Config) Profile() (ProviderProfile, error) {
 	sources := slices.Clone(provider.AllowedSources)
 	slices.Sort(sources)
 	profile := ProviderProfile{
+		PresetID: provider.PresetID,
 		Protocol: provider.Protocol, Model: strings.TrimSpace(provider.Model),
 		Auth: provider.Auth, Credential: provider.Credential, CredentialRef: credentialRef,
 		OutputMode: provider.OutputMode, TokenLimitParameter: provider.TokenLimitParameter,
@@ -569,19 +659,64 @@ func (p ProviderProfile) Validate() error {
 	return nil
 }
 
+// CanonicalStoredProviderProfile verifies and canonicalizes an immutable
+// policy while preserving its historical program and disclosure fields.
+func CanonicalStoredProviderProfile(p ProviderProfile) (ProviderProfile, error) {
+	provider := providerConfigForProfile(p)
+	if err := (Config{Enabled: true}).validateProvider(provider); err != nil {
+		return ProviderProfile{}, err
+	}
+	switch p.Credential {
+	case CredentialEnv:
+	case CredentialStored:
+		if err := ValidateProviderProfileName(p.CredentialRef); err != nil {
+			return ProviderProfile{}, err
+		}
+	case CredentialNone:
+		if p.CredentialRef != "" {
+			return ProviderProfile{}, errors.New("stored people inference provider profile has an unexpected credential reference")
+		}
+	}
+	if p.ProgramFingerprint == "" {
+		return ProviderProfile{}, errors.New("stored people inference provider profile has no program fingerprint")
+	}
+	if p.PacketRendererPolicy == "" {
+		return ProviderProfile{}, errors.New("stored people inference provider profile has no packet renderer policy")
+	}
+	if len(p.DisclosedPacketFields) == 0 {
+		return ProviderProfile{}, errors.New("stored people inference provider profile has no disclosed packet fields")
+	}
+	canonical := p
+	canonical.Model = strings.TrimSpace(canonical.Model)
+	canonical.ReasoningEffort = strings.TrimSpace(canonical.ReasoningEffort)
+	canonical.RetentionPosture = strings.TrimSpace(canonical.RetentionPosture)
+	canonical.TrainingPosture = strings.TrimSpace(canonical.TrainingPosture)
+	canonical.AllowedSources = slices.Clone(canonical.AllowedSources)
+	slices.Sort(canonical.AllowedSources)
+	canonical.DisclosedPacketFields = slices.Clone(canonical.DisclosedPacketFields)
+	if canonical.Protocol != ProtocolCodexAppServer {
+		endpoint, _, err := validateEndpoint(canonical.Endpoint)
+		if err != nil {
+			return ProviderProfile{}, err
+		}
+		canonical.Endpoint = canonicalEndpoint(endpoint)
+	}
+	policyJSON, err := policyJSONForProviderProfile(canonical)
+	if err != nil {
+		return ProviderProfile{}, fmt.Errorf("encode stored people inference provider policy: %w", err)
+	}
+	digest := sha256.Sum256(policyJSON)
+	if p.Fingerprint != hex.EncodeToString(digest[:]) {
+		return ProviderProfile{}, errors.New("stored people inference provider profile fingerprint does not match policy")
+	}
+	canonical.PolicyJSON = policyJSON
+	return canonical, nil
+}
+
 // CanonicalProviderProfile rebuilds a profile through the validated config path.
 func CanonicalProviderProfile(p ProviderProfile) (ProviderProfile, error) {
 	name := "profile"
-	provider := ProviderConfig{
-		Protocol: p.Protocol, Endpoint: p.Endpoint, Model: p.Model, Auth: p.Auth,
-		Credential: p.Credential, OutputMode: p.OutputMode,
-		TokenLimitParameter: p.TokenLimitParameter, ReasoningEffort: p.ReasoningEffort,
-		ReasoningMode: p.ReasoningMode, DriverVersion: p.DriverVersion,
-		RetentionPosture: p.RetentionPosture, TrainingPosture: p.TrainingPosture,
-		AllowedSources: slices.Clone(p.AllowedSources), SourceSince: p.SourceSince,
-		SourceUntil: p.SourceUntil, AllowSensitive: p.AllowSensitive,
-		ExecutionBoundary: p.ExecutionBoundary, RequestTimeout: time.Second,
-	}
+	provider := providerConfigForProfile(p)
 	switch p.Credential {
 	case CredentialEnv:
 		provider.CredentialEnv = p.CredentialRef
@@ -596,6 +731,24 @@ func CanonicalProviderProfile(p ProviderProfile) (ProviderProfile, error) {
 	}
 	config.ApplyDefaults()
 	return config.Profile()
+}
+
+func providerConfigForProfile(p ProviderProfile) ProviderConfig {
+	provider := ProviderConfig{
+		PresetID: p.PresetID,
+		Protocol: p.Protocol, Endpoint: p.Endpoint, Model: p.Model, Auth: p.Auth,
+		Credential: p.Credential, OutputMode: p.OutputMode,
+		TokenLimitParameter: p.TokenLimitParameter, ReasoningEffort: p.ReasoningEffort,
+		ReasoningMode: p.ReasoningMode, DriverVersion: p.DriverVersion,
+		RetentionPosture: p.RetentionPosture, TrainingPosture: p.TrainingPosture,
+		AllowedSources: slices.Clone(p.AllowedSources), SourceSince: p.SourceSince,
+		SourceUntil: p.SourceUntil, AllowSensitive: p.AllowSensitive,
+		ExecutionBoundary: p.ExecutionBoundary, RequestTimeout: time.Second,
+	}
+	if p.Credential == CredentialEnv {
+		provider.CredentialEnv = p.CredentialRef
+	}
+	return provider
 }
 
 func policyJSONForProviderProfile(profile ProviderProfile) ([]byte, error) {
@@ -616,7 +769,53 @@ func policyJSONForProviderProfile(profile ProviderProfile) ([]byte, error) {
 	for index, fieldValue := range values {
 		policy.Field(index).Set(fieldValue)
 	}
-	return json.Marshal(policy.Interface())
+	return json.Marshal(policy.Interface(), json.Deterministic(true))
+}
+
+// validate rejects a brief lane that cannot run inside the person budget. The
+// output cap is checked against max_output_tokens_per_person because a brief
+// call is one more call against the same per-person ceiling.
+func (b BriefConfig) validate(budgets BudgetConfig) error {
+	for _, value := range []struct {
+		name  string
+		value time.Duration
+	}{{"min_interval", b.MinInterval}, {"pre_call_window", b.PreCallWindow}} {
+		if value.value <= 0 {
+			return fmt.Errorf("invalid [people.sweep.brief] %s: must be positive", value.name)
+		}
+	}
+	for _, value := range []struct {
+		name  string
+		value int
+	}{{"max_items", b.MaxItems}, {"max_bytes", b.MaxBytes}} {
+		if value.value <= 0 {
+			return fmt.Errorf("invalid [people.sweep.brief] %s: must be positive", value.name)
+		}
+	}
+	if b.OverlapItems < 0 {
+		return errors.New("invalid [people.sweep.brief] overlap_items: must not be negative")
+	}
+	if b.OverlapItems > b.MaxItems {
+		return errors.New("invalid [people.sweep.brief] overlap_items: must not exceed max_items")
+	}
+	if b.MaxOutputTokens <= 0 {
+		return errors.New("invalid [people.sweep.brief] max_output_tokens: must be positive")
+	}
+	if b.MaxOutputTokens > budgets.MaxOutputTokensPerPerson {
+		return fmt.Errorf(
+			"invalid [people.sweep.brief] max_output_tokens: must not exceed max_output_tokens_per_person (%d)",
+			budgets.MaxOutputTokensPerPerson)
+	}
+	// The floor is the interaction summary's own schema maximum. It bounds what
+	// an operator may configure rather than promising the paragraph fits: the
+	// rendered sentence prepends a header, and a paragraph still over the cap
+	// once every droppable item is gone is stored as it is, not truncated.
+	if b.MaxRenderedRunes < briefMinRenderedRunes {
+		return fmt.Errorf(
+			"invalid [people.sweep.brief] max_rendered_runes: must be at least %d",
+			briefMinRenderedRunes)
+	}
+	return nil
 }
 
 func setDefaultString(target *string, value string) {

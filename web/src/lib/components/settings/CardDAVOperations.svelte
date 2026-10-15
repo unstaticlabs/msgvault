@@ -12,6 +12,7 @@
     type ChipTone,
   } from '@kenn-io/kit-ui';
   import { getContext } from 'svelte';
+  import { scheduleSummary } from '../../settings/cron';
 
   import type { CardDAVBook, CardDAVBookRoles, CardDAVController } from '../../carddav/controller.svelte';
   import type {
@@ -24,9 +25,13 @@
 
   let {
     controller,
+    syncConnection = undefined,
+    connectionReady = true,
     onOpenOperations: providedOpenOperations = undefined
   }: {
     controller: CardDAVController;
+    syncConnection?: string;
+    connectionReady?: boolean;
     onOpenOperations?: () => void;
   } = $props();
   const shellOpenOperations = getContext<(() => void) | undefined>('msgvault:open-carddav-operations');
@@ -37,9 +42,11 @@
 
   const repairCopy: Record<RepairReason, string> = {
     account_missing: 'CardDAV account discovery is missing. Test and save the account again.',
-    credential_missing: 'No CardDAV password is stored. Enter the password and save the account.',
-    credential_mismatch: 'The stored password belongs to different CardDAV account settings. Enter it again and save.',
-    credential_unavailable: 'The stored CardDAV password cannot be read. Enter it again and save.',
+    credential_missing: 'No CardDAV credential is stored. Connect the account in CardDAV settings and save it.',
+    credential_mismatch: 'The stored credential belongs to different CardDAV account settings. Connect the account again and save.',
+    credential_unavailable: 'The stored credential cannot be read right now. Check that its credential store is available, then try again. For password-based accounts, reconnect the provider account or save its password again in CardDAV settings.',
+    google_authorization_required: 'Check the selected OAuth app\'s client settings. Connect Google in CardDAV account settings, or run msgvault carddav authorize-google with your account email and OAuth app, then try again.',
+    microsoft_authorization_required: 'Run msgvault carddav authorize-microsoft with your account email, then try again.',
     runtime_unavailable:
       'CardDAV is configured but unavailable in this daemon session. Test and save the account again, or restart the daemon.',
   };
@@ -102,7 +109,10 @@
           {status.credential_configured ? 'Credential ready' : 'Credential needs attention'}</span
         >
         <span>{status.enabled ? 'Scheduled sync enabled' : 'Scheduled sync disabled'}</span>
-        <span>{status.scheduled ? `Scheduled · ${status.schedule || 'Schedule unavailable'}` : 'Manual sync only'}</span
+        <span
+          >{#if status.scheduled && status.schedule}Scheduled · <span title={status.schedule}
+              >{scheduleSummary(status.schedule)}</span
+            >{:else if status.scheduled}Scheduled · Schedule unavailable{:else}Manual sync only{/if}</span
         >
         {#if status.next_scheduled_at}
           <span
@@ -158,17 +168,18 @@
         />
       </div>
     {/if}
+    {#if syncConnection}<p>Manual sync connection: {syncConnection}</p>{/if}
     <div class="actions">
       <Button
         label={controller.syncPending ? 'Checking CardDAV state…' : 'Sync now'}
-        disabled={!controller.canSync}
-        onclick={() => void controller.sync(false)}
+        disabled={!controller.canSync || !connectionReady}
+        onclick={() => void controller.sync(false, syncConnection)}
       />
       <Button
         label={controller.syncPending ? 'Checking CardDAV state…' : 'Full sync'}
-        disabled={!controller.canSync}
+        disabled={!controller.canSync || !connectionReady}
         tone="info"
-        onclick={() => void controller.sync(true)}
+        onclick={() => void controller.sync(true, syncConnection)}
       />
       <Button label="View CardDAV operations" surface="soft" onclick={openOperations} />
     </div>
@@ -180,6 +191,10 @@
   description="Choose which discovered books participate in synchronization, lookup, and publication."
 >
   <div class="section-state" aria-busy={controller.booksLoading}>
+    <p class="helper">
+      The archive has one write target across all CardDAV connections. Applying “Publish here” to a book
+      clears the previous write target, including a book on another connection.
+    </p>
     {#if controller.booksLoading}<p class="working">
         <Spinner size={14} label="Loading CardDAV address books" /> Loading address books…
       </p>{/if}
@@ -203,6 +218,7 @@
           {#snippet actions()}{#if book.needs_full_reconcile}<Chip size="sm" tone="warning" uppercase={false}
                 >Full reconciliation required</Chip
               >{/if}{/snippet}
+          {#if book.connection}<p>Connection: {book.connection}</p>{/if}
           <div class="role-controls">
             <Checkbox
               checked={roles.subscribed}
@@ -263,6 +279,7 @@
       <div class="history-scroll" role="region" aria-label="Scrollable CardDAV sync history" tabindex="0">
         <Table ariaLabel="CardDAV sync history" zebra={false} class="history-table">
           {#snippet header()}
+            <TableHeaderCell label="Connection" />
             <TableHeaderCell label="Result" />
             <TableHeaderCell label="Started" />
             <TableHeaderCell label="Trigger" />
@@ -270,6 +287,7 @@
           {/snippet}
           {#each controller.runs as historyRun (historyRun.id)}
             <tr>
+              <td>{historyRun.connection ?? 'Unknown connection'}</td>
               <td
                 ><Chip size="sm" tone={statusTone(historyRun.state)} uppercase={false}
                   >{statusLabel(historyRun.state)}</Chip

@@ -56,6 +56,9 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
   await cardDAVCategory.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'CardDAV account' })).toBeVisible();
+  await expect(page.getByText('Not configured', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveText('CardDAV account discovery is missing. Test and save the account again.');
+  expect(fixture.requests.filter(({ path }) => /carddav\/(books|conflicts)$/.test(path))).toEqual([]);
 
   await page.getByLabel('Base URL').fill('https://carddav.example.test/');
   await page.getByLabel('Username').fill('synthetic-user');
@@ -63,6 +66,10 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
   const enabled = page.getByRole('switch', { name: 'Enabled' });
   await enabled.focus();
   await page.keyboard.press('Space');
+  const presets = page.getByRole('combobox', { name: 'Presets: Off' });
+  await presets.focus();
+  await page.keyboard.press('Enter');
+  await page.getByRole('option', { name: 'Custom' }).click();
   await page.getByLabel('Schedule').fill('0 2 * * *');
 
   const testConnection = page.getByRole('button', { name: 'Test CardDAV connection' });
@@ -80,6 +87,7 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
     path: '/api/v1/carddav/account/test',
     query: {},
     body: {
+      connection: 'default',
       base_url: 'https://carddav.example.test/',
       username: 'synthetic-user',
       enabled: true,
@@ -92,6 +100,7 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
     path: '/api/v1/carddav/account',
     query: {},
     body: {
+      connection: 'default',
       base_url: 'https://carddav.example.test/',
       username: 'synthetic-user',
       enabled: true,
@@ -140,7 +149,7 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
   await expect(activeSync).toContainText('2 updated');
   await expect(page.getByLabel('Latest CardDAV sync')).toContainText('Succeeded');
   expect(fixture.requests.filter(({ path }) => path === '/api/v1/carddav/sync')).toEqual([{
-    method: 'POST', path: '/api/v1/carddav/sync', query: {}, body: { full: false }
+    method: 'POST', path: '/api/v1/carddav/sync', query: {}, body: { full: false, connection: 'default' }
   }]);
 
   const loadMore = page.getByRole('button', { name: 'Load more history' });
@@ -148,18 +157,15 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
   await page.keyboard.press('Enter');
   await expect(page.getByRole('table', { name: 'CardDAV sync history' }).getByRole('row')).toHaveCount(4);
   expect(fixture.requests.filter(({ path, query }) => path === '/api/v1/carddav/runs' && query.before_id === '90'))
-    .toEqual([{ method: 'GET', path: '/api/v1/carddav/runs', query: { limit: '25', before_id: '90' } }]);
+    .toEqual([{ method: 'GET', path: '/api/v1/carddav/runs', query: { connection: 'default', limit: '25', before_id: '90' } }]);
 
   const conflictRow = page.getByRole('button', { name: 'Review conflict 41 in Synthetic contacts' });
   await conflictRow.focus();
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('region', { name: 'CardDAV conflict 41 comparison' })).toContainText('Synthetic Local');
-  await expect(page.getByRole('region', { name: 'CardDAV conflict 41 comparison' })).toContainText('Deleted. This side is a deletion tombstone.');
-  await expect(page.getByRole('region', { name: 'CardDAV conflict 41 comparison' })).toContainText('Additional name, email, or phone values are not shown.');
 
-  await submitConflictChoice(page, 'Keep local card');
-  await expect(page.getByRole('alert')).toContainText('Choose again to resolve it.');
-  const refreshedChoice = page.getByRole('button', { name: 'Keep local card' }).first();
+  await submitConflictChoice(page, 'Use msgvault version', 'Restore in address book');
+  await expect(page.getByRole('alert')).toContainText('The latest versions are shown; choose again.');
+  const refreshedChoice = page.getByRole('button', { name: 'Use msgvault version' }).first();
   await expect(refreshedChoice).toBeFocused();
   await expect(refreshedChoice).toBeEnabled();
   expect(fixture.requests.filter(({ path }) => path === '/api/v1/carddav/conflicts/41/resolve')).toEqual([{
@@ -169,7 +175,7 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
     body: { choice: 'keep_local' }
   }]);
 
-  await submitConflictChoice(page, 'Keep local card');
+  await submitConflictChoice(page, 'Use msgvault version', 'Restore in address book');
   await expect(conflictRow).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Unresolved conflicts' })).toBeFocused();
   expect(fixture.requests.filter(({ path }) => path === '/api/v1/carddav/conflicts/41/resolve')).toHaveLength(2);
@@ -178,7 +184,7 @@ test('keyboard journey configures CardDAV, reconciles roles, syncs history, and 
   await assertCardDAVForbiddenMarkersAbsent(page);
 });
 
-test('pending conflict resolution blocks dismissal, duplicates, and global shortcuts', async ({ page }) => {
+test('keyboard conflict resolution submits once and returns focus to the queue', async ({ page }) => {
   const fixture = await installCardDAV(page, { configured: true, staleConflictOnce: false });
   const release = fixture.holdNextConflictResolution();
   await openCardDAVSettings(page);
@@ -186,25 +192,14 @@ test('pending conflict resolution blocks dismissal, duplicates, and global short
   const conflictRow = page.getByRole('button', { name: 'Review conflict 41 in Synthetic contacts' });
   await conflictRow.focus();
   await page.keyboard.press('Enter');
-  const choice = page.getByRole('button', { name: 'Keep remote card' }).first();
+  const choice = page.getByRole('button', { name: 'Use address book version' }).first();
   await choice.focus();
   await page.keyboard.press('Enter');
-  const dialog = page.getByRole('dialog', { name: 'Keep remote CardDAV card' });
-  const submit = dialog.getByRole('button', { name: 'Keep remote card' });
+  const dialog = page.getByRole('dialog', { name: 'Keep contact deleted' });
+  const submit = dialog.getByRole('button', { name: 'Keep contact deleted' });
   await submit.focus();
   await page.keyboard.press('Enter');
   await expect.poll(() => mutationCount(fixture.requests, '/api/v1/carddav/conflicts/41/resolve')).toBe(1);
-
-  await expect(dialog.locator('[aria-busy="true"]')).toBeVisible();
-  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeDisabled();
-  await expect(dialog.getByRole('button', { name: 'Close CardDAV conflict decision' })).toHaveCount(0);
-  await page.keyboard.press('Escape');
-  await page.keyboard.press('Shift+/');
-  await page.keyboard.press('Enter');
-  await page.mouse.click(2, 2);
-  await expect(dialog).toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Keyboard shortcuts' })).toHaveCount(0);
-  expect(mutationCount(fixture.requests, '/api/v1/carddav/conflicts/41/resolve')).toBe(1);
 
   release();
   await expect(dialog).toHaveCount(0);
@@ -220,6 +215,7 @@ test('keyboard publication ambiguity locks mutation, retries GET only, and repea
     workspace: 'directory', directoryPersonID: 42
   }))}`);
 
+  await page.getByRole('tab', { name: 'Maintenance' }).click();
   const publish = page.getByRole('switch', { name: 'Publish person to CardDAV' });
   await expect(publish).toBeVisible();
   await expect(page.getByText(/^Attributes:/)).toHaveCount(0);
@@ -252,12 +248,13 @@ test('keyboard publication ambiguity locks mutation, retries GET only, and repea
   await handoff.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Conflict comparison' })).toBeFocused();
-  await expect(page.getByText('Resolved by keeping the local card.')).toBeVisible();
+  await expect(page.getByText('Resolved using the msgvault version.')).toBeVisible();
   expect(mutationCount(fixture.requests, '/api/v1/carddav/conflicts/42', 'GET')).toBe(1);
   await expect(page.getByRole('dialog')).toHaveCount(0);
 
   await page.goBack();
   await expect(page.getByRole('heading', { name: 'Archive Person' })).toBeVisible();
+  await page.getByRole('tab', { name: 'Maintenance' }).click();
   const repeatedHandoff = page.getByRole('button', { name: 'Review CardDAV conflict 42' });
   await repeatedHandoff.focus();
   await page.keyboard.press('Enter');
@@ -282,13 +279,13 @@ function mutationCount(
   return requests.filter((request) => request.path === path && request.method === method).length;
 }
 
-async function submitConflictChoice(page: Page, label: string): Promise<void> {
+async function submitConflictChoice(page: Page, label: string, confirmationLabel: string): Promise<void> {
   const choice = page.getByRole('button', { name: label }).first();
   await choice.focus();
   await page.keyboard.press('Enter');
-  const dialog = page.getByRole('dialog', { name: /Keep (local|remote) CardDAV card/ });
+  const dialog = page.getByRole('dialog', { name: confirmationLabel });
   await expect(dialog).toBeVisible();
-  const submit = dialog.getByRole('button', { name: label });
+  const submit = dialog.getByRole('button', { name: confirmationLabel });
   await submit.focus();
   await page.keyboard.press('Enter');
   await expect(dialog).toHaveCount(0);

@@ -26,6 +26,9 @@ type SQLiteEngine struct {
 	ftsMu      sync.Mutex
 	ftsResult  bool
 	ftsChecked bool
+
+	metadataFTSMu     sync.Mutex
+	metadataFTSProbed bool
 }
 
 // NewSQLiteEngine creates a new SQLite-backed query engine.
@@ -108,12 +111,12 @@ func (e *SQLiteEngine) Close() error {
 
 // queryContext runs QueryContext with dialect-aware placeholder rebinding.
 func (e *SQLiteEngine) queryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return e.db.QueryContext(ctx, e.dialect.Rebind(query), args...)
+	return store.ReadDBContext(ctx, e.db).QueryContext(ctx, e.dialect.Rebind(query), args...)
 }
 
 // queryRowContext runs QueryRowContext with dialect-aware placeholder rebinding.
 func (e *SQLiteEngine) queryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return e.db.QueryRowContext(ctx, e.dialect.Rebind(query), args...)
+	return store.ReadDBContext(ctx, e.db).QueryRowContext(ctx, e.dialect.Rebind(query), args...)
 }
 
 // escapeSQLiteLike escapes LIKE wildcard characters (%, _, \) with \.
@@ -264,6 +267,7 @@ func optsToFilterConditions(d Dialect, opts AggregateOptions, prefix string) ([]
 	conditions, args = appendSourceFilter(
 		conditions, args, prefix, opts.SourceID, opts.SourceIDs,
 	)
+	conditions, args = appendAccountScopeConditions(conditions, args, opts.AccountScopes, strings.TrimSuffix(prefix, "."))
 	// Normalize absolute instants through the active backend dialect.
 	if opts.After != nil {
 		conditions = append(conditions, d.DateComparison(prefix+"sent_at", ">="))
@@ -333,6 +337,7 @@ func (e *SQLiteEngine) buildFilterJoinsAndConditions(filter MessageFilter) (stri
 	conditions, args = appendSourceFilter(
 		conditions, args, prefix, filter.SourceID, filter.SourceIDs,
 	)
+	conditions, args = appendAccountScopeConditions(conditions, args, filter.AccountScopes, "m")
 
 	if filter.ConversationID != nil {
 		conditions = append(conditions, prefix+"conversation_id = ?")
@@ -614,7 +619,7 @@ func (e *SQLiteEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 	optsConds, optsArgs := optsToFilterConditions(e.dialect, opts, "m.")
 	filterConditions = append(filterConditions, optsConds...)
 	args = append(args, optsArgs...)
-	if !aggregateHasExplicitMessageType(filter, opts) {
+	if !aggregateOverridesEmailDefault(filter, opts) {
 		filterConditions = append(filterConditions, emailOnlyFilterM)
 	}
 
@@ -632,7 +637,7 @@ func (e *SQLiteEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 // Aggregate performs grouping based on the provided ViewType.
 func (e *SQLiteEngine) Aggregate(ctx context.Context, groupBy ViewType, opts AggregateOptions) ([]AggregateRow, error) {
 	conditions, args := optsToFilterConditions(e.dialect, opts, "m.")
-	if !aggregateHasExplicitMessageType(MessageFilter{}, opts) {
+	if !aggregateOverridesEmailDefault(MessageFilter{}, opts) {
 		conditions = append(conditions, emailOnlyFilterM)
 	}
 
@@ -646,14 +651,12 @@ func (e *SQLiteEngine) Aggregate(ctx context.Context, groupBy ViewType, opts Agg
 	)
 }
 
-func aggregateHasExplicitMessageType(filter MessageFilter, opts AggregateOptions) bool {
-	if filter.MessageType != "" {
+func aggregateOverridesEmailDefault(filter MessageFilter, opts AggregateOptions) bool {
+	// An account scope selects email and calendar rows itself.
+	if strings.TrimSpace(filter.MessageType) != "" || len(filter.AccountScopes) > 0 || len(opts.AccountScopes) > 0 {
 		return true
 	}
-	if opts.SearchQuery == "" {
-		return false
-	}
-	return len(search.Parse(opts.SearchQuery).MessageTypes) > 0
+	return searchOverridesEmailDefault(opts.SearchQuery)
 }
 
 func sqliteMessageTypeCondition(alias string, messageTypes []string) (string, []any) {
@@ -1053,7 +1056,7 @@ func (e *SQLiteEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 
 	// Fetch labels for each message (batch would be more efficient but this is simpler)
 	if len(results) > 0 {
-		if err := fetchParticipantsForMessageList(ctx, e.db, e.dialect.Rebind, "", results); err != nil {
+		if err := fetchParticipantsForMessageList(ctx, store.ReadDBContext(ctx, e.db), e.dialect.Rebind, "", results); err != nil {
 			return nil, fmt.Errorf("fetch participants: %w", err)
 		}
 		if err := e.fetchLabelsForMessages(ctx, results); err != nil {
@@ -1063,6 +1066,17 @@ func (e *SQLiteEngine) ListMessages(ctx context.Context, filter MessageFilter) (
 
 	return results, nil
 }
+
+// messageSummaryIDChunk caps how many ids GetMessageSummariesByIDs binds into
+// a single IN-list statement — for the base summary query and for the
+// per-message label/participant hydration that follows it. SQLite refuses a
+// statement carrying more than 32766 bound parameters by default, and one id
+// is one parameter here; the eval command's dense vector/hybrid modes can
+// over-fetch a ranked result set well past that at a large -n. This engine
+// is dialect-agnostic (SQLite and PostgreSQL share it), and PostgreSQL's own
+// parameter ceiling is far higher, so chunking — rather than a SQLite-only
+// rewrite of the IN clause — is the one code path that stays correct on both.
+const messageSummaryIDChunk = 500
 
 // GetMessageSummariesByIDs returns summary rows (no body, no raw
 // MIME) for the supplied IDs in the same order as ids. Missing IDs
@@ -1074,6 +1088,38 @@ func (e *SQLiteEngine) GetMessageSummariesByIDs(ctx context.Context, ids []int64
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	byID := make(map[int64]MessageSummary, len(ids))
+	for start := 0; start < len(ids); start += messageSummaryIDChunk {
+		end := min(start+messageSummaryIDChunk, len(ids))
+		if err := e.fetchMessageSummariesByIDsInto(ctx, ids[start:end], byID); err != nil {
+			return nil, err
+		}
+	}
+
+	// Reassemble in caller-order so search rank is preserved.
+	results := make([]MessageSummary, 0, len(byID))
+	for _, id := range ids {
+		if m, ok := byID[id]; ok {
+			results = append(results, m)
+		}
+	}
+	// Chunked for the same reason the base query above is: fetchLabelsForMessages
+	// binds one parameter per message id into its own IN-list, and results here
+	// can carry as many ids as the caller originally asked to hydrate.
+	for start := 0; start < len(results); start += messageSummaryIDChunk {
+		end := min(start+messageSummaryIDChunk, len(results))
+		if err := e.fetchLabelsForMessages(ctx, results[start:end]); err != nil {
+			return nil, fmt.Errorf("fetch labels: %w", err)
+		}
+	}
+	return results, nil
+}
+
+// fetchMessageSummariesByIDsInto runs one chunk's IN-list query and merges
+// its rows into byID, keyed by message id.
+func (e *SQLiteEngine) fetchMessageSummariesByIDsInto(
+	ctx context.Context, ids []int64, byID map[int64]MessageSummary,
+) error {
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -1107,11 +1153,10 @@ func (e *SQLiteEngine) GetMessageSummariesByIDs(ctx context.Context, ids []int64
 
 	rows, err := e.queryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("get message summaries by ids: %w", err)
+		return fmt.Errorf("get message summaries by ids: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	byID := make(map[int64]MessageSummary, len(ids))
 	for rows.Next() {
 		var msg MessageSummary
 		var sentAt sql.NullTime
@@ -1135,7 +1180,7 @@ func (e *SQLiteEngine) GetMessageSummariesByIDs(ctx context.Context, ids []int64
 			&msg.MessageType,
 			&msg.ConversationTitle,
 		); err != nil {
-			return nil, fmt.Errorf("scan message: %w", err)
+			return fmt.Errorf("scan message: %w", err)
 		}
 		if sentAt.Valid {
 			msg.SentAt = sentAt.Time
@@ -1146,26 +1191,13 @@ func (e *SQLiteEngine) GetMessageSummariesByIDs(ctx context.Context, ids []int64
 		byID[msg.ID] = msg
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate messages: %w", err)
+		return fmt.Errorf("iterate messages: %w", err)
 	}
-
-	// Reassemble in caller-order so search rank is preserved.
-	results := make([]MessageSummary, 0, len(byID))
-	for _, id := range ids {
-		if m, ok := byID[id]; ok {
-			results = append(results, m)
-		}
-	}
-	if len(results) > 0 {
-		if err := e.fetchLabelsForMessages(ctx, results); err != nil {
-			return nil, fmt.Errorf("fetch labels: %w", err)
-		}
-	}
-	return results, nil
+	return nil
 }
 
 func (e *SQLiteEngine) fetchLabelsForMessages(ctx context.Context, messages []MessageSummary) error {
-	if err := fetchLabelsForMessageList(ctx, e.db, e.dialect.Rebind, "", messages); err != nil {
+	if err := fetchLabelsForMessageList(ctx, store.ReadDBContext(ctx, e.db), e.dialect.Rebind, "", messages); err != nil {
 		return err
 	}
 	return e.fetchProviderState(ctx, messages)
@@ -1176,22 +1208,14 @@ func (e *SQLiteEngine) GetMessage(ctx context.Context, id int64) (*MessageDetail
 	return e.getMessageByQuery(ctx, "m.id = ?", id)
 }
 
-// GetMessageBySourceID retrieves a full message by source message ID (e.g., Gmail ID).
-// Note: This searches across all accounts and returns the first match. For Gmail,
-// message IDs are unique per account but theoretically could collide across accounts.
-// In practice, Gmail IDs are random enough that collisions are astronomically unlikely.
-// If you need to guarantee uniqueness, use the internal ID from GetMessage instead.
-//
-// A2 (deferred): the unscoped match mirrors the deletion write path
-// (internal/store/messages.go MarkMessageDeletedByGmailID). Adding a source_id
-// scope here is deferred for the same reason — see that function's doc and
-// docs/internal/PG_STATUS.md.
-func (e *SQLiteEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID string) (*MessageDetail, error) {
-	return e.getMessageByQuery(ctx, "m.source_message_id = ?", sourceMessageID)
+// GetMessageBySourceID treats nil sources as unrestricted and empty sources as no matches.
+func (e *SQLiteEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID string, sourceIDs []int64) (*MessageDetail, error) {
+	conditions, args := appendSourceFilter([]string{"m.source_message_id = ?"}, []any{sourceMessageID}, "m.", nil, sourceIDs)
+	return e.getMessageByQuery(ctx, strings.Join(conditions, " AND "), args...)
 }
 
 func (e *SQLiteEngine) getMessageByQuery(ctx context.Context, whereClause string, args ...any) (*MessageDetail, error) {
-	message, err := getMessageByQueryShared(ctx, e.db, e.dialect.Rebind, "", whereClause, args...)
+	message, err := getMessageByQueryShared(ctx, store.ReadDBContext(ctx, e.db), e.dialect.Rebind, "", whereClause, args...)
 	if err != nil || message == nil {
 		return message, err
 	}
@@ -1208,10 +1232,10 @@ func (e *SQLiteEngine) getMessageByQuery(ctx context.Context, whereClause string
 func (e *SQLiteEngine) GetAttachment(ctx context.Context, id int64) (*AttachmentInfo, error) {
 	var att AttachmentInfo
 	err := e.queryRowContext(ctx, `
-		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, ''), COALESCE(storage_path, '')
-		FROM attachments
-		WHERE id = ?
-	`, id).Scan(&att.ID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash, &att.StoragePath)
+		SELECT a.id, COALESCE(m.source_id, 0), COALESCE(a.filename, ''), COALESCE(a.mime_type, ''), COALESCE(a.size, 0), COALESCE(a.content_hash, ''), COALESCE(a.storage_path, '')
+		FROM attachments a LEFT JOIN messages m ON m.id = a.message_id
+		WHERE a.id = ?
+	`, id).Scan(&att.ID, &att.SourceID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash, &att.StoragePath)
 	if err == sql.ErrNoRows {
 		return nil, nil //nolint:nilnil // Engine.GetAttachment uses (nil, nil) for not-found; callers branch on the nil result
 	}
@@ -1234,10 +1258,10 @@ func (e *SQLiteEngine) GetAttachment(ctx context.Context, id int64) (*Attachment
 // hash in stable ID order.
 func (e *SQLiteEngine) GetAttachmentsByHash(ctx context.Context, contentHash string) ([]AttachmentInfo, error) {
 	rows, err := e.queryContext(ctx, `
-		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, ''), COALESCE(storage_path, '')
-		FROM attachments
-		WHERE content_hash = ? OR (COALESCE(content_hash, '') = '' AND storage_path = ?)
-		ORDER BY id
+		SELECT a.id, COALESCE(m.source_id, 0), COALESCE(a.filename, ''), COALESCE(a.mime_type, ''), COALESCE(a.size, 0), COALESCE(a.content_hash, ''), COALESCE(a.storage_path, '')
+		FROM attachments a LEFT JOIN messages m ON m.id = a.message_id
+		WHERE a.content_hash = ? OR (COALESCE(a.content_hash, '') = '' AND a.storage_path = ?)
+		ORDER BY a.id
 	`, contentHash, attachmentCASPath(contentHash))
 	if err != nil {
 		return nil, fmt.Errorf("get attachments by hash: %w", err)
@@ -1247,7 +1271,7 @@ func (e *SQLiteEngine) GetAttachmentsByHash(ctx context.Context, contentHash str
 	var attachments []AttachmentInfo
 	for rows.Next() {
 		var att AttachmentInfo
-		if err := rows.Scan(&att.ID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash, &att.StoragePath); err != nil {
+		if err := rows.Scan(&att.ID, &att.SourceID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash, &att.StoragePath); err != nil {
 			return nil, fmt.Errorf("scan attachment by hash: %w", err)
 		}
 		if att.ContentHash == "" {
@@ -1265,13 +1289,18 @@ func (e *SQLiteEngine) GetAttachmentsByHash(ctx context.Context, contentHash str
 
 // GetMessageRaw returns the decompressed raw MIME data for a message.
 func (e *SQLiteEngine) GetMessageRaw(ctx context.Context, id int64) ([]byte, error) {
-	return getMessageRawShared(ctx, e.db, e.dialect.Rebind, "", id)
+	return getMessageRawShared(ctx, store.ReadDBContext(ctx, e.db), e.dialect.Rebind, "", id)
+}
+
+// ListVirtualAccounts reads the virtual account catalog from the archive.
+func (e *SQLiteEngine) ListVirtualAccounts(ctx context.Context) (map[int64][]store.VirtualAccount, error) {
+	return store.ReadVirtualAccountsContext(ctx, e.db, e.dialect.Rebind)
 }
 
 // ListAccounts returns all source accounts.
 func (e *SQLiteEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
 	rows, err := e.queryContext(ctx, `
-		SELECT id, source_type, identifier, COALESCE(display_name, ''), sync_config
+		SELECT id, source_type, identifier, COALESCE(display_name, ''), sync_config, last_sync_at
 		FROM sources
 		ORDER BY identifier
 	`)
@@ -1284,11 +1313,16 @@ func (e *SQLiteEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) 
 	for rows.Next() {
 		var acc AccountInfo
 		var config sql.NullString
-		if err := rows.Scan(&acc.ID, &acc.SourceType, &acc.Identifier, &acc.DisplayName, &config); err != nil {
+		var lastSyncAt sql.NullTime
+		if err := rows.Scan(&acc.ID, &acc.SourceType, &acc.Identifier, &acc.DisplayName, &config, &lastSyncAt); err != nil {
 			return nil, fmt.Errorf("scan account: %w", err)
 		}
 		if acc.SourceType == "gcal" {
 			acc.CalendarCoverage = store.ParseCalendarCoverage(config)
+		}
+		if lastSyncAt.Valid {
+			syncedAt := lastSyncAt.Time.UTC()
+			acc.LastSyncAt = &syncedAt
 		}
 		accounts = append(accounts, acc)
 	}
@@ -1487,6 +1521,7 @@ func (e *SQLiteEngine) GetDeletionTargetsByFilter(ctx context.Context, filter Me
 	}
 
 	conditions, args = appendSourceFilter(conditions, args, "m.", filter.SourceID, filter.SourceIDs)
+	conditions, args = appendAccountScopeConditions(conditions, args, filter.AccountScopes, "m")
 	if filter.ConversationID != nil {
 		conditions = append(conditions, "m.conversation_id = ?")
 		args = append(args, *filter.ConversationID)
@@ -1503,12 +1538,12 @@ func (e *SQLiteEngine) GetDeletionTargetsByFilter(ctx context.Context, filter Me
 		conditions = append(conditions, e.dialect.BoolTrueExpr("m.has_attachments"))
 	}
 
-	// Scope to Gmail sources only — this function is used for
-	// Gmail-specific deletion/staging workflows and must not return
-	// WhatsApp or other source IDs. 1:1 with messages, so kept as a
+	// Scope to sources that can delete at the source — this function is
+	// used for deletion/staging workflows and must not return WhatsApp or
+	// other source IDs. 1:1 with messages, so kept as a
 	// JOIN; the other filter predicates below use EXISTS to stay
 	// non-multiplicative.
-	joins := []string{`JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type = 'gmail'`}
+	joins := []string{`JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type IN ` + deletableSourceTypesSQL}
 
 	// When BOTH the email and the display name are filtered, they must
 	// match the SAME from-row (or the SAME direct sender), not two
@@ -1720,7 +1755,7 @@ func (e *SQLiteEngine) GetDeletionTargetsBySearch(
 		SELECT m.id, m.source_id, s_gmail.source_type, s_gmail.identifier,
 		       m.source_message_id
 		FROM messages m
-		JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type = 'gmail'
+		JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type IN `+deletableSourceTypesSQL+`
 		%s
 		WHERE %s
 		ORDER BY m.sent_at DESC, m.id DESC
@@ -1785,7 +1820,7 @@ func (e *SQLiteEngine) GetDeletionTargetsByAggregateSearch(
 		SELECT m.id, m.source_id, s_gmail.source_type, s_gmail.identifier,
 		       m.source_message_id
 		FROM messages m
-		JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type = 'gmail'
+		JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type IN `+deletableSourceTypesSQL+`
 		WHERE m.id IN (
 			SELECT m.id
 			FROM messages m
@@ -1822,7 +1857,7 @@ func (e *SQLiteEngine) deletionTargetsForMessageIDChunk(ctx context.Context, ids
 		SELECT m.id, m.source_id, s_gmail.source_type, s_gmail.identifier,
 		       m.source_message_id, m.sent_at
 		FROM messages m
-		JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type = 'gmail'
+		JOIN sources s_gmail ON s_gmail.id = m.source_id AND s_gmail.source_type IN `+deletableSourceTypesSQL+`
 			WHERE %s AND %s AND COALESCE(m.source_message_id, '') <> '' AND m.id IN (%s)
 	`, store.LiveMessagesWhere("m", true), emailOnlyFilterM, strings.Join(placeholders, ","))
 	rows, err := e.queryContext(ctx, q, args...)
@@ -1842,7 +1877,7 @@ const inListChunkSize = 500
 // belongs to one of the given domains. Uses the shared executeSearchQuery
 // path so results carry the same fields as Search/SearchFast (including
 // deleted_at, conversation_title, message_type, and labels).
-func (e *SQLiteEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int) ([]MessageSummary, error) {
+func (e *SQLiteEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) ([]MessageSummary, error) {
 	if len(domains) == 0 {
 		return nil, nil
 	}
@@ -1867,6 +1902,7 @@ func (e *SQLiteEngine) SearchByDomains(ctx context.Context, domains []string, af
 		  AND LOWER(p_dom.domain) IN (%s)
 	)`, strings.Join(placeholders, ", ")))
 
+	conditions, args = appendSourceFilter(conditions, args, "m.", nil, sourceIDs)
 	if after != nil {
 		conditions = append(conditions, e.dialect.DateComparison("m.sent_at", ">="))
 		args = append(args, e.dialect.DateParam(*after))
@@ -1889,9 +1925,8 @@ func (e *SQLiteEngine) SearchByDomains(ctx context.Context, domains []string, af
 // Search performs a Gmail-style search query.
 // buildSearchQueryParts builds the WHERE conditions, args, and FTS join
 // for a search query. This is shared between Search and SearchFastCount.
-// Every structured filter resolves through an EXISTS / NOT EXISTS
-// correlated subquery, so the only join this ever emits is the optional
-// FTS join (ftsJoin); there is no separate non-EXISTS join slot.
+// Structured filters use subqueries rather than outer joins, so the only
+// optional outer join here is the FTS join (ftsJoin).
 func (e *SQLiteEngine) buildSearchQueryParts(ctx context.Context, q *search.Query) (conditions []string, args []any, ftsJoin string) {
 	return e.buildSearchQueryPartsWithVisibility(ctx, q,
 		searchMessageVisibilityWhere("m", q))
@@ -1903,33 +1938,10 @@ func (e *SQLiteEngine) buildSearchQueryParts(ctx context.Context, q *search.Quer
 func (e *SQLiteEngine) buildSearchQueryPartsWithVisibility(ctx context.Context, q *search.Query, visibility string) (conditions []string, args []any, ftsJoin string) {
 	conditions = append(conditions, visibility)
 
-	// From filter - uses EXISTS to avoid join multiplication in aggregates.
-	// Handles both exact addresses and @domain patterns.
-	if len(q.FromAddrs) > 0 {
-		var fromParts []string
-		for _, addr := range q.FromAddrs {
-			if strings.HasPrefix(addr, "@") {
-				fromParts = append(fromParts,
-					"LOWER(p_from.email_address) LIKE ?")
-				args = append(args, "%"+addr)
-			} else {
-				fromParts = append(fromParts,
-					"LOWER(p_from.email_address) = LOWER(?)")
-				args = append(args, addr)
-			}
-		}
-		conditions = append(conditions, fmt.Sprintf(`EXISTS (
-			SELECT 1 FROM message_recipients mr_from
-			JOIN participants p_from ON p_from.id = mr_from.participant_id
-			WHERE mr_from.message_id = m.id
-			  AND mr_from.recipient_type = 'from'
-			  AND (%s)
-		)`, strings.Join(fromParts, " OR ")))
-	}
-
-	conditions, args = appendSQLiteRecipientSearchCondition(conditions, args, q.ToAddrs, "to")
-	conditions, args = appendSQLiteRecipientSearchCondition(conditions, args, q.CcAddrs, "cc")
-	conditions, args = appendSQLiteRecipientSearchCondition(conditions, args, q.BccAddrs, "bcc")
+	conditions, args = appendSQLiteAddressCondition(conditions, args, q.FromAddrs, "from")
+	conditions, args = appendSQLiteAddressCondition(conditions, args, q.ToAddrs, "to")
+	conditions, args = appendSQLiteAddressCondition(conditions, args, q.CcAddrs, "cc")
+	conditions, args = appendSQLiteAddressCondition(conditions, args, q.BccAddrs, "bcc")
 
 	// Label filter - case-insensitive substring match using EXISTS
 	// so each label term can match a different row in message_labels.
@@ -1960,6 +1972,17 @@ func (e *SQLiteEngine) buildSearchQueryPartsWithVisibility(ctx context.Context, 
 		}
 		conditions = append(conditions, metadataContainsExpression(e.dialect, "m.list_id"))
 		args = append(args, "%"+escapeSQLiteLike(listID)+"%")
+	}
+	// account: and received: match the derived account projection.
+	if accountConditions, accountArgs := search.AccountConditions(q, "m"); len(accountConditions) > 0 {
+		conditions = append(conditions, accountConditions...)
+		args = append(args, accountArgs...)
+	}
+	conditions, args = appendAccountScopeConditions(conditions, args, q.AccountScopes, "m")
+
+	for _, filename := range q.Filenames {
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM attachments fa WHERE fa.message_id = m.id AND "+metadataContainsExpression(e.dialect, "fa.filename")+")")
+		args = append(args, "%"+escapeSQLiteLike(filename)+"%")
 	}
 
 	// message_type: filter (e.g. sms, whatsapp, calendar_event). The store
@@ -2032,7 +2055,10 @@ func (e *SQLiteEngine) buildSearchQueryPartsWithVisibility(ctx context.Context, 
 	return conditions, args, ftsJoin
 }
 
-func appendSQLiteRecipientSearchCondition(
+// appendSQLiteAddressCondition resolves matching participants first and looks
+// messages up by rowid. A correlated EXISTS scans every message for a rare
+// address; this semi-join also avoids multiplying result rows.
+func appendSQLiteAddressCondition(
 	conditions []string,
 	args []any,
 	addresses []string,
@@ -2041,28 +2067,31 @@ func appendSQLiteRecipientSearchCondition(
 	if len(addresses) == 0 {
 		return conditions, args
 	}
-
-	addressParts := make([]string, 0, len(addresses))
-	recipientArgs := []any{recipientType}
+	parts := make([]string, 0, len(addresses))
+	matchArgs := make([]any, 0, len(addresses)*2)
 	for _, address := range addresses {
-		address = strings.ToLower(address)
-		if strings.HasPrefix(address, "@") {
-			addressParts = append(addressParts, `LOWER(p_recipient.email_address) LIKE ? ESCAPE '\'`)
-			recipientArgs = append(recipientArgs, "%"+escapeSQLiteLike(address))
-		} else {
-			addressParts = append(addressParts,
-				"(LOWER(p_recipient.email_address) = ? OR p_recipient.phone_number = ?)")
-			recipientArgs = append(recipientArgs, address, address)
+		switch {
+		case strings.HasPrefix(address, "@"):
+			parts = append(parts, `LOWER(p_addr.email_address) LIKE ? ESCAPE '\'`)
+			matchArgs = append(matchArgs, "%"+escapeSQLiteLike(strings.ToLower(address)))
+		case recipientType == "from":
+			parts = append(parts, "LOWER(p_addr.email_address) = LOWER(?)")
+			matchArgs = append(matchArgs, address)
+		default:
+			lower := strings.ToLower(address)
+			parts = append(parts, "(LOWER(p_addr.email_address) = ? OR p_addr.phone_number = ?)")
+			matchArgs = append(matchArgs, lower, lower)
 		}
 	}
-	conditions = append(conditions, fmt.Sprintf(`EXISTS (
-		SELECT 1 FROM message_recipients mr_recipient
-		JOIN participants p_recipient ON p_recipient.id = mr_recipient.participant_id
-		WHERE mr_recipient.message_id = m.id
-		  AND mr_recipient.recipient_type = ?
-		  AND (%s)
-	)`, strings.Join(addressParts, " OR ")))
-	args = append(args, recipientArgs...)
+	conditions = append(conditions, fmt.Sprintf(`m.id IN (
+		SELECT mr_addr.message_id FROM message_recipients mr_addr
+		WHERE mr_addr.recipient_type = ?
+		  AND mr_addr.participant_id IN (
+			SELECT p_addr.id FROM participants p_addr WHERE %s
+		  )
+	)`, strings.Join(parts, " OR ")))
+	args = append(args, recipientType)
+	args = append(args, matchArgs...)
 	return conditions, args
 }
 
@@ -2073,7 +2102,7 @@ func (e *SQLiteEngine) Search(ctx context.Context, q *search.Query, limit, offse
 
 // SearchMessageBodies performs exact body-only full-text search and uses the
 // active backend's native tokenizer to attach bounded context to every hit.
-func (e *SQLiteEngine) SearchMessageBodies(ctx context.Context, q *search.Query, limit, offset int) ([]MessageSummary, error) {
+func (e *SQLiteEngine) SearchMessageBodies(ctx context.Context, q *search.Query, limit, offset int) (*SearchFastResult, error) {
 	if q == nil || len(q.TextTerms) == 0 {
 		return nil, errors.New("message body search requires at least one free-text term")
 	}
@@ -2111,7 +2140,7 @@ func (e *SQLiteEngine) SearchMessageBodies(ctx context.Context, q *search.Query,
 	if err := e.attachMessageBodySearchContexts(ctx, results, q.TextTerms); err != nil {
 		return nil, fmt.Errorf("extract message body contexts: %w", err)
 	}
-	return results, nil
+	return &SearchFastResult{Messages: results}, nil
 }
 
 // buildMetadataSearchQueryParts builds the metadata-only predicate shared by
@@ -2183,6 +2212,16 @@ func (e *SQLiteEngine) buildFilteredMetadataSearchQueryParts(
 	ctx context.Context, q *search.Query, filter MessageFilter,
 ) ([]string, []any, string) {
 	conditions, args, ftsJoin := e.buildMetadataSearchQueryParts(ctx, q)
+	if len(q.TextTerms) > 0 && !metadataSearchScoped(q, filter) && e.hasMetadataFTS(ctx) {
+		for _, term := range q.TextTerms {
+			if candidate, ok := metadataTermCandidate(term); ok {
+				conditions = append(conditions, metadataCandidateSQL)
+				for range 4 {
+					args = append(args, candidate)
+				}
+			}
+		}
+	}
 	_, filterConditions, filterArgs := e.buildFilterJoinsAndConditions(filter)
 	conditions = append(filterConditions, conditions...)
 	args = append(filterArgs, args...)
@@ -2254,38 +2293,9 @@ func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []stri
 		whereClause = "1=1"
 	}
 
-	// All filter conditions in buildSearchQueryParts use EXISTS subqueries,
-	// never plain JOINs, so no row multiplication occurs from filter conditions.
-	// The sender is hydrated via a correlated scalar subquery (LIMIT 1) so that
-	// messages with multiple 'from' recipients do not produce multiple result rows.
-	query := fmt.Sprintf(`
-		SELECT
-			m.id,
-			m.source_id,
-			m.source_message_id,
-			m.conversation_id,
-			COALESCE(conv.source_conversation_id, ''),
-			COALESCE(m.subject, ''),
-			COALESCE(m.snippet, ''),
-			COALESCE(p_sender.email_address, ''),
-			%s,
-			COALESCE(p_sender.phone_number, ''),
-			m.sent_at,
-			COALESCE(m.size_estimate, 0),
-			m.has_attachments,
-			m.attachment_count,
-			m.deleted_from_source_at,
-			COALESCE(m.message_type, ''),
-			COALESCE(conv.title, '')
-		FROM messages m
-		%s
-		LEFT JOIN conversations conv ON conv.id = m.conversation_id
-		%s
-		WHERE %s
-		ORDER BY m.sent_at DESC, m.id DESC
-		LIMIT ? OFFSET ?
-	`, sqliteSenderNameExpr, sqliteSenderJoin, ftsJoin, whereClause)
-
+	// Filter conditions do not add outer joins, so they cannot multiply result
+	// rows. The sender join selects one row per message.
+	query := searchResultsSQL(ftsJoin, whereClause)
 	args = append(args, limit, offset)
 
 	rows, err := e.queryContext(ctx, query, args...)
@@ -2343,6 +2353,38 @@ func (e *SQLiteEngine) executeSearchQuery(ctx context.Context, conditions []stri
 	return results, nil
 }
 
+// searchResultsSQL is the statement executeSearchQuery runs; tests EXPLAIN
+// it to pin the plan.
+func searchResultsSQL(ftsJoin, whereClause string) string {
+	return fmt.Sprintf(`
+		SELECT
+			m.id,
+			m.source_id,
+			m.source_message_id,
+			m.conversation_id,
+			COALESCE(conv.source_conversation_id, ''),
+			COALESCE(m.subject, ''),
+			COALESCE(m.snippet, ''),
+			COALESCE(p_sender.email_address, ''),
+			%s,
+			COALESCE(p_sender.phone_number, ''),
+			m.sent_at,
+			COALESCE(m.size_estimate, 0),
+			m.has_attachments,
+			m.attachment_count,
+			m.deleted_from_source_at,
+			COALESCE(m.message_type, ''),
+			COALESCE(conv.title, '')
+		FROM messages m
+		%s
+		LEFT JOIN conversations conv ON conv.id = m.conversation_id
+		%s
+		WHERE %s
+		ORDER BY m.sent_at DESC, m.id DESC
+		LIMIT ? OFFSET ?
+	`, sqliteSenderNameExpr, sqliteSenderJoin, ftsJoin, whereClause)
+}
+
 // MergeFilterIntoQuery combines a MessageFilter context with a search.Query.
 // Most context filters are appended to existing query filters.
 //
@@ -2364,6 +2406,9 @@ func MergeFilterIntoQuery(q *search.Query, filter MessageFilter) *search.Query {
 	merged.BccAddrs = append([]string(nil), q.BccAddrs...)
 	merged.SubjectTerms = append([]string(nil), q.SubjectTerms...)
 	merged.Labels = append([]string(nil), q.Labels...)
+	merged.AccountAddrs = append([]string(nil), q.AccountAddrs...)
+	merged.ReceivedAddrs = append([]string(nil), q.ReceivedAddrs...)
+	merged.AccountScopes = append(search.CloneAccountScopes(q.AccountScopes), search.CloneAccountScopes(filter.AccountScopes)...)
 	merged.MessageTypes = append([]string(nil), q.MessageTypes...)
 	if q.ConversationIDs != nil {
 		merged.ConversationIDs = make([]int64, len(q.ConversationIDs))
@@ -2619,14 +2664,21 @@ func (e *SQLiteEngine) SearchFastWithStats(ctx context.Context, q *search.Query,
 		return nil, err
 	}
 
-	// Best-effort count: don't abort the search if count fails.
+	// Unrelated aggregate errors remain best-effort; a cancelled request must
+	// never be reported as a successful partial search.
 	count, countErr := e.executeSearchCount(ctx, conditions, args, ftsJoin)
+	if countErr != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if countErr != nil {
 		log.Printf("warning: search count failed (using -1): %v", countErr)
 		count = -1
 	}
 
-	stats, _ := e.getSearchMatchStats(ctx, conditions, args, ftsJoin)
+	stats, statsErr := e.getSearchMatchStats(ctx, conditions, args, ftsJoin)
+	if statsErr != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	return &SearchFastResult{
 		Messages:   results,

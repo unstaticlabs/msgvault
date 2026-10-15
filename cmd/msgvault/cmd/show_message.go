@@ -1,7 +1,8 @@
 package cmd
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -10,25 +11,38 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/textutil"
 )
 
 var (
-	showMessageJSON bool
+	showMessageJSON        bool
+	showMessageBodyOnly    bool
+	showMessageStripQuoted bool
 )
 
 var showMessageCmd = &cobra.Command{
-	Use:   "show-message <id>",
-	Short: "Show full message details",
+	Use:     "show-message <id>",
+	Aliases: []string{"show"},
+	Short:   "Show full message details",
 	Long: `Show the complete details of a message by its internal ID or Gmail ID.
 
 Uses configured remote server or the local daemon by default.
 Use --local to use the local daemon even when a remote is configured.
 
 This command displays the full message including headers, body, labels,
-and attachment information. Use --json for programmatic output.
+and attachment information. Use --json for programmatic output, including
+a web_url that opens the message in the selected daemon browser UI.
+
+Use --body-only to print just body text. Add --strip-quoted to remove quoted
+lines, complete single-line dated reply headers above them, and "-- " signatures.
+Inline replies, uncertain wrapped headers, and complete URLs are preserved.
+Only ">" quoting and English "On ... wrote:" headers are recognized; Outlook
+"Original Message" blocks and other languages stay as written.
+--strip-quoted also cleans body_text in JSON; the archived body and body_html
+are unchanged. --body-only and --json cannot be combined.
 
 Examples:
   msgvault show-message 12345
@@ -63,7 +77,7 @@ func resolveMessageIDArg(raw string) (string, error) {
 }
 
 func showHTTPMessage(cmd *cobra.Command, idStr string) error {
-	s, _, err := OpenHTTPStore(cmd.Context())
+	s, _, err := OpenHTTPStore(cmd.Context(), daemonclient.AgentReadMinAPISchemaVersion)
 	if err != nil {
 		return fmt.Errorf("open store: %w", err)
 	}
@@ -89,6 +103,11 @@ func showHTTPMessage(cmd *cobra.Command, idStr string) error {
 // nil error return mirrors outputMessageJSON so callers can return either
 // uniformly; text printing never fails.
 func outputMessageText(msg *query.MessageDetail) error {
+	body := messageTextBody(msg, showMessageStripQuoted)
+	if showMessageBodyOnly {
+		fmt.Println(textutil.SanitizeTerminalMultiline(body))
+		return nil
+	}
 	// Header section
 	fmt.Println("═══════════════════════════════════════════════════════════════════════════════")
 	fmt.Printf("Message ID: %d (Gmail: %s)\n", msg.ID, msg.SourceMessageID)
@@ -125,7 +144,7 @@ func outputMessageText(msg *query.MessageDetail) error {
 
 	// Labels
 	if len(msg.Labels) > 0 {
-		fmt.Printf("Labels:  %s\n", strings.Join(msg.Labels, ", "))
+		fmt.Printf("Labels:  %s\n", textutil.SanitizeTerminal(strings.Join(msg.Labels, ", ")))
 	}
 	if msg.DeletedAt != nil {
 		fmt.Printf("Deleted from source: %s\n", msg.DeletedAt.UTC().Format(time.RFC3339))
@@ -146,9 +165,9 @@ func outputMessageText(msg *query.MessageDetail) error {
 	// Body
 	fmt.Println("\n═══════════════════════════════════════════════════════════════════════════════")
 	if msg.BodyText != "" {
-		fmt.Println(textutil.SanitizeTerminalMultiline(msg.BodyText))
+		fmt.Println(textutil.SanitizeTerminalMultiline(body))
 	} else if msg.Snippet != "" {
-		fmt.Printf("[No body text available. Snippet: %s]\n", textutil.SanitizeTerminal(msg.Snippet))
+		fmt.Printf("[No body text available. Snippet: %s]\n", textutil.SanitizeTerminal(body))
 	} else {
 		fmt.Println("[No body content available]")
 	}
@@ -157,7 +176,7 @@ func outputMessageText(msg *query.MessageDetail) error {
 	return nil
 }
 
-func outputMessageJSON(msg *query.MessageDetail) error {
+func messageJSONValue(msg *query.MessageDetail) map[string]any {
 	// Build address arrays
 	fromAddrs := make([]map[string]string, len(msg.From))
 	for i, addr := range msg.From {
@@ -194,6 +213,7 @@ func outputMessageJSON(msg *query.MessageDetail) error {
 	output := map[string]any{
 		"id":                     msg.ID,
 		"source_message_id":      msg.SourceMessageID,
+		"rfc822_message_id":      msg.RFC822MessageID,
 		"conversation_id":        msg.ConversationID,
 		"source_conversation_id": msg.SourceConversationID,
 		"subject":                msg.Subject,
@@ -211,6 +231,9 @@ func outputMessageJSON(msg *query.MessageDetail) error {
 		"body_html":              msg.BodyHTML,
 	}
 
+	if msg.WebURL != "" {
+		output["web_url"] = msg.WebURL
+	}
 	if msg.ReceivedAt != nil {
 		output["received_at"] = msg.ReceivedAt.Format(time.RFC3339)
 	}
@@ -218,9 +241,15 @@ func outputMessageJSON(msg *query.MessageDetail) error {
 		output["deleted_from_source_at"] = msg.DeletedAt.UTC().Format(time.RFC3339)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(output)
+	return output
+}
+
+func outputMessageJSON(msg *query.MessageDetail) error {
+	if showMessageStripQuoted {
+		msg = readableMessageDetail(msg)
+	}
+	enc := jsontext.NewEncoder(os.Stdout, jsontext.WithIndent("  "))
+	return json.MarshalEncode(enc, messageJSONValue(msg), json.Deterministic(true))
 }
 
 func formatAddresses(addrs []query.Address) string {
@@ -238,4 +267,7 @@ func formatAddresses(addrs []query.Address) string {
 func init() {
 	rootCmd.AddCommand(showMessageCmd)
 	showMessageCmd.Flags().BoolVar(&showMessageJSON, flagJSON, false, "Output as JSON")
+	showMessageCmd.Flags().BoolVar(&showMessageBodyOnly, "body-only", false, "Print only the text body")
+	showMessageCmd.Flags().BoolVar(&showMessageStripQuoted, "strip-quoted", false, "Remove quoted history and conventional signatures")
+	showMessageCmd.MarkFlagsMutuallyExclusive("body-only", flagJSON)
 }

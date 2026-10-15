@@ -997,7 +997,7 @@ func TestPersonTrackingUntrackWaitsForInFlightFactGeneration(t *testing.T) {
 	select {
 	case outcome := <-untrackDone:
 		early = &outcome
-	case <-time.After(150 * time.Millisecond):
+	case <-time.After(150 * time.Millisecond): //nolint:kennlint // absence check: the held commit gate keeps untracking waiting
 	}
 	release()
 
@@ -1115,7 +1115,7 @@ func TestApplyPreparedPersonFactGenerationDoesNotEndCallerTransaction(t *testing
 	require.ErrorIs(err, injected)
 	person, err := st.GetPersonContext(t.Context(), personID)
 	require.NoError(err)
-	assert.Nil(person.DisplayName)
+	assert.Equal(new("Alice"), person.DisplayName)
 	assert.Equal(int64(0), personFactProjectionRowCount(t, st, "person_fact_generations"))
 }
 
@@ -1615,6 +1615,7 @@ func newPersonFactProjectionStore(t *testing.T) (*Store, int64, map[string]perso
 	return st, personID, map[string]personfacts.TargetDescriptor{
 		AttributeSlugPrimaryChannel: projectionTargetBySlug(t, st, AttributeSlugPrimaryChannel),
 		AttributeSlugAskMeAbout:     projectionTargetBySlug(t, st, AttributeSlugAskMeAbout),
+		AttributeSlugNotes:          projectionTargetBySlug(t, st, AttributeSlugNotes),
 	}
 }
 

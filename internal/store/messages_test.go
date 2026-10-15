@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"sort"
@@ -23,6 +24,227 @@ type failingMessageIDReader struct{}
 
 func (failingMessageIDReader) Read([]byte) (int, error) {
 	return 0, errors.New("synthetic staged-ID read failure")
+}
+
+func TestReactionSourceIdentityIsScopedBySource(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	participantID := f.EnsureParticipant("member@example.test", "Member", "example.test")
+
+	type archivedReaction struct {
+		sourceID       int64
+		conversationID int64
+		messageID      int64
+	}
+	reactions := make([]archivedReaction, 0, 2)
+	for _, userID := range []string{"@archive-one:example.test", "@archive-two:example.test"} {
+		source, err := f.Store.GetOrCreateSource("matrix", userID)
+		require.NoError(err)
+		conversationID, err := f.Store.EnsureConversation(source.ID, "!shared:example.test", "Shared room")
+		require.NoError(err)
+		messageID, err := f.Store.UpsertMessage(&store.Message{
+			ConversationID: conversationID,
+			SourceID:       source.ID, SourceMessageID: "$message", MessageType: "matrix",
+		})
+		require.NoError(err)
+		require.NoError(f.Store.UpsertReactionWithSourceID(
+			messageID, participantID, "emoji", "👍", "$shared-reaction", time.Now().UTC(),
+		))
+		reactions = append(reactions, archivedReaction{sourceID: source.ID, conversationID: conversationID, messageID: messageID})
+	}
+
+	var count int
+	require.NoError(f.Store.DB().QueryRow(
+		`SELECT COUNT(*) FROM reaction_source_events WHERE source_reaction_id = '$shared-reaction'`,
+	).Scan(&count))
+	assert.Equal(2, count)
+	deleted, err := f.Store.DeleteReactionBySourceID(reactions[0].sourceID, reactions[1].conversationID, "$shared-reaction")
+	require.NoError(err)
+	assert.False(deleted, "another conversation's reaction must not match")
+	deleted, err = f.Store.DeleteReactionBySourceID(reactions[0].sourceID, reactions[0].conversationID, "$shared-reaction")
+	require.NoError(err)
+	assert.True(deleted)
+	require.NoError(f.Store.DB().QueryRow(
+		`SELECT COUNT(*) FROM reaction_source_events WHERE source_reaction_id = '$shared-reaction'`,
+	).Scan(&count))
+	assert.Equal(1, count)
+	var remainingMessageID int64
+	require.NoError(f.Store.DB().QueryRow(`
+		SELECT r.message_id
+		FROM reaction_source_events rse
+		JOIN reactions r ON r.id = rse.reaction_id
+		WHERE rse.source_reaction_id = '$shared-reaction'`,
+	).Scan(&remainingMessageID))
+	assert.Equal(reactions[1].messageID, remainingMessageID)
+}
+
+func TestMessageIDByMetadataValueMatchesOneConversation(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	otherConv, err := f.Store.EnsureConversation(f.Source.ID, "!other:example.test", "Other")
+	require.NoError(err)
+	ids := map[int64]int64{}
+	for i, convID := range []int64{f.ConvID, otherConv} {
+		messageID, err := f.Store.UpsertMessage(&store.Message{
+			ConversationID: convID, SourceID: f.Source.ID,
+			SourceMessageID: fmt.Sprintf("$message-%d", i), MessageType: "matrix",
+		})
+		require.NoError(err)
+		require.NoError(f.Store.SetMessageMetadata(messageID, sql.NullString{String: `{"matrix_edit_event_id":"$edit"}`, Valid: true}))
+		ids[convID] = messageID
+	}
+
+	got, err := f.Store.MessageIDByMetadataValue(otherConv, "matrix_edit_event_id", "$edit")
+	require.NoError(err)
+	assert.Equal(ids[otherConv], got)
+	got, err = f.Store.MessageIDByMetadataValue(f.ConvID, "matrix_edit_event_id", "$missing")
+	require.NoError(err)
+	assert.Zero(got)
+}
+
+func TestMergeParticipantsKeepsReactionSourceEvents(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	kept := f.EnsureParticipant("kept@example.test", "Kept", "example.test")
+	absorbed := f.EnsureParticipant("absorbed@example.test", "Absorbed", "example.test")
+	messageID, err := f.Store.UpsertMessage(&store.Message{
+		ConversationID: f.ConvID, SourceID: f.Source.ID,
+		SourceMessageID: "$message", MessageType: "matrix",
+	})
+	require.NoError(err)
+	require.NoError(f.Store.UpsertReactionWithSourceID(messageID, kept, "emoji", "👍", "$kept-reaction", time.Now().UTC()))
+	require.NoError(f.Store.UpsertReactionWithSourceID(messageID, absorbed, "emoji", "👍", "$absorbed-reaction", time.Now().UTC()))
+
+	require.NoError(f.Store.MergeParticipants(absorbed, kept))
+	deleted, err := f.Store.DeleteReactionBySourceID(f.Source.ID, f.ConvID, "$kept-reaction")
+	require.NoError(err)
+	assert.True(deleted)
+	var visible int
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageID).Scan(&visible))
+	assert.Equal(1, visible, "the absorbed participant's event still backs the reaction")
+	deleted, err = f.Store.DeleteReactionBySourceID(f.Source.ID, f.ConvID, "$absorbed-reaction")
+	require.NoError(err)
+	assert.True(deleted)
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageID).Scan(&visible))
+	assert.Zero(visible)
+}
+
+func TestEquivalentProviderReactionsRemainUntilEveryEventIsRedacted(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	participantID := f.EnsureParticipant("member@example.test", "Member", "example.test")
+	messageID, err := f.Store.UpsertMessage(&store.Message{
+		ConversationID: f.ConvID, SourceID: f.Source.ID,
+		SourceMessageID: "$message", MessageType: "matrix",
+	})
+	require.NoError(err)
+
+	require.NoError(f.Store.UpsertReactionWithSourceID(
+		messageID, participantID, "emoji", "👍", "$reaction-one", time.Now().UTC(),
+	))
+	require.NoError(f.Store.UpsertReactionWithSourceID(
+		messageID, participantID, "emoji", "👍", "$reaction-two", time.Now().UTC(),
+	))
+
+	var visible, identities int
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageID).Scan(&visible))
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM reaction_source_events WHERE source_id = ?`), f.Source.ID).Scan(&identities))
+	assert.Equal(1, visible)
+	assert.Equal(2, identities)
+
+	deleted, err := f.Store.DeleteReactionBySourceID(f.Source.ID, f.ConvID, "$reaction-one")
+	require.NoError(err)
+	assert.True(deleted)
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageID).Scan(&visible))
+	assert.Equal(1, visible)
+	deleted, err = f.Store.DeleteReactionBySourceID(f.Source.ID, f.ConvID, "$reaction-one")
+	require.NoError(err)
+	assert.False(deleted)
+
+	deleted, err = f.Store.DeleteReactionBySourceID(f.Source.ID, f.ConvID, "$reaction-two")
+	require.NoError(err)
+	assert.True(deleted)
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`SELECT COUNT(*) FROM reactions WHERE message_id = ?`), messageID).Scan(&visible))
+	assert.Equal(0, visible)
+}
+
+func TestPersistMessageDeliveryEvidenceEnrichesWithoutChangingLocalReadState(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	f := storetest.New(t)
+	firstDeliveredAt := time.Date(2026, 9, 14, 10, 30, 0, 0, time.UTC)
+	message := storetest.NewMessage(f.Source.ID, f.ConvID).
+		WithSourceMessageID("delivery-evidence").
+		Build()
+
+	messageID, err := f.Store.PersistMessage(&store.MessagePersistData{
+		Message: message,
+		Delivery: &store.MessageDeliveryEvidence{
+			DeliveredAt: sql.NullTime{Time: firstDeliveredAt, Valid: true},
+			IsDelivered: sql.NullBool{Bool: true, Valid: true},
+		},
+	})
+	require.NoError(err)
+	localReadAt := time.Date(2026, 9, 14, 11, 0, 0, 0, time.UTC)
+	_, err = f.Store.DB().Exec(f.Store.Rebind(
+		`UPDATE messages SET is_read = ?, read_at = ? WHERE id = ?`),
+		true, localReadAt, messageID)
+	require.NoError(err)
+
+	_, err = f.Store.PersistMessage(&store.MessagePersistData{
+		Message:  message,
+		Delivery: &store.MessageDeliveryEvidence{},
+	})
+	require.NoError(err)
+
+	var gotDeliveredAt, gotReadAt sql.NullTime
+	var gotDelivered, gotRead bool
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`
+		SELECT delivered_at, is_delivered, read_at, is_read
+		FROM messages WHERE id = ?`), messageID).Scan(
+		&gotDeliveredAt, &gotDelivered, &gotReadAt, &gotRead,
+	))
+	require.True(gotDeliveredAt.Valid, "delivered_at should remain present")
+	assert.Equal(firstDeliveredAt, gotDeliveredAt.Time.UTC(),
+		"enrichment must keep the first delivered_at instant")
+	assert.True(gotDelivered)
+	require.True(gotReadAt.Valid, "read_at should remain present")
+	assert.Equal(localReadAt, gotReadAt.Time.UTC(),
+		"enrichment must not change the local read_at instant")
+	assert.True(gotRead)
+}
+
+func TestPersistMessageDeliveryEvidenceUsesNewExplicitEvidence(t *testing.T) {
+	require := require.New(t)
+	f := storetest.New(t)
+	message := storetest.NewMessage(f.Source.ID, f.ConvID).
+		WithSourceMessageID("delivery-evidence-update").
+		Build()
+	first := time.Date(2026, 9, 14, 10, 30, 0, 0, time.UTC)
+	second := first.Add(time.Minute)
+
+	var messageID int64
+	for _, deliveredAt := range []time.Time{first, second} {
+		id, err := f.Store.PersistMessage(&store.MessagePersistData{
+			Message: message,
+			Delivery: &store.MessageDeliveryEvidence{
+				DeliveredAt: sql.NullTime{Time: deliveredAt, Valid: true},
+			},
+		})
+		require.NoError(err)
+		messageID = id
+	}
+
+	var got sql.NullTime
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(
+		`SELECT delivered_at FROM messages WHERE id = ?`), messageID).Scan(&got))
+	require.True(got.Valid, "delivered_at should be present")
+	assert.Equal(t, second, got.Time.UTC(),
+		"delivered_at should use the newest explicit evidence")
 }
 
 // TestUpsertMessagePersistsListID catches a missing list_id column or an
@@ -55,6 +277,39 @@ func TestUpsertMessagePersistsListID(t *testing.T) {
 	).Scan(&listID), "read persisted list ID")
 	assert.True(listID.Valid, "list ID should be present")
 	assert.Equal("<announce.example.org>", listID.String, "list ID")
+}
+
+func TestUpsertMessagePreservesRFCMessageID(t *testing.T) {
+	stored := sql.NullString{String: "<Original-ID@example.test>", Valid: true}
+	incoming := sql.NullString{String: "incoming@example.test", Valid: true}
+	for _, tc := range []struct {
+		name                 string
+		before, update, want sql.NullString
+	}{
+		{"retain when absent", stored, sql.NullString{}, stored},
+		{"retain when empty", stored, sql.NullString{Valid: true}, stored},
+		{"retain when different", stored, incoming, stored},
+		{"fill null", sql.NullString{}, incoming, incoming},
+		{"fill empty", sql.NullString{Valid: true}, incoming, incoming},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			f := storetest.New(t)
+			message := &store.Message{
+				SourceID: f.Source.ID, SourceMessageID: "message", ConversationID: f.ConvID,
+				MessageType: store.MessageTypeEmail, RFC822MessageID: tc.before,
+			}
+			id, err := f.Store.UpsertMessage(message)
+			require.NoError(err)
+			message.RFC822MessageID = tc.update
+			_, err = f.Store.UpsertMessage(message)
+			require.NoError(err)
+			var got sql.NullString
+			require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(
+				`SELECT rfc822_message_id FROM messages WHERE id = ?`), id).Scan(&got))
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 type siblingRecipientSnapshot struct {
@@ -939,6 +1194,7 @@ func TestPersistRepairMessageReplacesCompleteSnapshotAtomically(t *testing.T) {
 
 	after := readSiblingMessageSnapshot(t, fixture.Store, fixture.TargetID)
 	assert.Equal("repair-target", after.SourceMessageID)
+	assert.Equal("<repair-new@example.test>", after.RFC822MessageID.String)
 	assert.Equal("Repaired target", after.Subject.String)
 	assert.Equal("repaired target body", after.BodyText.String)
 	assert.Equal("<p>repaired target body</p>", after.BodyHTML.String)
@@ -974,6 +1230,7 @@ func TestPersistRepairMessageReplacesCompleteSnapshotAtomically(t *testing.T) {
 	_, oldHits, err := fixture.Store.SearchMessages("original-target-token", 0, 10)
 	require.NoError(err)
 	assert.Zero(oldHits, "repair must remove the old FTS document")
+	waitForFeedPast(t, fixture.Store, after.ContentChangedAt.Time)
 	page, err := fixture.Store.ListChangedMessages(
 		t.Context(), store.ChangedMessagesFrom(fixture.Baseline.Add(time.Second)), 20)
 	require.NoError(err)
@@ -2163,4 +2420,57 @@ func TestCountMessagesPerMailbox(t *testing.T) {
 	assert.Equal(int64(2), counts["INBOX"], "INBOX count")
 	assert.Equal(int64(1), counts["Sent"], "Sent count")
 	assert.Equal(int64(1), counts["Drafts"], "Drafts count")
+}
+
+func TestEnsurePhoneParticipantContextCancelsBlockedNameBackfill(t *testing.T) {
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	if !st.IsPostgreSQL() {
+		t.Skip("PostgreSQL embedding-clock lock required")
+	}
+	const phone = "+12025550100"
+	participantID, err := st.EnsurePhoneParticipantContext(t.Context(), phone, "")
+	require.NoError(err)
+
+	// Embedding publication holds this exclusive lock; the production
+	// participant-update trigger requests its shared form.
+	blocker, err := st.DB().BeginTx(t.Context(), nil)
+	require.NoError(err)
+	t.Cleanup(func() { _ = blocker.Rollback() })
+	_, err = blocker.ExecContext(t.Context(), `SELECT pg_advisory_xact_lock(
+        hashtextextended('msgvault.embedding_change_clock', 0))`)
+	require.NoError(err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	result := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := st.EnsurePhoneParticipantContext(ctx, phone, "Taylor Example")
+		result <- err
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = blocker.Rollback()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			assert.Fail(t, "phone participant write did not stop after releasing its blocker")
+		}
+	})
+	waitForPostgreSQLLockWait(t, st, "%UPDATE participants SET display_name =%")
+	cancel()
+	select {
+	case err := <-result:
+		require.ErrorIs(err, context.Canceled)
+	case <-time.After(5 * time.Second):
+		require.FailNow("cancelled phone participant write kept waiting for the embedding lock")
+	}
+
+	var name string
+	require.NoError(st.DB().QueryRow(st.Rebind(
+		`SELECT COALESCE(display_name, '') FROM participants WHERE id = ?`),
+		participantID).Scan(&name))
+	assert.Empty(t, name, "cancelled name backfill must roll back")
 }

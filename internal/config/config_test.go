@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,6 +14,65 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPersonMatchConfigLoadsWithoutCredentialValue(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(os.WriteFile(path, []byte(`[people.identity_scoring]
+enabled = true
+model_id = "jev-1.13.0"
+minimum_probability = 0.8
+credential_env = "JEV_SCORER_KEY"
+batch_size = 12
+retention_declaration = "operator-confirmed-retention-v1"
+`), 0o600))
+	cfg, err := Load(path, "")
+	require.NoError(err)
+	assert.True(cfg.People.IdentityScoring.Enabled)
+	assert.Equal("JEV_SCORER_KEY", cfg.People.IdentityScoring.CredentialEnv)
+	assert.Equal(12, cfg.People.IdentityScoring.BatchSize)
+
+	var encoded bytes.Buffer
+	require.NoError(toml.NewEncoder(&encoded).Encode(cfg))
+	assert.Contains(encoded.String(), `credential_env = "JEV_SCORER_KEY"`)
+}
+
+func TestPersonMatchConfigRejectsInvalidEnabledSettings(t *testing.T) {
+	for name, tc := range map[string]struct{ key, value, message string }{
+		"model alias":           {"model_id", `"jev-latest"`, "model_id must be jev-1.13.0"},
+		"threshold":             {"minimum_probability", "0.79", "minimum_probability must be at least"},
+		"unreachable threshold": {"minimum_probability", "1.00", "minimum_probability must be at least"},
+		"zero threshold":        {"minimum_probability", "0", "minimum_probability must be at least"},
+		"zero batch":            {"batch_size", "0", "batch_size must be between"},
+		"key name":              {"credential_env", `"BAD-NAME"`, "credential_env must be an environment variable name"},
+		"missing key name":      {"credential_env", `""`, "credential_env is required"},
+		"missing retention":     {"retention_declaration", `""`, "retention_declaration is required"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fields := map[string]string{"enabled": "true", "credential_env": `"FIXTURE_SCORING_KEY"`, "retention_declaration": `"fixture retention"`}
+			fields[tc.key] = tc.value
+			var content strings.Builder
+			content.WriteString("[people.identity_scoring]\n")
+			for key, value := range fields {
+				fmt.Fprintf(&content, "%s = %s\n", key, value)
+			}
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(t, os.WriteFile(path, []byte(content.String()), 0o600))
+			_, err := Load(path, "")
+			assert.ErrorContains(t, err, tc.message)
+		})
+	}
+}
+
+func TestPersonMatchConfigRejectsUnrecognizedCredentialFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`[people.identity_scoring]
+api_key = ""
+`), 0o600))
+	_, err := Load(path, "")
+	assert.ErrorContains(t, err, "unknown people.identity_scoring config key")
+}
 
 func TestCardDAVConfigLoadsWithoutSerializingAPassword(t *testing.T) {
 	assert := assert.New(t)
@@ -35,6 +95,147 @@ enabled = true
 	var encoded bytes.Buffer
 	require.NoError(toml.NewEncoder(&encoded).Encode(cfg))
 	assert.NotContains(encoded.String(), "password")
+}
+
+func TestCardDAVTrustedDestinationLoadsBeforeAccountSetup(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(os.WriteFile(path, []byte(`[carddav]
+trusted_origin = "https://contacts.example:8443/"
+trusted_addresses = ["100.80.0.8", "10.1.2.3"]
+`), 0o600))
+	cfg, err := Load(path, "")
+	require.NoError(err)
+	assert.Empty(cfg.CardDAV.BaseURL)
+	assert.Equal("https://contacts.example:8443/", cfg.CardDAV.TrustedOrigin)
+	assert.Equal([]string{"100.80.0.8", "10.1.2.3"}, cfg.CardDAV.TrustedAddresses)
+	require.NoError(cfg.Save())
+	reloaded, err := Load(path, "")
+	require.NoError(err)
+	assert.Equal(cfg.CardDAV.TrustedAddresses, reloaded.CardDAV.TrustedAddresses)
+}
+
+func TestCardDAVTrustedDestinationRejectsInvalidPolicy(t *testing.T) {
+	for name, tc := range map[string]struct{ policy, message string }{
+		"missing origin":    {`trusted_addresses = ["10.1.2.3"]`, "trusted_origin must include a hostname"},
+		"missing address":   {`trusted_origin = "https://contacts.example"`, "trusted_addresses must contain at least one address"},
+		"http origin":       {"trusted_origin = \"http://contacts.example\"\ntrusted_addresses = [\"10.1.2.3\"]", "trusted_origin must use HTTPS"},
+		"public address":    {"trusted_origin = \"https://contacts.example\"\ntrusted_addresses = [\"203.0.113.9\"]", "address 203.0.113.9 is not in an allowed private range"},
+		"loopback address":  {"trusted_origin = \"https://contacts.example\"\ntrusted_addresses = [\"127.0.0.1\"]", "address 127.0.0.1 is not in an allowed private range"},
+		"malformed address": {"trusted_origin = \"https://contacts.example\"\ntrusted_addresses = [\"invalid\"]", `invalid IP address "invalid"`},
+		"invalid port":      {"trusted_origin = \"https://contacts.example:65536\"\ntrusted_addresses = [\"10.1.2.3\"]", "trusted_origin port must be between 1 and 65535"},
+		"path":              {"trusted_origin = \"https://contacts.example/dav\"\ntrusted_addresses = [\"10.1.2.3\"]", "trusted_origin must not include a path"},
+		"query":             {"trusted_origin = \"https://contacts.example?\"\ntrusted_addresses = [\"10.1.2.3\"]", "trusted_origin must not include a query"},
+		"credentials":       {"trusted_origin = \"https://user@contacts.example\"\ntrusted_addresses = [\"10.1.2.3\"]", "trusted_origin must not include credentials"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(os.WriteFile(path, []byte("[carddav]\n"+tc.policy+"\n"), 0o600))
+			_, err := Load(path, "")
+			require.Error(err)
+			assert.Contains(err.Error(), "carddav")
+			assert.Contains(err.Error(), tc.message)
+		})
+	}
+}
+
+func TestCardDAVConfigProvider(t *testing.T) {
+	for _, provider := range []string{"", "google", "googl"} {
+		t.Run(provider, func(t *testing.T) {
+			required := require.New(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			required.NoError(os.WriteFile(path, []byte(fmt.Sprintf("[carddav]\nprovider = %q\n", provider)), 0600))
+			cfg, err := Load(path, "")
+			if provider == "googl" {
+				required.ErrorContains(err, "carddav.provider")
+				return
+			}
+			required.NoError(err)
+			assert.Equal(t, provider, cfg.CardDAV.Provider)
+		})
+	}
+}
+
+func TestIMAPDraftConfig(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := "[[imap.drafts]]\nsource_id = 42\nenabled = true\nmailbox = \"Drafts*2026\"\n"
+	requirements.NoError(os.WriteFile(path, []byte(content), 0o600))
+	t.Log("[[imap.drafts]] enabled source_id=42 mailbox=Drafts*2026")
+	cfg, err := Load(path, "")
+	requirements.NoError(err)
+	requirements.Len(cfg.IMAP.Drafts, 1)
+	assertions.Equal(int64(42), cfg.IMAP.Drafts[0].SourceID)
+	assertions.True(cfg.IMAP.Drafts[0].Enabled)
+	assertions.Equal("Drafts*2026", cfg.IMAP.Drafts[0].Mailbox)
+	requirements.NoError(cfg.Save())
+	reloaded, err := Load(path, "")
+	requirements.NoError(err)
+	requirements.Len(reloaded.IMAP.Drafts, 1)
+	assertions.Equal("Drafts*2026", reloaded.IMAP.Drafts[0].Mailbox)
+	t.Log("config Save/load round-trip kept enabled=true mailbox=Drafts*2026")
+
+	for _, invalid := range []string{
+		"[[imap.drafts]]\nsource_id = 0\nenabled = true\nmailbox = \"Drafts\"\n",
+		"[[imap.drafts]]\nsource_id = 42\nenabled = true\nmailbox = \"\"\n",
+		"[[imap.drafts]]\nsource_id = 42\nenabled = true\nmailbox = \"Drafts\"\n[[imap.drafts]]\nsource_id = 42\nenabled = false\nmailbox = \"Drafts\"\n",
+		"[[imap.drafts]]\nsource_id = 42\nenabled = true\nmailbox = \"Drafts\"\nextra = true\n",
+	} {
+		requirements.NoError(os.WriteFile(path, []byte(invalid), 0o600))
+		_, err := Load(path, "")
+		requirements.Error(err)
+	}
+	t.Log("invalid [[imap.drafts]] entries reject bad source_id, mailbox, duplicate source_id, and unknown keys")
+}
+
+func TestGmailDraftConfig(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := "[[gmail.drafts]]\nsource_id = 42\nenabled = true\n"
+	requirements.NoError(os.WriteFile(path, []byte(content), 0o600))
+	cfg, err := Load(path, "")
+	requirements.NoError(err)
+	requirements.Len(cfg.Gmail.Drafts, 1)
+	assertions.Equal(int64(42), cfg.Gmail.Drafts[0].SourceID)
+	assertions.True(cfg.Gmail.Drafts[0].Enabled)
+
+	for _, invalid := range []string{
+		"[[gmail.drafts]]\nenabled = true\n",
+		"[[gmail.drafts]]\nsource_id = 0\nenabled = true\n",
+		"[[gmail.drafts]]\nsource_id = 42\nenabled = true\n[[gmail.drafts]]\nsource_id = 42\nenabled = false\n",
+		"[[gmail.drafts]]\nsource_id = 42\nenabled = true\nextra = true\n",
+	} {
+		requirements.NoError(os.WriteFile(path, []byte(invalid), 0o600))
+		_, err := Load(path, "")
+		requirements.Error(err)
+	}
+}
+
+func TestDraftSourceConfigErrorText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	imap := func(body string) string { return "[[imap.drafts]]\n" + body + "\n" }
+	for content, want := range map[string]string{
+		imap("source_id = -5\nmailbox = \"Drafts\""): "[[imap.drafts]] entry 1: source_id must be positive",
+		imap("mailbox = \"Drafts\""):                 "[[imap.drafts]] entry 1: source_id is required",
+		imap("source_id = 7\nmailbox = \"A\"") + imap("source_id = 9\nmailbox = \"B\"") + imap("source_id = 7\nmailbox = \"C\""): "[[imap.drafts]] entry 3: duplicate source_id selector 7",
+		imap("source_id = 1\nmailbox = \"   \""):                                           "[[imap.drafts]] entry 1: mailbox must be nonblank UTF-8",
+		imap("source_id = 1\nmailbox = \"Drafts\\rOld\""):                                  "[[imap.drafts]] entry 1: mailbox contains control characters",
+		"[[gmail.drafts]]\nsource_id = 4\n[[gmail.drafts]]\nenabled = true\n":              "[[gmail.drafts]] entry 2: source_id is required",
+		"[[gmail.drafts]]\nsource_id = 0\n":                                                "[[gmail.drafts]] entry 1: source_id must be positive",
+		"[[gmail.drafts]]\nsource_id = 4\n[[gmail.drafts]]\nsource_id = 4\n":               "[[gmail.drafts]] entry 2: duplicate source_id selector 4",
+		imap("source_id = 1\nmailbox = \"Drafts\"") + "[[gmail.drafts]]\nsource_id = -1\n": "[[gmail.drafts]] entry 1: source_id must be positive",
+		"[[beeper.drafts]]\nenabled = true\n":                                              "[[beeper.drafts]] entry 1: source_id is required",
+		"[[beeper.drafts]]\nsource_id = 4\nchat = \"x\"\n":                                 `unknown Beeper draft config key "beeper.drafts.chat"`,
+	} {
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		_, err := Load(path, "")
+		assert.EqualError(t, err, want, content)
+	}
 }
 
 func TestCardDAVConfigRejectsPasswordField(t *testing.T) {
@@ -153,6 +354,28 @@ builder_temp_limit = "12gB"
 	assertions.Equal("12gB", cfg.Analytics.BuilderTempLimit)
 }
 
+// The daemon-query knobs mirror the cache-builder ones: the InteractivePolicy
+// defaults are laptop-sized, and a large archive has to raise them or heavy
+// queries fail once they spill past max_temp_directory_size.
+func TestLoadWithAnalyticsQueryResourceLimits(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	requirements.NoError(os.WriteFile(configPath, []byte(`
+[analytics]
+query_memory_limit = "8GB"
+query_threads = 6
+query_temp_limit = "40GiB"
+`), 0o600))
+
+	cfg, err := Load(configPath, "")
+	requirements.NoError(err)
+	assertions.Equal("8GB", cfg.Analytics.QueryMemoryLimit)
+	assertions.Equal(6, cfg.Analytics.QueryThreads)
+	assertions.Equal("40GiB", cfg.Analytics.QueryTempLimit)
+}
+
 func TestLoadRejectsInvalidAnalyticsBuilderResourceLimits(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -167,6 +390,10 @@ func TestLoadRejectsInvalidAnalyticsBuilderResourceLimits(t *testing.T) {
 		{name: "negative temp", key: "builder_temp_limit", value: `"-8GB"`},
 		{name: "missing temp number", key: "builder_temp_limit", value: `"GB"`},
 		{name: "negative threads", key: "builder_threads", value: "-1"},
+		{name: "zero query memory", key: "query_memory_limit", value: `"0GB"`},
+		{name: "missing query memory unit", key: "query_memory_limit", value: `"2"`},
+		{name: "negative query temp", key: "query_temp_limit", value: `"-8GB"`},
+		{name: "negative query threads", key: "query_threads", value: "-1"},
 	}
 
 	for _, tt := range tests {
@@ -342,6 +569,47 @@ func TestTaskIntegrationEndpointShapes(t *testing.T) {
 	}
 }
 
+func TestKataIntegrationConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    TaskIntegrationConfig
+		wantErr string
+	}{
+		{name: "disabled by default", want: TaskIntegrationConfig{DefaultProject: "msgvault"}},
+		{name: "enabled needs endpoint", content: "enabled = true\n", wantErr: "[integrations.kata] endpoint is required"},
+		{name: "whitespace endpoint", content: "enabled = true\nendpoint = '  '\n", wantErr: "[integrations.kata] endpoint is required"},
+		{name: "reject remote plaintext", content: "endpoint = 'http://kata.example.com'\n", wantErr: "invalid [integrations.kata] endpoint"},
+		{
+			name:    "explicit connection with default project",
+			content: "enabled = true\nendpoint = 'https://kata.example.com'\napi_key = 'kata-secret'\ndefault_project = '  '\n",
+			want:    TaskIntegrationConfig{Enabled: true, Endpoint: "https://kata.example.com", APIKey: "kata-secret", DefaultProject: "msgvault"},
+		},
+		{
+			name:    "explicit project",
+			content: "endpoint = 'unix:///tmp/kata.sock'\ndefault_project = 'people'\n",
+			want:    TaskIntegrationConfig{Endpoint: "unix:///tmp/kata.sock", DefaultProject: "people"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			content := "[integrations.tasks]\nenabled = true\ndefault_project = 'messages'\n[integrations.kata]\n" + tt.content
+			require.NoError(os.WriteFile(path, []byte(content), 0o600))
+			cfg, err := Load(path, "")
+			if tt.wantErr != "" {
+				require.ErrorContains(err, tt.wantErr)
+				return
+			}
+			require.NoError(err)
+			assert.Equal(tt.want, cfg.Integrations.Kata)
+			assert.Equal(TaskIntegrationConfig{Enabled: true, DefaultProject: "messages"}, cfg.Integrations.Tasks)
+		})
+	}
+}
+
 func TestAccountScheduleEmpty(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("MSGVAULT_HOME", tmpDir)
@@ -416,6 +684,52 @@ func TestServerDaemonAutoRestartDefault(t *testing.T) {
 	cfg := NewDefaultConfig()
 
 	assert.Equal(t, DaemonAutoRestartNewer, cfg.Server.DaemonAutoRestart)
+}
+
+func TestLoadWithServerDaemonAutoStart(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "false", want: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			content := "[server]\ndaemon_auto_start = " + tt.value + "\n"
+			require.NoError(os.WriteFile(configPath, []byte(content), 0o644), "WriteFile()")
+
+			cfg, err := Load(configPath, "")
+			require.NoError(err, "Load()")
+			require.NotNil(cfg.Server.DaemonAutoStart)
+			assert.Equal(tt.want, *cfg.Server.DaemonAutoStart)
+			assert.Equal(tt.want, cfg.Server.DaemonAutoStartEnabled())
+		})
+	}
+}
+
+func TestServerDaemonAutoStartDefault(t *testing.T) {
+	cfg := NewDefaultConfig()
+
+	assert.Nil(t, cfg.Server.DaemonAutoStart)
+	assert.True(t, cfg.Server.DaemonAutoStartEnabled())
+}
+
+func TestLoadTelemetryEnabled(t *testing.T) {
+	for content, want := range map[string]bool{
+		"":                               true,
+		"[telemetry]\nenabled = true\n":  true,
+		"[telemetry]\nenabled = false\n": false,
+	} {
+		configPath := filepath.Join(t.TempDir(), "config.toml")
+		require.NoError(t, os.WriteFile(configPath, []byte(content), 0o644))
+		cfg, err := Load(configPath, "")
+		require.NoError(t, err)
+		assert.Equal(t, want, cfg.Telemetry.EnabledOrDefault(), "config %q", content)
+	}
 }
 
 func TestLoadWithServerDaemonAutoRestart(t *testing.T) {
@@ -868,6 +1182,34 @@ rate_limit_qps = 10
 	assert.Equal(10, cfg.Sync.RateLimitQPS)
 }
 
+func TestLoadSlackConversationSelection(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	requirements.NoError(os.WriteFile(path, []byte(`[slack]
+private_channels = false
+dms = false
+group_dms = true
+`), 0o600))
+
+	cfg, err := Load(path, "")
+	requirements.NoError(err)
+	requirements.NotNil(cfg.Slack.DMs)
+	requirements.NotNil(cfg.Slack.GroupDMs)
+	assertions.False(*cfg.Slack.DMs)
+	assertions.True(*cfg.Slack.GroupDMs)
+	assertions.False(cfg.Slack.DMsEnabled())
+	assertions.True(cfg.Slack.GroupDMsEnabled())
+	assertions.False(cfg.Slack.PrivateChannelsEnabled())
+
+	defaults := NewDefaultConfig().Slack
+	assertions.Nil(defaults.DMs)
+	assertions.Nil(defaults.GroupDMs)
+	assertions.True(defaults.DMsEnabled())
+	assertions.True(defaults.GroupDMsEnabled())
+	assertions.True(defaults.PrivateChannelsEnabled())
+}
+
 func TestLoadExplicitPathNotFound(t *testing.T) {
 	// When --config explicitly specifies a file that doesn't exist, Load should error
 	_, err := Load("/nonexistent/path/config.toml", "")
@@ -1264,6 +1606,36 @@ func TestSaveAndLoad_RoundTrip(t *testing.T) {
 	assert.Equal("user@gmail.com", loaded.Accounts[0].Email)
 }
 
+func TestServerDaemonAutoStartSurvivesSave(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		autoStart *bool
+	}{
+		{name: "false", autoStart: new(false)},
+		{name: "unset", autoStart: nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			cfg := NewDefaultConfig()
+			cfg.HomeDir = t.TempDir()
+			cfg.Server.DaemonAutoStart = tt.autoStart
+			require.NoError(cfg.Save(), "Save()")
+
+			loaded, err := Load(cfg.ConfigFilePath(), "")
+			require.NoError(err, "Load()")
+			if tt.autoStart == nil {
+				assert.Nil(loaded.Server.DaemonAutoStart)
+				assert.True(loaded.Server.DaemonAutoStartEnabled())
+				return
+			}
+			require.NotNil(loaded.Server.DaemonAutoStart)
+			assert.False(*loaded.Server.DaemonAutoStart)
+			assert.False(loaded.Server.DaemonAutoStartEnabled())
+		})
+	}
+}
+
 func TestConfigFileModeOnSave(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1451,14 +1823,17 @@ func TestSave_OverwritesExisting(t *testing.T) {
 	assert.Equal(t, 42, loaded.Sync.RateLimitQPS)
 }
 
-func TestOAuthConfig_ClientSecretsFor(t *testing.T) {
+func TestOAuthConfig_CredentialsFor(t *testing.T) {
 	tests := []struct {
-		name    string
-		config  OAuthConfig
-		appName string
-		want    string
-		wantErr bool
+		name        string
+		config      OAuthConfig
+		appName     string
+		want        string
+		wantCommand []string
+		wantErr     bool
 	}{
+		{name: "default command", config: OAuthConfig{ClientSecretsCommand: []string{"secret-store", "literal $HOME; value"}}, wantCommand: []string{"secret-store", "literal $HOME; value"}},
+		{name: "named command", config: OAuthConfig{Apps: map[string]OAuthApp{"work": {ClientSecretsCommand: []string{"secret-store", "work"}}}}, appName: "work", wantCommand: []string{"secret-store", "work"}},
 		{
 			name:    "empty name returns default",
 			config:  OAuthConfig{ClientSecrets: "/path/to/default.json"},
@@ -1507,13 +1882,16 @@ func TestOAuthConfig_ClientSecretsFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := tt.config.ClientSecretsFor(tt.appName)
+			assert := assert.New(t)
+			require := require.New(t)
+			got, err := tt.config.CredentialsFor(tt.appName)
 			if tt.wantErr {
-				assert.Error(t, err, "ClientSecretsFor(%q)", tt.appName)
+				assert.Error(err, "CredentialsFor(%q)", tt.appName)
 				return
 			}
-			require.NoError(t, err, "ClientSecretsFor(%q)", tt.appName)
-			assert.Equal(t, tt.want, got, "ClientSecretsFor(%q)", tt.appName)
+			require.NoError(err, "CredentialsFor(%q)", tt.appName)
+			assert.Equal(tt.want, got.ClientSecrets, "CredentialsFor(%q)", tt.appName)
+			assert.Equal(tt.wantCommand, got.ClientSecretsCommand, "CredentialsFor(%q)", tt.appName)
 		})
 	}
 }
@@ -1888,14 +2266,14 @@ client_secrets = "/path/to/acme.json"
 	// HasAnyConfig should still be true
 	assert.True(cfg.OAuth.HasAnyConfig())
 
-	// ClientSecretsFor("") should fail
-	_, err = cfg.OAuth.ClientSecretsFor("")
-	require.Error(err, "ClientSecretsFor(\"\") should error with no default")
+	// CredentialsFor("") should fail
+	_, err = cfg.OAuth.CredentialsFor("")
+	require.Error(err, "CredentialsFor(\"\") should error with no default")
 
-	// ClientSecretsFor("acme") should work
-	path, err := cfg.OAuth.ClientSecretsFor("acme")
-	require.NoError(err, "ClientSecretsFor(acme)")
-	assert.Equal("/path/to/acme.json", path)
+	// CredentialsFor("acme") should work
+	path, err := cfg.OAuth.CredentialsFor("acme")
+	require.NoError(err, "CredentialsFor(acme)")
+	assert.Equal("/path/to/acme.json", path.ClientSecrets)
 }
 
 func TestSave_AllowInsecureRoundTrip(t *testing.T) {
@@ -2153,4 +2531,69 @@ capabilities_file = "manifests/voyage.json"
 	require.NoError(err)
 	assert.Equal(filepath.Join(tmpDir, "manifests/voyage.json"),
 		cfg.Vector.Multimodal.CapabilitiesFile)
+}
+
+// Agent access requires an effective owner key when starting the server.
+func TestAgentAccessRequiresAPIKey(t *testing.T) {
+	t.Run("agent_access without api_key rejected", func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		configPath := filepath.Join(t.TempDir(), "config.toml")
+		require.NoError(os.WriteFile(configPath, []byte(`
+[server]
+agent_access = true
+`), 0o600))
+		cfg, err := Load(configPath, "")
+		require.NoError(err, "loading configuration must not prepare credentials")
+		err = cfg.PrepareServerKey()
+		require.Error(err)
+		assert.Contains(err.Error(), "agent_access")
+	})
+
+	t.Run("agent_access with api_key accepted", func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		configPath := filepath.Join(t.TempDir(), "config.toml")
+		require.NoError(os.WriteFile(configPath, []byte(`
+[server]
+agent_access = true
+api_key = "owner-secret"
+`), 0o600))
+		cfg, err := Load(configPath, "")
+		require.NoError(err)
+		assert.True(cfg.Server.AgentAccess)
+		assert.NoError(cfg.PrepareServerKey())
+	})
+
+	t.Run("agent_access false without api_key accepted", func(t *testing.T) {
+		cfg := NewDefaultConfig()
+		assert.False(t, cfg.Server.AgentAccess)
+	})
+}
+
+func TestLoadTrustedIMAPSentMailboxesPerSource(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	content := `[sync]
+trusted_imap_sent_mailboxes = { "imaps://alice@example.com@imap.example.com:993" = ["Gesendete Elemente", "Sent Items"] }
+`
+	require.NoError(os.WriteFile(configPath, []byte(content), 0o600))
+
+	cfg, err := Load(configPath, "")
+	require.NoError(err)
+	require.Len(cfg.Sync.TrustedIMAPSentMailboxes, 1)
+	assert.Equal(
+		[]string{"Gesendete Elemente", "Sent Items"},
+		cfg.Sync.TrustedIMAPSentMailboxes["imaps://alice@example.com@imap.example.com:993"])
+	assert.Empty(
+		cfg.Sync.TrustedIMAPSentMailboxes["imaps://bob@example.com@imap.example.com:993"],
+		"a same-named mailbox in another account gains no trust")
+
+	emptyPath := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(os.WriteFile(emptyPath, []byte(""), 0o600))
+	cfg, err = Load(emptyPath, "")
+	require.NoError(err)
+	assert.Empty(cfg.Sync.TrustedIMAPSentMailboxes,
+		"unconfigured archives carry no explicit Sent-folder trust")
 }

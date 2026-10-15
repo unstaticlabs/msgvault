@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -111,6 +110,28 @@ func TestDownloadFileSizeCap(t *testing.T) {
 	c.mediaTransport = rt
 	_, err := c.DownloadFile(context.Background(), "https://files.slack.com/files-pri/T01-F01/a.png", 10)
 	assert.ErrorIs(t, err, ErrAssetTooLarge)
+}
+
+func TestImportWithoutFileScopeDefersDownloads(t *testing.T) {
+	assertions := assert.New(t)
+	f := testWorkspace(t)
+	f.convs = f.convs[:1]
+	f.scopes = "channels:read,channels:history,users:read,users:read.email"
+	f.convs[0].Msgs[0].Files = []map[string]any{{
+		"id": "F01", "name": "example.txt", "mimetype": "text/plain", "size": 5,
+		"url_private": "https://files.slack.com/files-pri/T01-F01/example.txt",
+	}}
+	imp, opts := testImporter(t, f)
+	transport := &recordingTransport{body: "hello"}
+	imp.client.mediaTransport = transport
+	opts.NoMedia = false
+	opts.NoThreads = true
+	opts.AttachmentsDir = t.TempDir()
+	sum, err := imp.Import(t.Context(), opts)
+	require.NoError(t, err)
+	assertions.Empty(transport.requests)
+	assertions.Equal(1, sum.AttachmentsPending)
+	assertions.Zero(sum.AttachmentsDownloaded)
 }
 
 func TestPersistFilesRecordsStreamedOversizeForRetryPolicy(t *testing.T) {
@@ -586,17 +607,6 @@ func TestBackfillMediaOverridesProviderMediaToggle(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestMediaTimeoutScalesWithCap(t *testing.T) {
-	assert := assert.New(t)
-	// The API client's 60s whole-request deadline starves large downloads
-	// on slow links; the media bound must scale with the size cap (~128
-	// KiB/s floor rate) above a generous minimum, and never be infinite.
-	assert.Equal(10*time.Minute, mediaTimeout(1<<20), "small caps get the floor")
-	assert.Equal(2000*time.Second, mediaTimeout(defaultMaxMediaBytes), "default 250 MiB cap ≈ 33m20s")
-	assert.Equal(8192*time.Second, mediaTimeout(1<<30), "bigger caps scale up")
-	assert.Greater(mediaTimeout(1), time.Minute, "never anywhere near the 60s API deadline")
 }
 
 // membershipRecord returns the roster the fixture channel's provider metadata

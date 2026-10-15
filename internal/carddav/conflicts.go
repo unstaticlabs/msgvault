@@ -1,12 +1,14 @@
 package carddav
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"time"
 
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/vcard"
 )
 
 type ResolutionChoice string
@@ -85,7 +87,7 @@ func (s *Service) ListConflicts(ctx context.Context) ([]store.CardDAVConflict, e
 	if s == nil || s.store == nil {
 		return nil, errors.New("CardDAV service is not configured")
 	}
-	return s.store.ListCardDAVConflictsContext(ctx, true)
+	return s.store.ListCardDAVConflictsContext(ctx, true, store.AllCardDAVAccounts)
 }
 
 func (s *Service) GetConflict(ctx context.Context, id int64) (*store.CardDAVConflict, error) {
@@ -106,9 +108,14 @@ func (s *Service) ResolveConflict(ctx context.Context, id int64, choice Resoluti
 	if choice != ResolutionKeepLocal && choice != ResolutionKeepRemote {
 		return ErrInvalidResolutionChoice
 	}
-	if s == nil || s.store == nil || s.client == nil || id <= 0 {
+	if s == nil || s.store == nil || s.remote == nil || id <= 0 {
 		return errors.New("CardDAV service is not configured")
 	}
+	ctx, release, err := s.conflictPersonOperation(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
 	conflict, err := s.store.GetCardDAVConflictContext(ctx, id)
 	if err != nil {
 		return err
@@ -117,7 +124,7 @@ func (s *Service) ResolveConflict(ctx context.Context, id int64, choice Resoluti
 		return store.ErrCardDAVConflictStale
 	}
 	if choice == ResolutionKeepRemote {
-		operationCtx, cancel := context.WithTimeout(ctx, s.client.operationTimeout)
+		operationCtx, cancel := context.WithTimeout(ctx, s.operationTimeout())
 		defer cancel()
 		remote, tombstone, fetchErr := s.fetchCanonical(operationCtx, conflict.Href)
 		if fetchErr != nil {
@@ -128,7 +135,7 @@ func (s *Service) ResolveConflict(ctx context.Context, id int64, choice Resoluti
 			return store.ErrCardDAVConflictStale
 		}
 		_, err = s.store.ResolveCardDAVConflictRemoteContext(operationCtx, store.CardDAVConflictRemoteResolution{
-			ConflictID: conflict.ID, ExpectedMappingRevision: conflict.MappingRevision,
+			ConflictID: conflict.ID, ExpectedMappingRevision: conflict.MappingRevision, ExpectedPersonID: conflictGuardPersonID(operationCtx),
 			Remote: remote, RemoteTombstone: tombstone,
 		})
 		if err != nil {
@@ -238,7 +245,7 @@ func (s *Service) recordPublicationConflict(
 			return err
 		}
 		if snapshot.Fingerprint != pending.LocalHash {
-			books, err := s.store.ListCardDAVAddressBooksContext(ctx)
+			books, err := s.scopedBooks(ctx)
 			if err != nil {
 				return err
 			}
@@ -258,8 +265,8 @@ func (s *Service) recordPublicationConflict(
 	}
 	capture := store.CardDAVConflictCapture{
 		AddressBookID: mapping.AddressBookID, Href: mapping.Href,
-		ExpectedMappingRevision: mapping.MappingRevision,
-		BaseLocalHash:           mapping.LocalHash, LocalHash: localHash,
+		ExpectedMappingRevision: mapping.MappingRevision, ExpectedPersonID: conflictGuardPersonID(ctx),
+		BaseLocalHash: mapping.LocalHash, LocalHash: localHash,
 		BaseRemoteHash: mapping.RemoteSemanticHash, BaseRemoteETag: mapping.RemoteETag,
 		LocalBody: localBody, LocalTombstone: localTombstone,
 		RemoteETag: remote.RemoteETag, RemoteBody: remote.RemoteBody,
@@ -281,6 +288,9 @@ func (s *Service) prepareMappingConflict(
 	ctx context.Context, book store.CardDAVAddressBook, mapping store.CardDAVResource,
 	remote *store.CardDAVRemoteResource, remoteTombstone bool,
 ) (store.CardDAVConflictCapture, bool, error) {
+	if id := conflictGuardPersonID(ctx); id != 0 && (mapping.PersonID == nil || *mapping.PersonID != id) {
+		return store.CardDAVConflictCapture{}, false, store.ErrCardDAVReviewStale
+	}
 	if mapping.MappingStatus != store.CardDAVMappingMapped {
 		return store.CardDAVConflictCapture{}, false, nil
 	}
@@ -289,9 +299,35 @@ func (s *Service) prepareMappingConflict(
 	if conflictErr != nil && !errors.Is(conflictErr, store.ErrCardDAVConflictNotFound) {
 		return store.CardDAVConflictCapture{}, false, conflictErr
 	}
+	remoteChanged := remoteTombstone || remote.SemanticHash != mapping.RemoteSemanticHash
+	if !unresolved && !remoteChanged {
+		return store.CardDAVConflictCapture{}, false, nil
+	}
 	localTombstone := mapping.PersonID == nil || (existingConflict != nil && existingConflict.LocalTombstone)
 	localHash := mapping.LocalHash
 	var localBody []byte
+	if mapping.PersonID != nil && !localTombstone {
+		snapshot, err := s.store.LoadPersonVCardSnapshotContext(ctx, *mapping.PersonID)
+		if err != nil {
+			return store.CardDAVConflictCapture{}, false, err
+		}
+		localHash = snapshot.Fingerprint
+	}
+	localChanged := localTombstone || localHash != mapping.LocalHash
+	unsafe := false
+	if !unresolved && !localChanged && remoteChanged && !remoteTombstone {
+		var err error
+		unsafe, err = s.store.CardDAVRemoteUpdateNeedsConflictContext(ctx, book.ID, mapping.Href, *remote)
+		if err != nil {
+			return store.CardDAVConflictCapture{}, false, err
+		}
+	}
+	if !unresolved && !unsafe && (!localChanged || !remoteChanged) {
+		return store.CardDAVConflictCapture{}, false, nil
+	}
+	if !unresolved && localTombstone && remoteTombstone {
+		return store.CardDAVConflictCapture{}, false, nil
+	}
 	if mapping.PersonID != nil && !localTombstone {
 		person, err := s.store.GetPersonContext(ctx, *mapping.PersonID)
 		if err != nil {
@@ -302,14 +338,6 @@ func (s *Service) prepareMappingConflict(
 			return store.CardDAVConflictCapture{}, false, err
 		}
 		localBody, localHash = body, hash
-	}
-	localChanged := localTombstone || localHash != mapping.LocalHash
-	remoteChanged := remoteTombstone || remote.SemanticHash != mapping.RemoteSemanticHash
-	if !unresolved && (!localChanged || !remoteChanged) {
-		return store.CardDAVConflictCapture{}, false, nil
-	}
-	if !unresolved && localTombstone && remoteTombstone {
-		return store.CardDAVConflictCapture{}, false, nil
 	}
 	if !unresolved && !localTombstone && !remoteTombstone {
 		localSemanticHash, err := SemanticHash(localBody)
@@ -323,8 +351,8 @@ func (s *Service) prepareMappingConflict(
 	}
 	capture := store.CardDAVConflictCapture{
 		AddressBookID: book.ID, Href: mapping.Href,
-		ExpectedMappingRevision: mapping.MappingRevision,
-		BaseLocalHash:           mapping.LocalHash, LocalHash: localHash,
+		ExpectedMappingRevision: mapping.MappingRevision, ExpectedPersonID: conflictGuardPersonID(ctx),
+		BaseLocalHash: mapping.LocalHash, LocalHash: localHash,
 		BaseRemoteHash: mapping.RemoteSemanticHash, BaseRemoteETag: mapping.RemoteETag,
 		LocalBody: localBody, LocalTombstone: localTombstone,
 		RemoteTombstone: remoteTombstone,
@@ -349,8 +377,19 @@ func (s *Service) prepareMappingConflict(
 func (s *Service) resolveConflictKeepLocal(
 	ctx context.Context, conflict *store.CardDAVConflict,
 ) error {
-	operationCtx, cancel := context.WithTimeout(ctx, s.client.operationTimeout)
+	operationCtx, cancel := context.WithTimeout(ctx, s.operationTimeout())
 	defer cancel()
+	if len(conflict.LocalMutationIntent) > 0 {
+		pending, err := conflict.LocalMutationPublication()
+		if err != nil {
+			return err
+		}
+		if personID := conflictGuardPersonID(operationCtx); personID != 0 && pending.PersonID != personID {
+			return store.ErrCardDAVReviewStale
+		}
+		pending.RecoveryOnly = true
+		return s.executeMutation(operationCtx, pending)
+	}
 	remote, tombstone, err := s.fetchCanonical(operationCtx, conflict.Href)
 	if err != nil {
 		return err
@@ -392,15 +431,42 @@ func (s *Service) resolveConflictKeepLocal(
 		_, err = s.store.SweepResolvedCardDAVConflictsContext(operationCtx, time.Now())
 		return err
 	}
+	if conflict.ApprovedConflictRevision != nil && (tombstone != conflict.RemoteTombstone || remote.RemoteETag != conflict.RemoteETag) {
+		source, err := s.store.LoadCardDAVConflictReviewSourceContext(operationCtx, conflict.ID)
+		if err != nil {
+			return err
+		}
+		// A prepared mutation already owns immutable evidence. Its ambiguous
+		// response must still use the existing read-only recovery path.
+		if id := conflictGuardPersonID(operationCtx); id != 0 && source.Person.ID != id {
+			return store.ErrCardDAVReviewStale
+		}
+		if source.Publication == nil || source.Publication.PendingOperation == "" {
+			capture, needed, err := s.prepareMappingConflict(operationCtx, source.Book, *source.Resource, &remote, tombstone)
+			if err != nil {
+				return err
+			}
+			if needed {
+				if _, err := s.store.RecordCardDAVConflictContext(operationCtx, capture); err != nil {
+					return err
+				}
+			}
+			return store.ErrCardDAVReviewStale
+		}
+	}
 	semanticHash, err := SemanticHash(conflict.LocalBody)
+	if err != nil {
+		return err
+	}
+	metadata, err := s.conflictLocalEnvelopeMetadata(operationCtx, conflict)
 	if err != nil {
 		return err
 	}
 	prepared, err := s.store.PrepareCardDAVConflictLocalContext(operationCtx,
 		store.CardDAVConflictLocalPlan{
-			ConflictID: conflict.ID, ExpectedMappingRevision: conflict.MappingRevision,
+			ConflictID: conflict.ID, ExpectedMappingRevision: conflict.MappingRevision, ExpectedPersonID: conflictGuardPersonID(operationCtx),
 			RemoteETag: remote.RemoteETag, RemoteTombstone: tombstone,
-			OutgoingSemanticHash: semanticHash,
+			OutgoingSemanticHash: semanticHash, OutgoingEnvelopeMetadata: metadata,
 		})
 	if err != nil {
 		return err
@@ -410,4 +476,29 @@ func (s *Service) resolveConflictKeepLocal(
 	}
 	_, err = s.store.SweepResolvedCardDAVConflictsContext(operationCtx, time.Now())
 	return err
+}
+
+// conflictLocalEnvelopeMetadata renders the publication envelope again so an
+// unreviewed keep_local records which card lines it owns, as a publish does.
+func (s *Service) conflictLocalEnvelopeMetadata(ctx context.Context, conflict *store.CardDAVConflict) ([]byte, error) {
+	if len(conflict.LocalEnvelopeMetadata) > 0 {
+		return nil, nil
+	}
+	source, err := s.store.LoadCardDAVConflictReviewSourceContext(ctx, conflict.ID)
+	if err != nil {
+		return nil, err
+	}
+	envelope, err := s.preparePublicationEnvelope(source)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(envelope.StoredBody, conflict.LocalBody) {
+		return nil, nil
+	}
+	return vcard.MarshalResourceMetadata(envelope)
+}
+
+func conflictGuardPersonID(ctx context.Context) int64 {
+	id, _ := ctx.Value(conflictGuardKey{}).(int64)
+	return id
 }

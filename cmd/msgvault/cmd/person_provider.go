@@ -3,21 +3,27 @@ package cmd
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/peoplesweep"
+	"go.kenn.io/msgvault/internal/personenrollment"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
+	"go.kenn.io/msgvault/pkg/client/generated"
 )
 
 const (
@@ -29,11 +35,12 @@ const (
 type personProviderStore interface {
 	EnsurePersonInferenceProfile(ctx context.Context, profile peoplesweep.ProviderProfile) (bool, error)
 	ListPersonInferenceProfiles(ctx context.Context) ([]peoplesweep.ProviderProfile, error)
-	GrantPersonInferenceConsent(ctx context.Context, fingerprint, actor string) (*store.PersonInferenceConsent, bool, error)
+	GrantPersonInferenceConsent(ctx context.Context, fingerprint, actor string) (*store.ProviderConsent, bool, error)
 	RevokePersonInferenceConsent(ctx context.Context, fingerprint, actor string) (bool, error)
 	RevokeAllPersonInferenceConsents(ctx context.Context, actor string) (int64, error)
-	GetPersonInferenceConsentStatus(ctx context.Context, fingerprint string) (*store.PersonInferenceConsentStatus, error)
+	GetPersonInferenceConsentStatus(ctx context.Context, fingerprint string) (*store.ProviderConsentStatus, error)
 	HasSuccessfulPersonInferenceCheck(ctx context.Context, fingerprint string) (bool, error)
+	InvalidatePersonInferenceCheck(ctx context.Context, fingerprint string) (bool, error)
 	RecordPersonInferenceCheck(ctx context.Context, check store.PersonInferenceCheck) error
 	GetPersonInferenceCheck(ctx context.Context, fingerprint string) (*store.PersonInferenceCheck, error)
 	HasActivePersonInferenceConsent(ctx context.Context, fingerprint string) (bool, error)
@@ -41,10 +48,10 @@ type personProviderStore interface {
 	ListPersonSweepAttempts(ctx context.Context, filter peoplesweep.AttemptFilter) ([]peoplesweep.AttemptSummary, error)
 	EnsurePersonSemanticEmbeddingProfile(ctx context.Context, profile vector.SemanticPersonEmbeddingProfile) (bool, error)
 	ListPersonSemanticEmbeddingProfiles(ctx context.Context) ([]vector.SemanticPersonEmbeddingProfile, error)
-	GrantPersonSemanticEmbeddingConsent(ctx context.Context, fingerprint, actor string) (*store.PersonSemanticEmbeddingConsent, bool, error)
+	GrantPersonSemanticEmbeddingConsent(ctx context.Context, fingerprint, actor string) (*store.ProviderConsent, bool, error)
 	RevokePersonSemanticEmbeddingConsent(ctx context.Context, fingerprint, actor string) (bool, error)
 	RevokeAllPersonSemanticEmbeddingConsents(ctx context.Context, actor string) (int64, error)
-	GetPersonSemanticEmbeddingConsentStatus(ctx context.Context, fingerprint string) (*store.PersonSemanticEmbeddingConsentStatus, error)
+	GetPersonSemanticEmbeddingConsentStatus(ctx context.Context, fingerprint string) (*store.ProviderConsentStatus, error)
 	HasActivePersonSemanticEmbeddingConsent(ctx context.Context, fingerprint string) (bool, error)
 }
 
@@ -58,23 +65,25 @@ type personProviderCodexClient interface {
 }
 
 type personProviderCommandDeps struct {
+	bind                       func(personProviderCommandDeps, context.Context) personProviderCommandDeps
 	config                     func() peoplesweep.Config
 	vectorConfig               func() vector.Config
 	openStore                  func() (personProviderStore, func(), error)
 	openReadStore              func() (personProviderStore, func(), error)
-	newChecker                 func(peoplesweep.Config, personProviderStore) (personProviderChecker, error)
-	newCodexClient             func(peoplesweep.Config) (personProviderCodexClient, error)
+	newChecker                 func(peoplesweep.Config, personProviderStore, personProviderSetupDeps) (personProviderChecker, error)
+	newCodexClient             func(peoplesweep.Config, personProviderSetupDeps) (personProviderCodexClient, error)
 	isDaemonSubprocess         func() bool
 	providerStoreOwnedByDaemon func(context.Context) (bool, error)
 	// daemonAliveForRestartNotice reports whether any daemon process in
 	// this machine's data dir is alive, regardless of API compatibility.
-	// It backs only the restart guidance for local config mutations: a
-	// daemon left running across a CLI upgrade fails the compatibility
-	// check yet its scheduled sweeps still keep the startup config.
+	// Local config mutations use it for restart guidance; removal refuses a
+	// daemon left running across a CLI upgrade that fails the compatibility
+	// check because its scheduled sweeps still keep the startup config.
 	daemonAliveForRestartNotice func(context.Context) (bool, error)
 	remoteConfigured            func() bool
 	lookupEnv                   peoplesweep.CredentialLookup
 	proxy                       func(*cobra.Command, []string, map[string]string) error
+	removeWithDaemon            func(context.Context, string, string) error
 	readConfigFile              func() (config.ConfigFile, error)
 	configHomeDir               func() string
 	editConfigTables            func(string, []config.TableEdit) (config.ConfigFile, error)
@@ -83,10 +92,13 @@ type personProviderCommandDeps struct {
 }
 
 type personProviderStatusOutput struct {
-	Profile        peoplesweep.ProviderProfile         `json:"profile"`
-	Check          *store.PersonInferenceCheck         `json:"check,omitempty"`
-	Consent        store.PersonInferenceConsentStatus  `json:"consent"`
-	CodexIsolation *personProviderCodexIsolationStatus `json:"codex_isolation,omitempty"`
+	Name                string                              `json:"name,omitempty"`
+	Profile             peoplesweep.ProviderProfile         `json:"profile"`
+	Check               *store.PersonInferenceCheck         `json:"check,omitzero"`
+	Consent             store.ProviderConsentStatus         `json:"consent"`
+	StaleProgramCheck   bool                                `json:"stale_program_check,omitzero"`
+	StaleProgramConsent bool                                `json:"stale_program_consent,omitzero"`
+	CodexIsolation      *personProviderCodexIsolationStatus `json:"codex_isolation,omitzero"`
 }
 
 type personProviderUseOutput struct {
@@ -156,8 +168,8 @@ type personProviderRevokeFingerprintOutput struct {
 }
 
 type personSemanticProviderStatusOutput struct {
-	Profile vector.SemanticPersonEmbeddingProfile      `json:"profile"`
-	Consent store.PersonSemanticEmbeddingConsentStatus `json:"consent"`
+	Profile vector.SemanticPersonEmbeddingProfile `json:"profile"`
+	Consent store.ProviderConsentStatus           `json:"consent"`
 }
 
 type personSemanticProviderStatusesOutput struct {
@@ -169,45 +181,98 @@ type personSemanticProviderRevokeAllOutput struct {
 	Profiles []personSemanticProviderStatusOutput `json:"profiles"`
 }
 
-func defaultPersonProviderCommandDeps() personProviderCommandDeps {
+func defaultPersonProviderCommandDeps(contexts ...context.Context) personProviderCommandDeps {
 	setup := defaultPersonProviderSetupDeps()
 	setup.openCredentialStore = func() (peoplesweep.CredentialStore, error) {
-		if cfg == nil {
-			return nil, errors.New("configuration is unavailable")
-		}
-		return peoplesweep.NewFileCredentialStore(cfg.TokensDir()), nil
+		return nil, errors.New("configuration is unavailable")
 	}
-	return personProviderCommandDeps{
-		config: func() peoplesweep.Config {
-			if cfg == nil {
-				return peoplesweep.Config{}
+	deps := personProviderCommandDeps{
+		bind: func(deps personProviderCommandDeps, ctx context.Context) personProviderCommandDeps {
+			state := invocationFromContext(ctx)
+			var currentCfg *config.Config
+			if state != nil && state.cfg != nil {
+				currentCfg = state.cfg
 			}
-			return cfg.People.Sweep
+			deps.setup.codexAuthHome = ""
+			if currentCfg != nil {
+				deps.setup.codexAuthHome = filepath.Join(currentCfg.TokensDir(), "people-codex")
+			}
+			deps.config = func() peoplesweep.Config {
+				if currentCfg == nil {
+					return peoplesweep.Config{}
+				}
+				return currentCfg.People.Sweep
+			}
+			deps.vectorConfig = func() vector.Config {
+				if currentCfg == nil {
+					return vector.Config{}
+				}
+				return currentCfg.Vector
+			}
+			deps.openReadStore = func() (personProviderStore, func(), error) {
+				if currentCfg == nil {
+					return nil, nil, errors.New("configuration is unavailable")
+				}
+				st, err := store.OpenReadOnly(currentCfg.DatabaseDSN())
+				if err != nil {
+					return nil, nil, err
+				}
+				return st, func() { _ = st.Close() }, nil
+			}
+			deps.openStore = func() (personProviderStore, func(), error) {
+				return openWritableStoreAndInitForInvocation(state)
+			}
+			deps.setup.openCredentialStore = func() (peoplesweep.CredentialStore, error) {
+				if currentCfg == nil {
+					return nil, errors.New("configuration is unavailable")
+				}
+				return peoplesweep.NewStoredCredentials(currentCfg.TokensDir()), nil
+			}
+			deps.remoteConfigured = func() bool { return IsRemoteMode(state) }
+			deps.readConfigFile = func() (config.ConfigFile, error) {
+				if currentCfg == nil {
+					return config.ConfigFile{}, errors.New("configuration is unavailable")
+				}
+				return config.ReadConfigFile(currentCfg.ConfigFilePath())
+			}
+			deps.configHomeDir = func() string {
+				if currentCfg == nil {
+					return ""
+				}
+				return currentCfg.HomeDir
+			}
+			deps.editConfigTables = func(ifMatch string, edits []config.TableEdit) (config.ConfigFile, error) {
+				if currentCfg == nil {
+					return config.ConfigFile{}, errors.New("configuration is unavailable")
+				}
+				return config.EditConfigTables(currentCfg.ConfigFilePath(), ifMatch, edits)
+			}
+			deps.restoreConfigFile = func(published, before config.ConfigFile) (config.ConfigFile, error) {
+				if currentCfg == nil {
+					return config.ConfigFile{}, errors.New("configuration is unavailable")
+				}
+				return config.RestoreConfigFile(currentCfg.ConfigFilePath(), published, before)
+			}
+			return deps
+		},
+		config: func() peoplesweep.Config {
+			return peoplesweep.Config{}
 		},
 		vectorConfig: func() vector.Config {
-			if cfg == nil {
-				return vector.Config{}
-			}
-			return cfg.Vector
+			return vector.Config{}
 		},
 		openStore: func() (personProviderStore, func(), error) {
-			return openWritableStoreAndInit()
+			return nil, nil, errors.New("configuration is unavailable")
 		},
 		openReadStore: func() (personProviderStore, func(), error) {
-			if cfg == nil {
-				return nil, nil, errors.New("configuration is unavailable")
-			}
-			st, err := store.OpenReadOnly(cfg.DatabaseDSN())
-			if err != nil {
-				return nil, nil, err
-			}
-			return st, func() { _ = st.Close() }, nil
+			return nil, nil, errors.New("configuration is unavailable")
 		},
-		newChecker: func(config peoplesweep.Config, st personProviderStore) (personProviderChecker, error) {
-			registry, err := peoplesweep.NewDriverRegistry(
+		newChecker: func(config peoplesweep.Config, st personProviderStore, setup personProviderSetupDeps) (personProviderChecker, error) {
+			registry, err := peoplesweep.NewDriverRegistryWithCodexAuthHome(
 				http.DefaultClient,
 				peoplesweep.NewCodexCommandStarter(),
 				peoplesweep.NewReleasedCodexIsolationGate(),
+				setup.codexAuthHome,
 			)
 			if err != nil {
 				return nil, err
@@ -230,15 +295,19 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 				peoplesweep.NewCredentialResolver(credentialStore, os.LookupEnv),
 			)
 		},
-		newCodexClient: func(config peoplesweep.Config) (personProviderCodexClient, error) {
+		newCodexClient: func(config peoplesweep.Config, setup personProviderSetupDeps) (personProviderCodexClient, error) {
+			if !peoplesweep.CodexReleaseAvailable() {
+				return nil, peoplesweep.ErrCodexIsolationUnreleased
+			}
 			_, provider, err := config.ActiveProviderConfig()
 			if err != nil {
 				return nil, err
 			}
-			registry, err := peoplesweep.NewDriverRegistry(
+			registry, err := peoplesweep.NewDriverRegistryWithCodexAuthHome(
 				http.DefaultClient,
 				peoplesweep.NewCodexCommandStarter(),
 				peoplesweep.NewReleasedCodexIsolationGate(),
+				setup.codexAuthHome,
 			)
 			if err != nil {
 				return nil, err
@@ -255,23 +324,26 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 		},
 		isDaemonSubprocess: isDaemonCLISubprocess,
 		providerStoreOwnedByDaemon: func(ctx context.Context) (bool, error) {
-			if IsRemoteMode() {
+			state := invocationFromContext(ctx)
+			if IsRemoteMode(state) {
 				return true, nil
 			}
-			if cfg == nil {
+			if state == nil || state.cfg == nil {
 				return false, errors.New("configuration is unavailable")
 			}
-			runtime, err := findCompatibleDaemonRuntimeContext(ctx, cfg.Data.DataDir)
+			runtime, err := findCompatibleDaemonRuntimeContext(ctx, state.cfg.Data.DataDir)
 			return runtime != nil, err
 		},
 		daemonAliveForRestartNotice: func(ctx context.Context) (bool, error) {
-			if cfg == nil {
+			state := invocationFromContext(ctx)
+			if state == nil || state.cfg == nil {
 				return false, errors.New("configuration is unavailable")
 			}
-			return findAnyDaemonRuntimeContext(ctx, cfg.Data.DataDir) != nil, nil
+			return findAnyDaemonRuntimeContext(ctx, state.cfg.Data.DataDir) != nil, nil
 		},
+		removeWithDaemon: removePersonProviderWithDaemon,
 		lookupEnv:        os.LookupEnv,
-		remoteConfigured: IsRemoteMode,
+		remoteConfigured: func() bool { return false },
 		proxy: func(command *cobra.Command, args []string, env map[string]string) error {
 			if len(env) == 0 {
 				return runDaemonCLICommandHTTPFromCobra(command, args)
@@ -279,31 +351,35 @@ func defaultPersonProviderCommandDeps() personProviderCommandDeps {
 			return runDaemonCLICommandHTTPFromCobraWithEnv(command, args, env)
 		},
 		readConfigFile: func() (config.ConfigFile, error) {
-			if cfg == nil {
-				return config.ConfigFile{}, errors.New("configuration is unavailable")
-			}
-			return config.ReadConfigFile(cfg.ConfigFilePath())
+			return config.ConfigFile{}, errors.New("configuration is unavailable")
 		},
 		configHomeDir: func() string {
-			if cfg == nil {
-				return ""
-			}
-			return cfg.HomeDir
+			return ""
 		},
 		editConfigTables: func(ifMatch string, edits []config.TableEdit) (config.ConfigFile, error) {
-			if cfg == nil {
-				return config.ConfigFile{}, errors.New("configuration is unavailable")
-			}
-			return config.EditConfigTables(cfg.ConfigFilePath(), ifMatch, edits)
+			return config.ConfigFile{}, errors.New("configuration is unavailable")
 		},
 		restoreConfigFile: func(published, before config.ConfigFile) (config.ConfigFile, error) {
-			if cfg == nil {
-				return config.ConfigFile{}, errors.New("configuration is unavailable")
-			}
-			return config.RestoreConfigFile(cfg.ConfigFilePath(), published, before)
+			return config.ConfigFile{}, errors.New("configuration is unavailable")
 		},
 		setup: setup,
 	}
+	if len(contexts) > 0 {
+		return personProviderDepsForContext(contexts[0], deps)
+	}
+	return deps
+}
+
+func defaultPersonProviderCommandDepsForContext(ctx context.Context) personProviderCommandDeps {
+	deps := defaultPersonProviderCommandDeps()
+	return personProviderDepsForContext(ctx, deps)
+}
+
+func personProviderDepsForContext(ctx context.Context, deps personProviderCommandDeps) personProviderCommandDeps {
+	if invocationFromContext(ctx) == nil || deps.bind == nil {
+		return deps
+	}
+	return deps.bind(deps, ctx)
 }
 
 func newPersonProviderCommand(deps personProviderCommandDeps) *cobra.Command {
@@ -313,12 +389,14 @@ func newPersonProviderCommand(deps personProviderCommandDeps) *cobra.Command {
 	}
 	provider.AddCommand(
 		newPersonProviderAddCommand(deps),
+		newPersonProviderCodexEnrollCommand(defaultCodexEnrollDeps()),
 		newPersonProviderSetCommand(deps),
 		newPersonProviderRemoveCommand(deps),
 		newPersonProviderListCommand(deps),
 		newPersonProviderUseCommand(deps),
 		newPersonProviderStatusCommand(deps),
 		newPersonProviderConsentCommand(deps),
+		newPersonProviderReverifyCommand(deps),
 		newPersonProviderRevokeCommand(deps),
 		newPersonProviderHistoryCommand(deps),
 		newPersonProviderCheckCommand(deps),
@@ -326,6 +404,34 @@ func newPersonProviderCommand(deps personProviderCommandDeps) *cobra.Command {
 		newPersonProviderModelsCommand(deps),
 	)
 	return provider
+}
+
+func newPersonProviderReverifyCommand(deps personProviderCommandDeps) *cobra.Command {
+	var confirmed bool
+	var jsonOutput bool
+	command := &cobra.Command{
+		Use:   "reverify [name]",
+		Short: "Re-run the exact provider check and consent",
+		Args:  optionalPersonProviderNameArgs,
+		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
+			if !deps.isDaemonSubprocess() {
+				return deps.proxy(command, args, nil)
+			}
+			runDeps := deps
+			if len(args) == 1 {
+				var err error
+				runDeps, err = personProviderDepsForName(deps, args[0])
+				if err != nil {
+					return err
+				}
+			}
+			return runPersonProviderReverify(command, runDeps, confirmed, jsonOutput)
+		},
+	}
+	command.Flags().BoolVar(&confirmed, "yes", false, "Confirm the disclosed provider policy")
+	command.Flags().BoolVar(&jsonOutput, flagJSON, false, "Output structured JSON")
+	return command
 }
 
 func exactPersonProviderNameArgs(command *cobra.Command, args []string) error {
@@ -354,6 +460,7 @@ func newPersonProviderStatusCommand(deps personProviderCommandDeps) *cobra.Comma
 		Short: "Show the exact people inference policy and consent state",
 		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
 			}
@@ -363,7 +470,7 @@ func newPersonProviderStatusCommand(deps personProviderCommandDeps) *cobra.Comma
 					return errors.New("a named people provider cannot be combined with --all or --semantic-embeddings")
 				}
 				var err error
-				runDeps, err = personProviderDepsForName(deps, args[0], false)
+				runDeps, err = personProviderDepsForName(deps, args[0])
 				if err != nil {
 					return err
 				}
@@ -385,6 +492,7 @@ func newPersonProviderListCommand(deps personProviderCommandDeps) *cobra.Command
 		Short: "List named people inference provider profiles",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
 			}
@@ -402,6 +510,7 @@ func newPersonProviderUseCommand(deps personProviderCommandDeps) *cobra.Command 
 		Short: "Select an exactly checked people inference provider profile",
 		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			return runPersonProviderUse(command, deps, args[0], jsonOutput)
 		},
 	}
@@ -416,6 +525,7 @@ func newPersonProviderRemoveCommand(deps personProviderCommandDeps) *cobra.Comma
 		Short: "Remove a named people inference provider profile",
 		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			return runPersonProviderRemove(command, deps, args[0], jsonOutput)
 		},
 	}
@@ -445,7 +555,7 @@ func runPersonProviderList(
 		})
 	}
 	if jsonOutput {
-		return json.NewEncoder(command.OutOrStdout()).Encode(output)
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), output, json.Deterministic(true))
 	}
 	for _, item := range output.Profiles {
 		selected := ""
@@ -483,7 +593,8 @@ func rejectRemotePersonProviderMutation(deps personProviderCommandDeps, operatio
 // compatibility-sensitive because it routes store operations (nothing may
 // be proxied to an API-incompatible daemon), while a daemon left live across
 // a CLI upgrade fails that compatibility check yet still serves stale
-// startup config, so the restart notice falls back to the compatibility-
+// startup config. Removal must reject directStore && daemonRunning; other
+// mutations use restart guidance from the compatibility-
 // agnostic liveness probe. With no ownership signal at all, remove's
 // existing convention is preserved: assume the store is daemon-owned.
 func personProviderMutationScope(
@@ -652,10 +763,10 @@ func runPersonProviderSet(
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(command.OutOrStdout()).Encode(personProviderSetOutput{
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderSetOutput{
 			Name: name, Fingerprint: checkedProfile.Fingerprint, Checked: true,
 			DaemonRestartRequired: daemonRunning,
-		})
+		}, json.Deterministic(true))
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(),
 		"Updated and checked people provider profile %q; run `msgvault person provider consent %q --yes` to grant consent for the new policy.\n",
@@ -769,10 +880,10 @@ func runPersonProviderUse(
 		return err
 	}
 	if jsonOutput {
-		return json.NewEncoder(command.OutOrStdout()).Encode(personProviderUseOutput{
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderUseOutput{
 			Name: name, Fingerprint: profile.Fingerprint, Enabled: true,
 			DaemonRestartRequired: daemonRunning,
-		})
+		}, json.Deterministic(true))
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(), "Selected people provider profile %q.\n", name)
 	if daemonRunning {
@@ -794,14 +905,14 @@ func runPersonProviderRemove(
 	deps personProviderCommandDeps,
 	name string,
 	jsonOutput bool,
-) (retErr error) {
+) error {
 	if err := rejectRemotePersonProviderMutation(deps, "remove"); err != nil {
 		return err
 	}
 	if err := peoplesweep.ValidateProviderProfileName(name); err != nil {
 		return err
 	}
-	if deps.readConfigFile == nil || deps.editConfigTables == nil || deps.restoreConfigFile == nil {
+	if deps.readConfigFile == nil {
 		return errors.New("people provider config editing is unavailable")
 	}
 	before, err := deps.readConfigFile()
@@ -813,8 +924,32 @@ func runPersonProviderRemove(
 		return err
 	}
 	provider, exists := configured.Providers[name]
+	directStore, daemonRunning, err := personProviderMutationScope(command.Context(), deps)
+	if err != nil {
+		return err
+	}
+	if !directStore {
+		if deps.removeWithDaemon == nil {
+			return errors.New("people provider daemon removal is unavailable")
+		}
+		if err := deps.removeWithDaemon(command.Context(), name, before.ETag); err != nil {
+			return err
+		}
+		if !exists {
+			return writeUnconfiguredPersonProviderKeyRemoved(command, name, jsonOutput)
+		}
+		return writePersonProviderRemoved(command, name, true, jsonOutput)
+	}
 	if !exists {
-		return fmt.Errorf("people provider profile %q is not configured", name)
+		// Revoking every saved policy that used the key also covers a running
+		// one, so this needs no running-policy fingerprint.
+		return removeUnconfiguredPersonProviderKey(command, deps, name, jsonOutput)
+	}
+	if daemonRunning {
+		return errors.New("cannot identify the running people provider policy; stop the daemon before removing a profile")
+	}
+	if deps.editConfigTables == nil || deps.restoreConfigFile == nil {
+		return errors.New("people provider config editing is unavailable")
 	}
 	active := configured.Provider.Name == name
 	if active && configured.Enabled {
@@ -850,39 +985,25 @@ func runPersonProviderRemove(
 		return err
 	}
 	var credentials peoplesweep.CredentialStore
-	var deletionGuard peoplesweep.CredentialDeleteGuard
+	var credentialRevision string
 	if provider.Credential == peoplesweep.CredentialStored {
 		credentials, err = deps.setup.resolveCredentialStore()
 		if err != nil {
 			return err
 		}
-		deletionGuard, err = credentials.PreflightDelete(name)
+		var present bool
+		credentialRevision, present, err = credentials.Revision(name, provider.Endpoint)
+		if err == nil && !present {
+			err = fmt.Errorf("%w for profile %q", peoplesweep.ErrCredentialNotFound, name)
+		}
 		if err != nil {
 			return fmt.Errorf("preflight stored people provider credential deletion: %w", err)
-		}
-		defer func() {
-			if closeErr := deletionGuard.Close(); closeErr != nil {
-				retErr = errors.Join(retErr,
-					fmt.Errorf("close stored people provider credential deletion guard: %w", closeErr))
-			}
-		}()
-	}
-	directStore, daemonRunning, scopeErr := personProviderMutationScope(command.Context(), deps)
-	if scopeErr != nil {
-		return scopeErr
-	}
-	if !directStore {
-		if err := proxySavedPersonProviderRevoke(command, deps, name, profile.Fingerprint); err != nil {
-			return err
 		}
 	}
 	after, err := deps.editConfigTables(before.ETag, edits)
 	if err != nil {
 		if errors.Is(err, config.ErrConfigChanged) {
-			return rollbackUncertainPersonProviderRemove(err, deps, before, after, !directStore)
-		}
-		if !directStore {
-			return errors.Join(err, errors.New("exact people provider consent remains revoked after config conflict"))
+			return errors.Join(err, restoreRemovedPersonProviderConfig(deps, after, before))
 		}
 		return err
 	}
@@ -890,29 +1011,85 @@ func runPersonProviderRemove(
 		return errors.Join(cause, restoreRemovedPersonProviderConfig(deps, after, before))
 	}
 
-	if directStore {
-		st, cleanup, openErr := deps.openStore()
-		if openErr != nil {
-			return rollback(openErr)
-		}
-		defer cleanup()
-		if _, err := st.RevokePersonInferenceConsent(
-			command.Context(), profile.Fingerprint, personProviderConsentActor,
-		); err != nil {
-			return rollback(err)
-		}
+	st, cleanup, openErr := deps.openStore()
+	if openErr != nil {
+		return rollback(openErr)
+	}
+	defer cleanup()
+	if _, err := st.RevokePersonInferenceConsent(
+		command.Context(), profile.Fingerprint, personProviderConsentActor,
+	); err != nil {
+		return rollback(err)
+	}
+	if _, err := st.InvalidatePersonInferenceCheck(command.Context(), profile.Fingerprint); err != nil {
+		return rollback(err)
 	}
 	if provider.Credential == peoplesweep.CredentialStored {
-		if err := credentials.Delete(name, deletionGuard); err != nil {
+		if _, err := credentials.DeleteIfRevision(name, credentialRevision); err != nil {
 			restoreErr := restoreRemovedPersonProviderConfig(deps, after, before)
 			return errors.Join(err, restoreErr,
 				errors.New("exact people provider consent remains revoked"))
 		}
 	}
+	return writePersonProviderRemoved(command, name, false, jsonOutput)
+}
+
+// removeUnconfiguredPersonProviderKey deletes a stored key left behind when
+// its profile was removed from the config by other means. Nothing else can
+// delete it, and it would block adding a profile with the same name.
+func removeUnconfiguredPersonProviderKey(
+	command *cobra.Command, deps personProviderCommandDeps, name string, jsonOutput bool,
+) error {
+	credentials, err := deps.setup.resolveCredentialStore()
+	if err != nil {
+		return err
+	}
+	st, cleanup, err := deps.openStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	err = personenrollment.RemoveUnconfiguredKey(command.Context(), personenrollment.UnconfiguredKeyRemoval{
+		Name: name, Actor: personProviderConsentActor, Store: st, Credentials: credentials,
+		Unconfigured: func() (bool, error) {
+			current, err := deps.readConfigFile()
+			if err != nil {
+				return false, err
+			}
+			configured, err := personProviderConfigFromSnapshot(deps, current)
+			if err != nil {
+				return false, err
+			}
+			_, exists := configured.Providers[name]
+			return !exists, nil
+		},
+	})
+	if errors.Is(err, personenrollment.ErrProfileMissing) {
+		return fmt.Errorf("people provider profile %q is not configured", name)
+	}
+	if err != nil {
+		return fmt.Errorf("delete stored key of unconfigured people provider profile %q: %w", name, err)
+	}
+	return writeUnconfiguredPersonProviderKeyRemoved(command, name, jsonOutput)
+}
+
+func writeUnconfiguredPersonProviderKeyRemoved(command *cobra.Command, name string, jsonOutput bool) error {
 	if jsonOutput {
-		return json.NewEncoder(command.OutOrStdout()).Encode(personProviderRemoveOutput{
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderRemoveOutput{
+			Name: name, Removed: true,
+		}, json.Deterministic(true))
+	}
+	_, _ = fmt.Fprintf(command.OutOrStdout(),
+		"Deleted the stored key of unconfigured people provider profile %q and revoked consent for policies that used it.\n",
+		name)
+	return nil
+}
+
+func writePersonProviderRemoved(command *cobra.Command, name string, daemonRunning, jsonOutput bool) error {
+	if jsonOutput {
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderRemoveOutput{
 			Name: name, Removed: true, DaemonRestartRequired: daemonRunning,
-		})
+		}, json.Deterministic(true))
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(), "Removed people provider profile %q; audit history was retained.\n", name)
 	if daemonRunning {
@@ -931,17 +1108,38 @@ func restoreRemovedPersonProviderConfig(
 	return nil
 }
 
-func rollbackUncertainPersonProviderRemove(
-	cause error,
-	deps personProviderCommandDeps,
-	before, expected config.ConfigFile,
-	consentRevoked bool,
-) error {
-	cause = errors.Join(cause, restoreRemovedPersonProviderConfig(deps, expected, before))
-	if consentRevoked {
-		cause = errors.Join(cause, errors.New("exact people provider consent remains revoked"))
+// removePersonProviderWithDaemon uses the Settings operation so revocation can
+// include the policy captured by the daemon at startup. Never auto-start or
+// fall back to a local write if the owning daemon cannot perform the removal.
+func removePersonProviderWithDaemon(ctx context.Context, name, ifMatch string) error {
+	state := invocationFromContext(ctx)
+	if state == nil || state.cfg == nil {
+		return errors.New("configuration is unavailable")
 	}
-	return cause
+	currentCfg := state.cfg
+	runtime, err := findCompatibleDaemonRuntimeContext(ctx, currentCfg.Data.DataDir)
+	if err != nil {
+		return err
+	}
+	if runtime == nil {
+		return errors.New("people provider daemon is unavailable; retry after stopping or restarting it")
+	}
+	if err := probeLocalDaemonAuth(ctx, runtime, currentCfg); err != nil {
+		return err
+	}
+	client, err := localDaemonAPIClient(urlFromDaemonRuntime(runtime), currentCfg.Server.AuthenticationKey())
+	if err != nil {
+		return err
+	}
+	response, err := client.DeleteSettingsPeopleInferenceProviderWithResponse(ctx,
+		&generated.DeleteSettingsPeopleInferenceProviderRequestOptions{
+			PathParams: &generated.DeleteSettingsPeopleInferenceProviderPath{Name: name},
+			Header:     &generated.DeleteSettingsPeopleInferenceProviderHeaders{IfMatch: ifMatch},
+		})
+	if err != nil || response == nil || response.StatusCode != http.StatusOK {
+		return fmt.Errorf("remove people provider: %w", daemonclient.APIResponseError(response, err))
+	}
+	return nil
 }
 
 func newPersonProviderConsentCommand(deps personProviderCommandDeps) *cobra.Command {
@@ -953,6 +1151,7 @@ func newPersonProviderConsentCommand(deps personProviderCommandDeps) *cobra.Comm
 		Short: "Consent to the exact people inference policy",
 		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
 			}
@@ -962,7 +1161,7 @@ func newPersonProviderConsentCommand(deps personProviderCommandDeps) *cobra.Comm
 					return errors.New("a named people provider cannot be combined with --semantic-embeddings")
 				}
 				var err error
-				runDeps, err = personProviderDepsForName(deps, args[0], false)
+				runDeps, err = personProviderDepsForName(deps, args[0])
 				if err != nil {
 					return err
 				}
@@ -988,6 +1187,7 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 		Short: "Revoke consent for the exact people inference policy",
 		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			if fingerprint != "" {
 				if err := validatePersonProviderFingerprint(fingerprint); err != nil {
 					return err
@@ -1013,7 +1213,7 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 					return errors.New("a named people provider cannot be combined with --all or --semantic-embeddings")
 				}
 				var err error
-				runDeps, err = personProviderDepsForName(deps, args[0], false)
+				runDeps, err = personProviderDepsForName(deps, args[0])
 				if err != nil {
 					return err
 				}
@@ -1035,7 +1235,7 @@ func newPersonProviderRevokeCommand(deps personProviderCommandDeps) *cobra.Comma
 			if fingerprint != "" {
 				return errors.New("--fingerprint requires one named people provider revoke")
 			}
-			return runPersonProviderRevoke(command, runDeps, all, jsonOutput, semanticEmbeddings)
+			return runPersonProviderRevoke(command, runDeps, all, jsonOutput, semanticEmbeddings, ifFingerprint != "")
 		},
 	}
 	command.Flags().BoolVar(&all, "all", false, "Revoke consent for every stored provider policy")
@@ -1070,6 +1270,7 @@ func newPersonProviderHistoryCommand(deps personProviderCommandDeps) *cobra.Comm
 		Short: "Show redacted sweep history for an optional provider profile",
 		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			if !deps.isDaemonSubprocess() {
 				return deps.proxy(command, args, nil)
 			}
@@ -1123,6 +1324,7 @@ func newPersonProviderCheckCommand(deps personProviderCommandDeps) *cobra.Comman
 		Short: "Run a fixed synthetic request through the people inference provider",
 		Args:  optionalPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			if !deps.isDaemonSubprocess() {
 				if deps.providerStoreOwnedByDaemon != nil {
 					owned, err := deps.providerStoreOwnedByDaemon(command.Context())
@@ -1160,6 +1362,7 @@ func newPersonProviderLoginCommand(deps personProviderCommandDeps) *cobra.Comman
 		Short: "Start Codex ChatGPT device-code login",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			return runPersonProviderLogin(command, deps, jsonOutput)
 		},
 	}
@@ -1174,6 +1377,7 @@ func newPersonProviderModelsCommand(deps personProviderCommandDeps) *cobra.Comma
 		Short: "List Codex models and reasoning efforts",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			return runPersonProviderModels(command, deps, jsonOutput)
 		},
 	}
@@ -1192,11 +1396,13 @@ func runPersonProviderStatus(
 		return runPersonSemanticProviderStatus(command, deps, all, jsonOutput)
 	}
 	var codexIsolation *personProviderCodexIsolationStatus
+	var profileName string
 	if !all {
-		_, provider, err := deps.config().ActiveProviderConfig()
+		name, provider, err := deps.config().ActiveProviderConfig()
 		if err != nil {
 			return err
 		}
+		profileName = name
 		if provider.Protocol == peoplesweep.ProtocolCodexAppServer {
 			boundary := provider.ExecutionBoundary
 			_, err := currentPersonProviderCodexClient(deps)
@@ -1240,7 +1446,14 @@ func runPersonProviderStatus(
 	if err != nil {
 		return err
 	}
+	output.Name = profileName
 	output.CodexIsolation = codexIsolation
+	output.StaleProgramCheck, output.StaleProgramConsent, err = personProviderStaleProgramState(
+		command.Context(), st, profile, output,
+	)
+	if err != nil {
+		return err
+	}
 	return writePersonProviderStatus(command.OutOrStdout(), output, jsonOutput)
 }
 
@@ -1293,6 +1506,7 @@ func runPersonProviderRevoke(
 	all bool,
 	jsonOutput bool,
 	semanticEmbeddings bool,
+	invalidateCheck bool,
 ) error {
 	if semanticEmbeddings {
 		return runPersonSemanticProviderRevoke(command, deps, all, jsonOutput)
@@ -1318,9 +1532,9 @@ func runPersonProviderRevoke(
 			return err
 		}
 		if jsonOutput {
-			return json.NewEncoder(command.OutOrStdout()).Encode(personProviderRevokeAllOutput{
+			return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderRevokeAllOutput{
 				Revoked: revoked, Profiles: statuses,
-			})
+			}, json.Deterministic(true))
 		}
 		_, _ = fmt.Fprintf(command.OutOrStdout(),
 			"Consent revoked for %d active people inference profile(s).\n", revoked)
@@ -1335,6 +1549,13 @@ func runPersonProviderRevoke(
 		command.Context(), profile.Fingerprint, personProviderConsentActor,
 	); err != nil {
 		return err
+	}
+	// Fingerprint-guarded revocation precedes profile replacement.
+	// Its capability proof must not survive publication of a new credential.
+	if invalidateCheck {
+		if _, err := st.InvalidatePersonInferenceCheck(command.Context(), profile.Fingerprint); err != nil {
+			return err
+		}
 	}
 	if jsonOutput {
 		output, err := personProviderStatusFor(command.Context(), st, profile)
@@ -1365,9 +1586,9 @@ func runPersonProviderRevokeFingerprint(
 		return err
 	}
 	if jsonOutput {
-		return json.NewEncoder(command.OutOrStdout()).Encode(personProviderRevokeFingerprintOutput{
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderRevokeFingerprintOutput{
 			Fingerprint: fingerprint, Revoked: revoked,
-		})
+		}, json.Deterministic(true))
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(), "Consent revoked for %s\n", fingerprint)
 	return nil
@@ -1477,9 +1698,9 @@ func runPersonSemanticProviderRevoke(
 			return err
 		}
 		if jsonOutput {
-			return json.NewEncoder(command.OutOrStdout()).Encode(personSemanticProviderRevokeAllOutput{
+			return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personSemanticProviderRevokeAllOutput{
 				Revoked: revoked, Profiles: statuses,
-			})
+			}, json.Deterministic(true))
 		}
 		_, _ = fmt.Fprintf(command.OutOrStdout(),
 			"Consent revoked for %d active semantic person embedding profile(s).\n", revoked)
@@ -1525,6 +1746,45 @@ func runPersonProviderCheck(
 	return writePersonProviderCheckOutput(command.OutOrStdout(), output, jsonOutput)
 }
 
+func runPersonProviderReverify(
+	command *cobra.Command,
+	deps personProviderCommandDeps,
+	confirmed bool,
+	jsonOutput bool,
+) error {
+	profile, err := deps.config().Profile()
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		printPersonProviderDisclosure(command.OutOrStdout(), profile)
+		return errors.New("people inference reverify requires --yes after reviewing the provider disclosure")
+	}
+	if _, err := checkPersonProvider(command, deps, ""); err != nil {
+		return err
+	}
+	st, cleanup, err := deps.openStore()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if _, _, err := st.GrantPersonInferenceConsent(
+		command.Context(), profile.Fingerprint, personProviderConsentActor,
+	); err != nil {
+		return err
+	}
+	if jsonOutput {
+		output, err := personProviderStatusFor(command.Context(), st, profile)
+		if err != nil {
+			return err
+		}
+		return writePersonProviderStatus(command.OutOrStdout(), output, true)
+	}
+	printPersonProviderDisclosure(command.OutOrStdout(), profile)
+	_, _ = fmt.Fprintf(command.OutOrStdout(), "People inference provider reverified (fingerprint=%s).\n", profile.Fingerprint)
+	return nil
+}
+
 // checkPersonProvider runs the synthetic capability check for one exact
 // profile and records it. It performs no consent grant.
 func checkPersonProvider(
@@ -1550,7 +1810,7 @@ func checkPersonProvider(
 		return personProviderCheckOutput{}, err
 	}
 	defer cleanup()
-	checker, err := deps.newChecker(config, st)
+	checker, err := deps.newChecker(config, st, deps.setup)
 	if err != nil {
 		return personProviderCheckOutput{}, err
 	}
@@ -1585,7 +1845,7 @@ func checkPersonProvider(
 
 func writePersonProviderCheckOutput(w io.Writer, output personProviderCheckOutput, jsonOutput bool) error {
 	if jsonOutput {
-		return json.NewEncoder(w).Encode(output)
+		return json.MarshalEncode(jsontext.NewEncoder(w), output, json.Deterministic(true))
 	}
 	_, _ = fmt.Fprintf(w,
 		"People inference provider check succeeded (model=%s, request_id=%s, input_tokens=%d, output_tokens=%d).\n",
@@ -1607,18 +1867,12 @@ func selectPersonProviderConfig(config peoplesweep.Config, name string) (peoples
 func personProviderDepsForName(
 	deps personProviderCommandDeps,
 	name string,
-	requireEnabled bool,
 ) (personProviderCommandDeps, error) {
 	selected, err := selectPersonProviderConfig(deps.config(), name)
 	if err != nil {
 		return personProviderCommandDeps{}, err
 	}
-	if requireEnabled && !selected.Enabled {
-		return personProviderCommandDeps{}, errors.New("people sweep provider is disabled")
-	}
-	if !requireEnabled {
-		selected.Enabled = true
-	}
+	selected.Enabled = true
 	deps.config = func() peoplesweep.Config { return selected }
 	return deps, nil
 }
@@ -1634,7 +1888,7 @@ func runPersonProviderLogin(
 	}
 	return client.StartDeviceLogin(command.Context(), func(login peoplesweep.DeviceLogin) error {
 		if jsonOutput {
-			return json.NewEncoder(command.OutOrStdout()).Encode(login)
+			return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), login, json.Deterministic(true))
 		}
 		_, _ = fmt.Fprintf(command.OutOrStdout(), "Verification URL: %s\n", login.VerificationURL)
 		_, _ = fmt.Fprintf(command.OutOrStdout(), "User code: %s\n", login.UserCode)
@@ -1657,7 +1911,7 @@ func runPersonProviderModels(
 		return err
 	}
 	if jsonOutput {
-		return json.NewEncoder(command.OutOrStdout()).Encode(personProviderModelsOutput{Models: models})
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderModelsOutput{Models: models}, json.Deterministic(true))
 	}
 	for _, model := range models {
 		_, _ = fmt.Fprintf(command.OutOrStdout(),
@@ -1688,7 +1942,7 @@ func currentPersonProviderCodexClient(
 	if deps.newCodexClient == nil {
 		return nil, errors.New("codex app-server operations are unavailable")
 	}
-	return deps.newCodexClient(config)
+	return deps.newCodexClient(config, deps.setup)
 }
 
 func openPersonProviderProfile(
@@ -1768,13 +2022,65 @@ func personProviderStatusFor(
 	return personProviderStatusOutput{Profile: profile, Check: check, Consent: *status}, nil
 }
 
+func personProviderStaleProgramState(
+	ctx context.Context,
+	st personProviderStore,
+	current peoplesweep.ProviderProfile,
+	status personProviderStatusOutput,
+) (bool, bool, error) {
+	profiles, err := st.ListPersonInferenceProfiles(ctx)
+	if err != nil {
+		return false, false, err
+	}
+	staleCheck, staleConsent := false, false
+	for _, historical := range profiles {
+		if historical.ProgramFingerprint == current.ProgramFingerprint ||
+			historical.Fingerprint == current.Fingerprint ||
+			!samePersonProviderPolicyExceptProgram(current, historical) {
+			continue
+		}
+		historicalCheck, err := st.GetPersonInferenceCheck(ctx, historical.Fingerprint)
+		if err != nil {
+			return false, false, err
+		}
+		historicalConsent, err := st.GetPersonInferenceConsentStatus(ctx, historical.Fingerprint)
+		if err != nil {
+			return false, false, err
+		}
+		if historicalCheck != nil && status.Check == nil {
+			staleCheck = true
+		}
+		if historicalConsent != nil && historicalConsent.Active && !status.Consent.Active {
+			staleConsent = true
+		}
+	}
+	return staleCheck, staleConsent, nil
+}
+
+func samePersonProviderPolicyExceptProgram(
+	left, right peoplesweep.ProviderProfile,
+) bool {
+	leftValue, rightValue := reflect.ValueOf(left), reflect.ValueOf(right)
+	typeOfProfile := leftValue.Type()
+	for index := range typeOfProfile.NumField() {
+		name := typeOfProfile.Field(index).Name
+		if name == "Fingerprint" || name == "PolicyJSON" || name == "ProgramFingerprint" {
+			continue
+		}
+		if !reflect.DeepEqual(leftValue.Field(index).Interface(), rightValue.Field(index).Interface()) {
+			return false
+		}
+	}
+	return true
+}
+
 func writePersonProviderStatus(
 	w io.Writer,
 	output personProviderStatusOutput,
 	jsonOutput bool,
 ) error {
 	if jsonOutput {
-		return json.NewEncoder(w).Encode(output)
+		return json.MarshalEncode(jsontext.NewEncoder(w), output, json.Deterministic(true))
 	}
 	printPersonProviderDisclosure(w, output.Profile)
 	if output.Check == nil {
@@ -1783,13 +2089,19 @@ func writePersonProviderStatus(
 		_, _ = fmt.Fprintf(w, "Check: %s (model_version=%s)\n",
 			output.Check.CheckedAt.Format(time.RFC3339), output.Check.ModelVersion)
 	}
+	if output.StaleProgramCheck {
+		_, _ = fmt.Fprintf(w, "Check: a matching record uses a different extraction program; run msgvault person provider reverify %s --yes\n", output.Name)
+	}
 	state := "inactive"
 	if output.Consent.Active {
-		state = "active"
+		state = "active" //nolint:goconst // Consent state is independent of draft lifecycle.
 	} else if output.Consent.LastRevoked != nil {
 		state = "revoked"
 	}
 	_, _ = fmt.Fprintf(w, "Consent: %s\n", state)
+	if output.StaleProgramConsent {
+		_, _ = fmt.Fprintf(w, "Consent: a matching grant uses a different extraction program; run msgvault person provider reverify %s --yes\n", output.Name)
+	}
 	if output.CodexIsolation != nil {
 		availability := "unavailable"
 		if output.CodexIsolation.Available {
@@ -1807,16 +2119,16 @@ func writePersonProviderStatus(
 func writePersonSemanticProviderStatus(
 	w io.Writer,
 	profile vector.SemanticPersonEmbeddingProfile,
-	status *store.PersonSemanticEmbeddingConsentStatus,
+	status *store.ProviderConsentStatus,
 	jsonOutput bool,
 ) error {
 	if status == nil {
 		return errors.New("semantic person embedding consent status is empty")
 	}
 	if jsonOutput {
-		return json.NewEncoder(w).Encode(personSemanticProviderStatusOutput{
+		return json.MarshalEncode(jsontext.NewEncoder(w), personSemanticProviderStatusOutput{
 			Profile: profile, Consent: *status,
-		})
+		}, json.Deterministic(true))
 	}
 	printPersonSemanticProviderDisclosure(w, profile)
 	state := "inactive"
@@ -1872,7 +2184,7 @@ func writePersonProviderStatuses(
 	jsonOutput bool,
 ) error {
 	if jsonOutput {
-		return json.NewEncoder(w).Encode(personProviderStatusesOutput{Profiles: statuses})
+		return json.MarshalEncode(jsontext.NewEncoder(w), personProviderStatusesOutput{Profiles: statuses}, json.Deterministic(true))
 	}
 	if len(statuses) == 0 {
 		_, _ = fmt.Fprintln(w, "No stored people inference provider profiles.")
@@ -1895,7 +2207,7 @@ func writePersonSemanticProviderStatuses(
 	jsonOutput bool,
 ) error {
 	if jsonOutput {
-		return json.NewEncoder(w).Encode(personSemanticProviderStatusesOutput{Profiles: statuses})
+		return json.MarshalEncode(jsontext.NewEncoder(w), personSemanticProviderStatusesOutput{Profiles: statuses}, json.Deterministic(true))
 	}
 	if len(statuses) == 0 {
 		_, _ = fmt.Fprintln(w, "No stored semantic person embedding profiles.")
@@ -1912,6 +2224,13 @@ func writePersonSemanticProviderStatuses(
 	}
 	return nil
 }
+
+// personBriefProviderDisclosureLine names the second thing this consent covers:
+// the "last time we talked" brief sends recent archive text the person wrote to
+// the same provider, under the same profile and the same consent.
+const personBriefProviderDisclosureLine = "Person brief: recent verbatim messages the " +
+	"person wrote, from the conversation lane only, are sent to the same " +
+	"provider under this consent"
 
 func printPersonProviderDisclosure(w io.Writer, profile peoplesweep.ProviderProfile) {
 	dateRange := profile.SourceSince + " through " + profile.SourceUntil
@@ -1947,6 +2266,7 @@ func printPersonProviderDisclosure(w io.Writer, profile peoplesweep.ProviderProf
 	_, _ = fmt.Fprintf(w, "Sensitive content: %s\n", sensitive)
 	_, _ = fmt.Fprintf(w, "Packet renderer: %s\n", profile.PacketRendererPolicy)
 	_, _ = fmt.Fprintf(w, "Extraction program fingerprint: %s\n", profile.ProgramFingerprint)
+	_, _ = fmt.Fprintln(w, personBriefProviderDisclosureLine)
 	_, _ = fmt.Fprintln(w, "Disclosed packet field classes:")
 	for _, field := range profile.DisclosedPacketFields {
 		_, _ = fmt.Fprintf(w, "- %s\n", field)

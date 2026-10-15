@@ -2,30 +2,29 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"maps"
-	"slices"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"go.kenn.io/msgvault/internal/explorecatalog"
-	"go.kenn.io/msgvault/internal/jsonexact"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/savedview"
 	"go.kenn.io/msgvault/internal/store"
 )
 
 type savedViewDefinition struct {
-	ID             int64                        `json:"id"`
-	Name           string                       `json:"name"`
-	Description    *string                      `json:"description,omitempty"`
-	CanonicalState store.SavedViewStateEnvelope `json:"canonical_state"`
-	SchemaVersion  int                          `json:"schema_version"`
-	Revision       int64                        `json:"revision"`
-	CreatedAt      time.Time                    `json:"created_at"`
-	UpdatedAt      time.Time                    `json:"updated_at"`
+	IncompatibilityReason string    `json:"incompatibility_reason,omitempty"`
+	ID                    int64     `json:"id"`
+	Name                  string    `json:"name"`
+	Description           *string   `json:"description,omitzero"`
+	CanonicalState        any       `json:"canonical_state" jsonschema:"Stored definition, including incompatible values; check incompatibility_reason before execution"`
+	SchemaVersion         int       `json:"schema_version"`
+	Revision              int64     `json:"revision"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 type listSavedViewsResponse struct {
@@ -38,14 +37,14 @@ type runSavedViewResponse struct {
 	Rows                   []query.EntryRow        `json:"rows,omitempty"`
 	Groups                 []query.ExploreGroupRow `json:"groups,omitempty"`
 	Files                  []query.ExploreFileFact `json:"files,omitempty"`
-	TotalCount             *int64                  `json:"total_count,omitempty"`
+	TotalCount             *int64                  `json:"total_count,omitzero"`
 	Returned               int                     `json:"returned"`
 	HasMore                bool                    `json:"has_more"`
 	NextCursor             string                  `json:"next_cursor,omitempty"`
 	CacheRevision          string                  `json:"cache_revision"`
 	SearchProvenance       query.SearchProvenance  `json:"search_provenance"`
 	CandidateSnapshotID    string                  `json:"candidate_snapshot_id,omitempty"`
-	CandidatePoolSaturated bool                    `json:"candidate_pool_saturated,omitempty"`
+	CandidatePoolSaturated bool                    `json:"candidate_pool_saturated,omitzero"`
 	SearchDeletionScope    string                  `json:"search_deletion_scope,omitempty"`
 }
 
@@ -147,10 +146,7 @@ func (h *handlers) listSavedViews(ctx context.Context, _ toolRequest) (*toolResu
 	}
 	response := listSavedViewsResponse{SavedViews: make([]savedViewDefinition, 0, len(views))}
 	for i := range views {
-		definition, err := savedViewDefinitionFromStore(views[i])
-		if err != nil {
-			return nil, newInternalError("decode Saved View definition", err)
-		}
+		definition := savedViewDefinitionFromStore(views[i])
 		response.SavedViews = append(response.SavedViews, definition)
 	}
 	return jsonResult(response)
@@ -165,10 +161,7 @@ func (h *handlers) getSavedView(ctx context.Context, req toolRequest) (*toolResu
 	if err != nil {
 		return savedViewHandlerError("get Saved View", err)
 	}
-	definition, err := savedViewDefinitionFromStore(*view)
-	if err != nil {
-		return nil, newInternalError("decode Saved View definition", err)
-	}
+	definition := savedViewDefinitionFromStore(*view)
 	return jsonResult(definition)
 }
 
@@ -183,15 +176,12 @@ func (h *handlers) runSavedView(ctx context.Context, req toolRequest) (*toolResu
 	if err != nil {
 		return savedViewHandlerError("run Saved View", err)
 	}
-	definition, err := savedViewDefinitionFromStore(page.View)
-	if err != nil {
-		return nil, newInternalError("decode Saved View definition", err)
-	}
+	definition := savedViewDefinitionFromStore(page.View)
 	return jsonResult(runSavedViewResponse{
 		SavedView: definition, ResultKind: page.ResultKind,
 		Rows: page.Rows, Groups: page.Groups, Files: page.Files,
-		TotalCount: page.TotalCount, Returned: page.Returned,
-		HasMore: page.HasMore, NextCursor: page.NextCursor,
+		TotalCount: page.TotalCount, Returned: page.Returned(),
+		HasMore: page.NextCursor != "", NextCursor: page.NextCursor,
 		CacheRevision: page.CacheRevision, SearchProvenance: page.SearchProvenance,
 		CandidateSnapshotID:    page.CandidateSnapshotID,
 		CandidatePoolSaturated: page.CandidatePoolSaturated,
@@ -223,10 +213,7 @@ func (h *handlers) createSavedView(ctx context.Context, req toolRequest) (*toolR
 	if err != nil {
 		return savedViewHandlerError("create Saved View", err)
 	}
-	definition, err := savedViewDefinitionFromStore(*created)
-	if err != nil {
-		return nil, newInternalError("decode created Saved View", err)
-	}
+	definition := savedViewDefinitionFromStore(*created)
 	return jsonResult(definition)
 }
 
@@ -269,10 +256,7 @@ func (h *handlers) updateSavedView(ctx context.Context, req toolRequest) (*toolR
 	if err != nil {
 		return savedViewHandlerError("update Saved View", err)
 	}
-	definition, err := savedViewDefinitionFromStore(*updated)
-	if err != nil {
-		return nil, newInternalError("decode updated Saved View", err)
-	}
+	definition := savedViewDefinitionFromStore(*updated)
 	return jsonResult(definition)
 }
 
@@ -292,16 +276,13 @@ func (h *handlers) deleteSavedView(ctx context.Context, req toolRequest) (*toolR
 	return jsonResult(deleteSavedViewResponse{ID: id, Deleted: true})
 }
 
-func savedViewDefinitionFromStore(view store.SavedView) (savedViewDefinition, error) {
-	var state store.SavedViewStateEnvelope
-	if err := json.Unmarshal(view.CanonicalState, &state); err != nil {
-		return savedViewDefinition{}, fmt.Errorf("decode Saved View %d canonical state: %w", view.ID, err)
-	}
+func savedViewDefinitionFromStore(view store.SavedView) savedViewDefinition {
 	return savedViewDefinition{
-		ID: view.ID, Name: view.Name, Description: view.Description,
-		CanonicalState: state, SchemaVersion: view.SchemaVersion, Revision: view.Revision,
+		IncompatibilityReason: view.IncompatibilityReason,
+		ID:                    view.ID, Name: view.Name, Description: view.Description,
+		CanonicalState: view.CanonicalState, SchemaVersion: view.SchemaVersion, Revision: view.Revision,
 		CreatedAt: view.CreatedAt, UpdatedAt: view.UpdatedAt,
-	}, nil
+	}
 }
 
 func savedViewHandlerError(operation string, err error) (*toolResult, error) {
@@ -319,64 +300,89 @@ func savedViewHandlerError(operation string, err error) (*toolResult, error) {
 	if result := translateVectorErr(err); result != nil {
 		return result, nil
 	}
-	var coded daemonAPIErrorCoder
-	if errors.As(err, &coded) {
-		switch coded.APIErrorCode() {
-		case "work_item_unavailable", "work_item_revision_changed", "work_recovery_changed", "work_recovery_unavailable", "invalid_work_recovery", "saved_view_revision_conflict", "cache_unavailable",
-			"invalid_cursor", "invalid_filter", "invalid_grouping", "invalid_limit",
-			"invalid_presentation", "invalid_query", "invalid_search", "invalid_search_mode", "invalid_sort":
-			return toolErrorResult(coded.APIErrorCode() + ": Saved View execution failed: " + err.Error()), nil
-		}
+	if result := translateSavedViewRunError(err); result != nil {
+		return result, nil
 	}
 	return nil, newInternalError(operation, err)
+}
+
+// translateSavedViewRunError maps the documented failure codes of
+// POST /api/v1/saved-views/{id}/run onto tool errors an agent can act on:
+// restart pagination, wait for an index, or fix the definition. Anything
+// else stays an internal error.
+func translateSavedViewRunError(err error) *toolResult {
+	var coded daemonAPIErrorCoder
+	if !errors.As(err, &coded) {
+		return nil
+	}
+	code := coded.APIErrorCode()
+	var advice string
+	switch code {
+	case "archive_revision_changed", "search_revision_changed",
+		"candidate_snapshot_expired", "candidate_snapshot_required":
+		advice = "the archive or search index changed; run the Saved View again without a cursor"
+	case "candidate_pool_saturated":
+		advice = "the semantic candidate pool is full; narrow the Saved View's filters or query"
+	case "analytical_cache_unavailable", "lexical_index_unavailable", "semantic_search_unavailable",
+		"identity_filter_unavailable", "identity_matches_unavailable", "search_filter_unavailable",
+		"saved_views_unavailable":
+		advice = "the daemon cannot serve this Saved View right now; retry after it finishes preparing"
+	case "work_item_unavailable", "work_item_revision_changed", "work_recovery_changed", "work_recovery_unavailable", "invalid_work_recovery", "saved_view_revision_conflict", "cache_unavailable",
+		"invalid_cursor", "invalid_filter", "invalid_identity_filter", "invalid_grouping", "invalid_limit",
+		"invalid_presentation", "invalid_query", "invalid_search", "invalid_search_mode", "invalid_sort",
+		"invalid_explore_request":
+		advice = "Saved View execution failed"
+	default:
+		return nil
+	}
+	return toolErrorResult(code + ": " + advice + ": " + err.Error())
 }
 
 func savedViewStateArgument(
 	args map[string]any,
 	key string,
-) (store.SavedViewStateEnvelope, json.RawMessage, error) {
+) (store.SavedViewStateEnvelope, jsontext.Value, error) {
 	value, present := args[key]
 	if !present || value == nil {
 		return store.SavedViewStateEnvelope{}, nil, fmt.Errorf("%s parameter is required", key)
 	}
-	data, err := json.Marshal(value)
+	data, err := json.Marshal(value, json.Deterministic(true))
 	if err != nil {
 		return store.SavedViewStateEnvelope{}, nil, fmt.Errorf("%s is invalid", key)
 	}
-	if err := jsonexact.Validate(data, store.SavedViewStateEnvelope{}); err != nil {
+	if err := store.ValidateSavedViewStateJSON(data); err != nil {
 		return store.SavedViewStateEnvelope{}, nil, fmt.Errorf("%s is invalid: %w", key, err)
 	}
 	var state store.SavedViewStateEnvelope
 	if err := json.Unmarshal(data, &state); err != nil {
 		return store.SavedViewStateEnvelope{}, nil, fmt.Errorf("%s is invalid: %w", key, err)
 	}
-	return state, json.RawMessage(data), nil
+	return state, jsontext.Value(data), nil
 }
 
 func savedViewStateInputSchema() *jsonschema.Schema {
 	one := 1
-	filterFields := append(slices.Clone(savedview.FilterFields), slices.Sorted(maps.Keys(savedview.FilterAliases))...)
 	filterValues := arraySchema(stringSchema("Exact filter value; numeric IDs use decimal strings"))
 	filterValues.MinItems = &one
 	return closedObject(map[string]*jsonschema.Schema{
 		"query":       stringSchema("Optional full-text, semantic, or hybrid query"),
-		"search_mode": stringSchema("Query mode", savedview.SearchModes...),
+		"search_mode": stringSchema("Query mode", explorecatalog.SearchModes()...),
 		"filters": arraySchema(closedObject(map[string]*jsonschema.Schema{
-			"field":    stringSchema("Explore filter field", filterFields...),
-			"operator": stringSchema("Filter operator", savedview.FilterOperators...),
+			"field":    stringSchema("Explore filter field", store.SavedViewFilterFields()...),
+			"operator": stringSchema("Filter operator", store.SavedViewFilterOperators...),
 			"values":   filterValues,
 		}, "field", "operator", "values")),
 		"grouping":     arraySchema(stringSchema("Analytical grouping dimension", explorecatalog.GroupingDimensions()...)),
-		"presentation": stringSchema("Presentation", savedview.Presentations...),
+		"presentation": stringSchema("Presentation", explorecatalog.Presentations()...),
 		"sort": arraySchema(closedObject(map[string]*jsonschema.Schema{
-			"field":     stringSchema("Sort field", savedview.SortFields...),
-			"direction": stringSchema("Sort direction", savedview.SortDirections...),
+			"field":     stringSchema("Sort field", explorecatalog.EntrySortField),
+			"direction": stringSchema("Sort direction", explorecatalog.EntrySortDirection),
 		}, "field", "direction")),
-		"columns":          arraySchema(stringSchema("Visible column", savedview.Columns...)),
-		"inspector_pinned": booleanSchema("Whether the Web inspector is pinned"),
+		"columns":          arraySchema(stringSchema("Visible column", store.SavedViewColumns...)),
+		"inspector_pinned": booleanSchema("Optional inspector pin metadata; the current Web UI keeps the inspector pinned and ignores this field"),
 	})
 }
 
 func arraySchema(items *jsonschema.Schema) *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "array", Items: items}
+	return &jsonschema.Schema{Type: schemaTypeArray, Items: items}
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"log/slog"
 
 	"go.kenn.io/msgvault/internal/authn/oidc"
 	"go.kenn.io/msgvault/internal/config"
@@ -32,7 +33,7 @@ func newOIDCProvider(cfg *config.Config) (provider *oidc.Provider, configured bo
 		return nil, true, fmt.Errorf("configure identity provider: %w", err)
 	}
 	if section.PublicURL != "" && section.ResolveClientSecret(nil) == "" && section.ClientSecretEnv != "" {
-		logger.Warn("[auth.oidc] client_secret_env is not set; browser login will fail at the token exchange",
+		slog.Warn("[auth.oidc] client_secret_env is not set; browser login will fail at the token exchange",
 			"variable", section.ClientSecretEnv)
 	}
 	return provider, true, nil
