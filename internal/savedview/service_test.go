@@ -54,9 +54,9 @@ func TestExecutableStateRejectsNonExecutableDefinitions(t *testing.T) {
 		{
 			name: "unknown filter field",
 			view: store.SavedView{ID: 3, SchemaVersion: 1, CanonicalState: json.RawMessage(
-				`{"filters":[{"field":"identity","operator":"eq","values":["x"]}]}`)},
+				`{"filters":[{"field":"not_supported","operator":"eq","values":["x"]}]}`)},
 			wantErr: store.ErrSavedViewInvalidState,
-			message: `filters[0].field "identity" is not executable`,
+			message: `filters[0].field "not_supported" is not executable`,
 		},
 		{
 			name: "unsupported operator",

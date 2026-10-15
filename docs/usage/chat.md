@@ -270,7 +270,13 @@ or index-state error when unavailable and never silently downgrades the view to
 full-text or metadata search.
 
 Create, update, and delete use the same Saved View validation and persistent
-state as the API and Web UI. Updates patch only supplied fields. Pass the latest
+state as the API and Web UI. Invalid definitions are rejected before writing:
+filter fields and operators must be executable, dates use RFC3339, and source
+or participant filters use positive integer IDs. Resolve a participant's email
+address to its ID first; an email address is not a participant-ID filter.
+Rejected updates leave the previous definition and revision unchanged. Existing
+incompatible definitions remain visible with a reason instead of running a
+broader query. Updates patch only supplied fields. Pass the latest
 `revision` returned by list, get, create, or update; a stale revision returns a
 conflict so the agent can reload before retrying. An empty update description
 clears it.
@@ -409,10 +415,11 @@ A run that stopped part-way or archived nothing logs at `WARN` with the reason.
 
 ### What a fresh selection reads
 
-Search tools read an analytics cache, which is rebuilt when messages arrive or
-are deleted — not when their labels change. An archive removes a label, so a
-selection resolved from that cache still offers messages a previous call
-already archived, and a loop over it never converges.
+Search tools may read a committed analytics cache. Inbox label removals and
+IMAP membership/flag changes invalidate it even when no new message arrives.
+The next ordinary cache build republishes changed existing rows; unchanged
+membership does not force another rebuild. Until that publication finishes, a
+cached selection can still offer an item that a previous call archived.
 
 When the call names one Gmail account with `account`, the selection is resolved
 against the archive of record instead, and reflects what the previous call

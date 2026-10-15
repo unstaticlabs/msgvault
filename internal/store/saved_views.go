@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"go.kenn.io/msgvault/internal/explorecatalog"
 	"go.kenn.io/msgvault/internal/jsonexact"
 )
 
@@ -262,42 +261,7 @@ func validateSavedViewInput(input SavedViewInput) (SavedViewInput, error) {
 }
 
 func validateSavedViewEnvelope(envelope SavedViewStateEnvelope) error {
-	for i, filter := range envelope.Filters {
-		if strings.TrimSpace(filter.Field) == "" {
-			return fmt.Errorf("filters[%d].field is required", i)
-		}
-		if strings.TrimSpace(filter.Operator) == "" {
-			return fmt.Errorf("filters[%d].operator is required", i)
-		}
-		if filter.Values == nil {
-			return fmt.Errorf("filters[%d].values is required", i)
-		}
-	}
-	for i, field := range envelope.Grouping {
-		if !explorecatalog.IsGroupingDimension(field) {
-			return fmt.Errorf("grouping[%d] is not a supported analytical dimension", i)
-		}
-	}
-	if envelope.Presentation != "" &&
-		envelope.Presentation != "table" &&
-		envelope.Presentation != "timeline" &&
-		envelope.Presentation != "files" {
-		return errors.New("presentation must be table, timeline, or files")
-	}
-	for i, sort := range envelope.Sort {
-		if strings.TrimSpace(sort.Field) == "" {
-			return fmt.Errorf("sort[%d].field is required", i)
-		}
-		if sort.Direction != "asc" && sort.Direction != "desc" {
-			return fmt.Errorf("sort[%d].direction must be asc or desc", i)
-		}
-	}
-	for i, column := range envelope.Columns {
-		if strings.TrimSpace(column) == "" {
-			return fmt.Errorf("columns[%d] must not be empty", i)
-		}
-	}
-	return nil
+	return ValidateSavedViewState(envelope)
 }
 
 func scanSavedView(row scanner) (*SavedView, error) {

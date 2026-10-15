@@ -3,6 +3,8 @@
  */
 import type { AttachmentInfo } from "./attachmentInfo";
 import type { CalendarEventState } from "./calendarEventState";
+import type { MessageDetailInboxState } from "./messageDetailInboxState";
+import type { MessageDetailReadState } from "./messageDetailReadState";
 
 export interface MessageDetail {
   attachments: AttachmentInfo[];
@@ -20,9 +22,11 @@ export interface MessageDetail {
   from_phone?: string;
   has_attachments: boolean;
   id: number;
+  inbox_state?: MessageDetailInboxState;
   is_from_me?: boolean;
   labels: string[];
   message_type?: string;
+  read_state?: MessageDetailReadState;
   sent_at: string;
   size_bytes: number;
   snippet: string;

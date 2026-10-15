@@ -48,6 +48,8 @@ const participantSummarySenderSQL = participantDisplaySQL + ` as from_display,
 // APIMessage represents a message for API responses.
 type APIMessage struct {
 	CalendarState        *CalendarEventState
+	InboxState           string
+	ReadState            string
 	ID                   int64
 	SourceID             int64
 	SourceMessageID      string
@@ -329,6 +331,12 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 
 	m.Headers = make(map[string]string)
 
+	states, err := s.providerMailboxStates(ctx, []int64{m.ID})
+	if err != nil {
+		return nil, err
+	}
+	m.InboxState = states[m.ID].inbox
+	m.ReadState = states[m.ID].read
 	return &m, nil
 }
 
@@ -1074,6 +1082,21 @@ func (s *Store) batchPopulate(messages []APIMessage, ids []int64) error {
 // the count/result queries, instead of running to completion on a background
 // context after the request budget is exceeded.
 func (s *Store) batchPopulateContext(ctx context.Context, messages []APIMessage, ids []int64) error {
+	states, err := s.providerMailboxStates(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for i := range messages {
+		state, ok := states[messages[i].ID]
+		if ok {
+			messages[i].InboxState = state.inbox
+			messages[i].ReadState = state.read
+		} else {
+			messages[i].InboxState = ProviderMailboxStateUnknown
+			messages[i].ReadState = ProviderMailboxStateUnknown
+		}
+	}
+
 	recipientMap, err := s.batchGetRecipients(ctx, ids, "to")
 	if err != nil {
 		return err

@@ -51,7 +51,9 @@ func (s *Store) RemoveLabelBySourceMessageIDs(
 			args = append(args, id)
 		}
 
-		result, err := s.db.Exec(fmt.Sprintf(`
+		var changed int64
+		err := s.withTx(func(tx *loggedTx) error {
+			result, err := tx.Exec(fmt.Sprintf(`
 			DELETE FROM message_labels
 			WHERE label_id IN (
 				SELECT id FROM labels WHERE source_id = ? AND name = ?
@@ -61,12 +63,22 @@ func (s *Store) RemoveLabelBySourceMessageIDs(
 				WHERE source_id = ? AND source_message_id IN (%s)
 			)
 		`, strings.Join(placeholders, ",")), args...)
+			if err != nil {
+				return fmt.Errorf("remove label %q: %w", labelName, err)
+			}
+			changed, err = result.RowsAffected()
+			if err != nil {
+				return fmt.Errorf("count removed labels: %w", err)
+			}
+			if changed > 0 {
+				return s.bumpDerivedDataRevision(tx)
+			}
+			return nil
+		})
 		if err != nil {
-			return removed, fmt.Errorf("remove label %q: %w", labelName, err)
+			return removed, err
 		}
-		if affected, err := result.RowsAffected(); err == nil {
-			removed += affected
-		}
+		removed += changed
 	}
 
 	return removed, nil

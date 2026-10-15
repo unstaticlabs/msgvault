@@ -15,4 +15,6 @@ export const ExploreFilterDimension = {
   before: "before",
   deletion: "deletion",
   identity: "identity",
+  inbox_state: "inbox_state",
+  read_state: "read_state",
 } as const;

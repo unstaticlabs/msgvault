@@ -37,13 +37,15 @@ const (
 )
 
 type ExploreFilter struct {
-	Dimension string   `json:"dimension" enum:"source,participant,domain,message_type,mailing_list,after,before,deletion,identity"`
+	Dimension string   `json:"dimension" enum:"source,participant,domain,message_type,mailing_list,after,before,deletion,identity,inbox_state,read_state"`
 	Values    []string `json:"values" minItems:"1"`
 }
 
 // Explore filter dimension names, matching ExploreFilter.Dimension's enum tag.
 const (
 	exploreFilterSource      = "source"
+	exploreFilterInboxState  = "inbox_state"
+	exploreFilterReadState   = "read_state"
 	exploreFilterParticipant = "participant"
 	exploreFilterDomain      = "domain"
 	exploreFilterMessageType = "message_type"
@@ -997,6 +999,21 @@ func exploreContext(filters []ExploreFilter) (query.Context, error) {
 			return result, fmt.Errorf("filter dimension %q requires at least one value", filter.Dimension)
 		}
 		switch filter.Dimension {
+		case exploreFilterInboxState, exploreFilterReadState:
+			allowed := []string{"inbox", "outside", "unknown"}
+			if filter.Dimension == exploreFilterReadState {
+				allowed = []string{"read", "unread", "unknown"}
+			}
+			for _, value := range filter.Values {
+				if !slices.Contains(allowed, value) {
+					return result, fmt.Errorf("filter %s accepts %s", filter.Dimension, strings.Join(allowed, ", "))
+				}
+			}
+			if filter.Dimension == exploreFilterInboxState {
+				result.InboxStates = append([]string(nil), filter.Values...)
+			} else {
+				result.ReadStates = append([]string(nil), filter.Values...)
+			}
 		case exploreFilterSource:
 			ids := make([]int64, len(filter.Values))
 			for i, value := range filter.Values {

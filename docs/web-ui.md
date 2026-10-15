@@ -197,12 +197,45 @@ single-user archive. A view records its query, explicit search mode, filters,
 grouping, presentation, sort, visible columns, and inspector preference.
 Selection is intentionally not saved.
 
-Each record carries a schema version. An incompatible record remains visible,
+Each record carries a schema version. A schema-incompatible record remains visible,
 but cannot be opened or edited: automatic migration is not attempted. Remove it
 after confirmation and save the current context again. Updates and deletion use
 the record revision as an optimistic-concurrency guard. If another browser
 changes the view first, msgvault reports a conflict and requires you to reload
 and review the latest revision instead of overwriting it.
+
+### Inbox and provider read status
+
+Use the Explore filter panel's **Inbox** and **Read status** controls together
+for an Inbox Unread view across several selected accounts. Each returned email
+keeps its source account and message identity. Saving the context preserves
+these filters for the browser and MCP Saved View tools.
+
+Inbox status is `inbox`, `outside`, or `unknown`; provider read status is `read`,
+`unread`, or `unknown`. Gmail uses saved system-label membership. IMAP uses
+saved Inbox labels and mailbox flags. Missing or malformed provider metadata,
+unsupported sources, and provider-deleted messages remain unknown. The filters
+use the last saved provider data; sync the source to refresh it. Local read
+tracking is separate, and reading an email does not mean that its work is handled.
+
+The API exposes `inbox_state` and `read_state` on email results. Saved View
+filters use those same fields, `eq` or `in`, and the values above. For example,
+combine a `source` filter containing the selected account IDs with
+`inbox_state = inbox` and `read_state = unread`. Participant filters require
+numeric participant IDs, not email addresses. Older invalid filter definitions remain
+visible with a reason. To repair one, select the desired filters in Explore,
+return to Saved Views and choose **Repair filters**. Review the replacement
+filters, then select **Save repaired filters**. The original definition and
+revision stay unchanged until that explicit save; other view settings are
+preserved. You can also save a new view and retain the old definition.
+
+Invalid definitions are rejected
+before saving; a failed update leaves the previous view and revision intact.
+
+Existing valid Saved Views retain their definitions. Cache schema 28 rebuilds
+older caches to include provider state; no message data is removed. If a view
+contains a filter that this version cannot execute, execution reports an error
+instead of returning an apparently empty result.
 
 ## Sources and sync status
 

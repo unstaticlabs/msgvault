@@ -1332,3 +1332,13 @@ describe('session-owned exploration selection', () => {
     ).toThrow('candidate snapshot');
   });
 });
+
+describe('native Saved View identity filter restoration', () => {
+  it.each([['1', '1', ''], ['+1', '01', 'any'], ['9223372036854775807', '9223372036854775807', 'recipient']])('preserves native source%s identity%s direction%s without rewriting values', (source, identity, direction) => {
+    const state = { ...defaultExploreURLState, filters: [
+      { dimension: 'source' as const, values: [source] },
+      { dimension: 'identity' as const, values: [identity, 'person@example.com', direction] }
+    ] };
+    expect(parseExploreURLState(serializeExploreURLState(state)).filters).toEqual(state.filters);
+  });
+});
