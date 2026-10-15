@@ -1,0 +1,22 @@
+Native Chatwoot upstream integration review captures
+
+Captured 15 October 2026 from product PR23 source b251eaa85e83c7cd2adcee89e83a37949a90387f.
+The native daemon served an isolated synthetic archive. Its call and meeting
+were imported from disposable test-provider responses; no live provider or
+personal archive was accessed. The browser showed only reserved example
+identities, invented conversation text, and a synthetic recording.
+
+Desktop captures are 1440 by 1000. Mobile captures are 390 by 844.
+The conversation captures show the earlier message expanded and the native
+Open meeting link. The meeting captures show its transcript, recording
+attachment, honest unavailable transcript notice, and Open conversation link.
+The existing narrow sender/date header can clip the date; this unchanged
+native layout is visible rather than hidden in these captures.
+
+These still images demonstrate layout, not functional behavior. Separate
+executed actual-daemon browser journeys proved both directions, download,
+refresh, browser Back, link bounds, and native expansion on both viewports.
+The implementing agent and lead personally inspected all four exact images
+and independently checked PNG metadata before publication. No credentials,
+real contacts, private data, browser address bars or local paths are present.
+Each PNG contains only IHDR, IDAT and IEND chunks, with no embedded metadata.
