@@ -121,6 +121,9 @@ func (s *Server) handleMediaSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "media_search_unavailable", "Configure the Docbank integration to search transcripts")
 		return
 	}
+	requestReader := *reader
+	requestReader.VisibleSourceIDs = visibleSources(r.Context(), nil)
+	reader = &requestReader
 	reference := resolver.Reference{Kind: resolver.ReferencePerson, ID: personID}
 	if participantID > 0 {
 		reference = resolver.Reference{Kind: resolver.ReferenceParticipant, ID: participantID}
@@ -194,7 +197,7 @@ func mediaSearchSource(o store.MessageMediaOccurrence) docbankmedia.SearchMediaS
 
 func (reader *MessageRecordingReader) search(ctx context.Context, query string, limit int, scope *personscope.Scope, resolve func() (*personscope.Scope, error)) (MediaSearchResponse, error) {
 	response := MediaSearchResponse{Results: []MediaSearchResult{}, Coverage: docbankmedia.SearchCoverage{State: "unknown"}}
-	occurrences, err := reader.Store.ListMediaSearchOccurrences(ctx, reader.Destination, scope)
+	occurrences, err := reader.Store.ListMediaSearchOccurrences(ctx, reader.Destination, scope, reader.VisibleSourceIDs)
 	if err != nil {
 		return response, err
 	}
@@ -271,7 +274,7 @@ func (reader *MessageRecordingReader) search(ctx context.Context, query string, 
 	if err != nil {
 		return response, &mediaSearchScopeError{err}
 	}
-	current, err := reader.Store.ListMediaSearchOccurrences(ctx, reader.Destination, scope)
+	current, err := reader.Store.ListMediaSearchOccurrences(ctx, reader.Destination, scope, reader.VisibleSourceIDs)
 	if err != nil {
 		return response, err
 	}
@@ -302,7 +305,7 @@ func (reader *MessageRecordingReader) search(ctx context.Context, query string, 
 			response.Partial = true
 		}
 	}
-	response.UnavailableOccurrences, err = reader.Store.MediaSearchLocalGaps(ctx, reader.Destination, scope)
+	response.UnavailableOccurrences, err = reader.Store.MediaSearchLocalGaps(ctx, reader.Destination, scope, reader.VisibleSourceIDs)
 	if err != nil {
 		return response, err
 	}

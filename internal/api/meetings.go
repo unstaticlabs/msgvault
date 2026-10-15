@@ -185,6 +185,7 @@ func (s *Server) handleMeetingContext(w http.ResponseWriter, r *http.Request) {
 		}
 		scope = resolved.Scope
 	}
+	scope.SourceIDs = visibleSources(r.Context(), scope.SourceIDs)
 	meetingStore, ok := s.store.(MeetingStore)
 	if !ok || meetingStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "meetings_unavailable",
@@ -280,7 +281,12 @@ func (s *Server) resolveMeetingRequestScope(
 	fields map[string]jsontext.Value,
 	direct *MeetingScopeRequest,
 	explore *MeetingExploreScope,
-) (meetingScopeResolution, bool) {
+) (result meetingScopeResolution, valid bool) {
+	defer func() {
+		if valid {
+			result.Scope.SourceIDs = visibleSources(ctx, result.Scope.SourceIDs)
+		}
+	}()
 	directFields, directPresent, ok := meetingObjectField(w, fields, "scope")
 	if !ok {
 		return meetingScopeResolution{}, false

@@ -48,6 +48,9 @@ func (s *Server) handleMessageTags(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "message ID must be a positive integer")
 		return
 	}
+	if !s.requireVisibleMessage(w, r, id) {
+		return
+	}
 	backend, ok := s.store.(MessageTagStore)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "tags_unavailable", "Provider tag editing is unavailable")

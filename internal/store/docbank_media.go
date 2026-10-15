@@ -713,7 +713,7 @@ func (s *Store) ListMessageMediaOccurrences(
 }
 
 func (s *Store) listMessageOccurrenceRows(
-	ctx context.Context, destination string, messageID int64, scope *personscope.Scope,
+	ctx context.Context, destination string, messageID int64, scope *personscope.Scope, sourceIDs ...[]int64,
 ) ([]MessageMediaOccurrence, error) {
 	where := ""
 	args := []any{destination}
@@ -726,6 +726,9 @@ func (s *Store) listMessageOccurrenceRows(
 		where += " AND (" + predicate + ")"
 		args = append(args, values...)
 	}
+	sourceWhere, sourceArgs := mediaSourceFence(sourceIDs)
+	where += sourceWhere
+	args = append(args, sourceArgs...)
 	rows, err := s.db.QueryContext(ctx, s.Rebind(`
 		SELECT m.id, cv.id, a.id, COALESCE(a.filename, ''), COALESCE(a.size, 0), COALESCE(a.attachment_state, ''), o.occurrence_ref, o.revision,
 		       o.retention_state, o.error_code, o.vault_uid, o.source_id, o.source_version_id,

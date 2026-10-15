@@ -3,17 +3,18 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.kenn.io/msgvault/internal/personscope"
 )
 
 // ListMediaSearchOccurrences reads the complete live population for a destination.
-func (s *Store) ListMediaSearchOccurrences(ctx context.Context, destination string, scope *personscope.Scope) ([]MessageMediaOccurrence, error) {
-	return s.listMessageOccurrenceRows(ctx, destination, 0, scope)
+func (s *Store) ListMediaSearchOccurrences(ctx context.Context, destination string, scope *personscope.Scope, sourceIDs ...[]int64) ([]MessageMediaOccurrence, error) {
+	return s.listMessageOccurrenceRows(ctx, destination, 0, scope, sourceIDs...)
 }
 
 // MediaSearchLocalGaps counts audio that has no current mapping to search.
-func (s *Store) MediaSearchLocalGaps(ctx context.Context, destination string, scope *personscope.Scope) (unavailable int, err error) {
+func (s *Store) MediaSearchLocalGaps(ctx context.Context, destination string, scope *personscope.Scope, sourceIDs ...[]int64) (unavailable int, err error) {
 	where := ""
 	args := []any{destination}
 	if scope != nil {
@@ -21,6 +22,9 @@ func (s *Store) MediaSearchLocalGaps(ctx context.Context, destination string, sc
 		where = " AND (" + predicate + ")"
 		args = append(args, values...)
 	}
+	sourceWhere, sourceArgs := mediaSourceFence(sourceIDs)
+	where += sourceWhere
+	args = append(args, sourceArgs...)
 	err = s.db.QueryRowContext(ctx, s.Rebind(`
 		SELECT COUNT(*)
 		FROM attachments a
@@ -40,4 +44,23 @@ func (s *Store) MediaSearchLocalGaps(ctx context.Context, destination string, sc
 		err = fmt.Errorf("read media search gaps: %w", err)
 	}
 	return
+}
+
+// mediaSourceFence is shared by evidence and gap counts so neither discloses
+// records outside the request's source authority. Nil is the owner's scope.
+func mediaSourceFence(scopes [][]int64) (string, []any) {
+	if len(scopes) == 0 || scopes[0] == nil {
+		return "", nil
+	}
+	ids := scopes[0]
+	if len(ids) == 0 {
+		return " AND 1=0", nil
+	}
+	marks := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		marks[i] = "?"
+		args[i] = id
+	}
+	return " AND m.source_id IN (" + strings.Join(marks, ",") + ")", args
 }

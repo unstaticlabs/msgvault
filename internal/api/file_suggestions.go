@@ -172,6 +172,15 @@ func (s *Server) handleFilenameSuggestions(w http.ResponseWriter, r *http.Reques
 		s.writeFilenameSuggestionError(w, err)
 		return
 	}
+	scope.SourceIDs = visibleSources(r.Context(), scope.SourceIDs)
+	if len(scope.SourceIDs) == 1 && scope.SourceIDs[0] == -1 {
+		if personID != nil {
+			writeJSON(w, http.StatusOK, PersonFileSuggestionHTTPResponse{Suggestions: []PersonFileSuggestionRow{}})
+		} else {
+			writeJSON(w, http.StatusOK, FileSuggestionHTTPResponse{Suggestions: []FileSuggestionRow{}})
+		}
+		return
+	}
 	catalog, ok := s.store.(filenameSuggestionStore)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "filename_index_unavailable", "Filename suggestions are not available")

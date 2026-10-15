@@ -72,6 +72,8 @@ type MessageTranscriptUnit struct {
 // MessageRecordingReader joins local recordings with Docbank transcript
 // evidence. Transcript text is read on demand and never stored.
 type MessageRecordingReader struct {
+	// VisibleSourceIDs is set only on a request-local reader copy.
+	VisibleSourceIDs []int64
 	Store            *store.Store
 	Client           *docbankmedia.Client
 	Destination      string
@@ -289,6 +291,9 @@ func (s *Server) handleListMessageRecordings(w http.ResponseWriter, r *http.Requ
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
 		writeError(w, http.StatusBadRequest, "invalid_id", "Message ID must be a positive integer")
+		return
+	}
+	if !s.requireVisibleMessage(w, r, id) {
 		return
 	}
 	if s.messageRecordings == nil {
