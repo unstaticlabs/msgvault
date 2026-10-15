@@ -323,7 +323,12 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 		return nil, err
 	}
 	conditions, args := buildExploreConditions(request.Explore)
-	entriesCTE, entryArgs := personEntriesCTE(exactID, clusterMemberIDs, conditions,
+	logical, _, cleanup, logicalErr := e.exploreLogicalSQLLocked(ctx, request.Explore, conditions, "NULL::BIGINT", false)
+	if logicalErr != nil {
+		return nil, logicalErr
+	}
+	defer cleanup()
+	entriesCTE, entryArgs := personEntriesCTE(exactID, clusterMemberIDs, conditions, request.Explore.Context.RowUnit == RowUnitEmailWork,
 		e.parquetPath(datasetParticipantClusters), e.identityActivityPath())
 	args = append(args, entryArgs...)
 	// bestNameExpr is the shared cluster label policy (see person_label.go).
@@ -424,7 +429,7 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 	}
 	args = append(args, limit, request.Page.Offset)
 	peopleRollup := quoteIdentitySQLPath(e.parquetPath(identityindex.DatasetPeople))
-	queryText := buildExploreLogicalSQLNoLists(conditions) + entriesCTE + `
+	queryText := logical + entriesCTE + `
 ), person_population AS (
 	SELECT p.id AS person_id, COALESCE(p.display_name, '') AS display_name,
 		COALESCE(p.email_address, '') AS email_address, COALESCE(p.phone_number, '') AS phone_number,
@@ -536,7 +541,7 @@ FROM counted ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 //     cluster (e.g. cc'ing a contact's work and personal addresses) is never
 //     double-counted. The clusters/canon CTEs remain only for the caller's
 //     label, search-match, and identifier subqueries.
-func personEntriesCTE(exactID *int64, memberIDs []int64, conditions, clustersGlob, activityGlob string) (string, []any) {
+func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work bool, clustersGlob, activityGlob string) (string, []any) {
 	if exactID == nil {
 		return fmt.Sprintf(`
 ), clusters AS (
@@ -552,7 +557,7 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions, clustersGlo
 	if len(memberIDs) == 0 {
 		memberIDs = []int64{*exactID}
 	}
-	if conditions != "true" {
+	if conditions != "true" || work {
 		// Membership resolves through relationship_activity's baked
 		// canonical_id rather than list_contains over aggregated member
 		// lists; the classified branch inside sqlActivityEntryEdges keeps a
@@ -560,11 +565,11 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions, clustersGlo
 		// the aggregated lists did. The IN over memberIDs (never empty here)
 		// matches the cluster whichever alias the caller requested: every
 		// edge bakes the cluster's canonical ID, which is itself one of the
-		// resolved members. memberList binds twice — once per UNION branch.
+		// resolved members. memberList binds three times — once per native message, chat and work branch.
 		memberList := "(" + strings.TrimSuffix(strings.Repeat("?,", len(memberIDs)), ",") + ")"
-		args := make([]any, 0, len(memberIDs)*2+1)
+		args := make([]any, 0, len(memberIDs)*3+1)
 		args = append(args, *exactID)
-		for range 2 {
+		for range 3 {
 			for _, memberID := range memberIDs {
 				args = append(args, memberID)
 			}
@@ -669,6 +674,11 @@ func (e *DuckDBEngine) searchDomainsLegacy(ctx context.Context, request DomainSe
 		return nil, err
 	}
 	conditions, args := buildExploreConditions(request.Explore)
+	logical, _, cleanup, logicalErr := e.exploreLogicalSQLLocked(ctx, request.Explore, conditions, "NULL::BIGINT", false)
+	if logicalErr != nil {
+		return nil, logicalErr
+	}
+	defer cleanup()
 	domainWhere := []string{"domain <> ''"}
 	if exactDomain != "" {
 		domainWhere = append(domainWhere, "domain = ?")
@@ -694,7 +704,7 @@ func (e *DuckDBEngine) searchDomainsLegacy(ctx context.Context, request DomainSe
 	// person-domain pairing so opening a domain cannot change its person
 	// count; the domain activity rows themselves keep roster domains exactly
 	// as the index's domain entries do.
-	queryText := buildExploreLogicalSQLNoLists(conditions) + `
+	queryText := logical + `
 ), domain_edges AS (` +
 		sqlActivityEntryEdges(e.identityActivityPath(),
 			"a.participant_domain AS domain, a.canonical_id AS person_id, "+

@@ -17,7 +17,7 @@ var (
 	// SavedViewFilterFields are the Explore filter dimensions a v1 definition may name.
 	// The legacy aliases source_id and participant_id are also accepted and
 	// normalized by SavedViewFilterDimension.
-	SavedViewFilterFields = []string{"source", "identity", "participant", "domain", "mailing_list", "message_type", "after", "before", "deletion", "inbox_state", "read_state"}
+	SavedViewFilterFields = []string{"source", "identity", "participant", "domain", "mailing_list", "message_type", "after", "before", "deletion", "inbox_state", "read_state", "row_unit", "handling_state"}
 	// SavedViewFilterAliases map legacy v1 filter field names onto Explore dimensions.
 	SavedViewFilterAliases   = map[string]string{"source_id": "source", "participant_id": "participant"}
 	SavedViewFilterOperators = []string{"eq", "in"}
@@ -88,6 +88,14 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 		}
 		for _, value := range filter.Values {
 			switch dimension {
+			case "handling_state":
+				if !slices.Contains([]string{"handled", "actionable", "unknown"}, value) {
+					return fmt.Errorf("filters[%d] handling_state accepts handled, actionable or unknown", i)
+				}
+			case "row_unit":
+				if len(filter.Values) != 1 || value != "email_work_item" {
+					return fmt.Errorf("filters[%d] row_unit accepts email_work_item", i)
+				}
 			case "inbox_state", "read_state":
 				allowed := []string{"inbox", "outside", "unknown"}
 				if dimension == "read_state" {
@@ -114,6 +122,9 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 				}
 			}
 		}
+	}
+	if seen["handling_state"] && !seen["row_unit"] {
+		return errors.New("handling_state requires row_unit email_work_item")
 	}
 	if identityValues != nil {
 		if len(sourceValues) != 1 {

@@ -4044,3 +4044,44 @@ BEGIN
     SET dirty_at = CURRENT_TIMESTAMP
     WHERE person_id = OLD.person_id;
 END;
+
+
+-- Explicit email linkage evidence; source message/thread records stay intact.
+CREATE TABLE IF NOT EXISTS email_linkage_facts (
+    message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    extraction_version INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    facts TEXT NOT NULL,
+    raw_sha256 TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS email_linkage_checkpoints (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    extraction_version INTEGER NOT NULL,
+    last_message_id BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_id, extraction_version)
+);
+
+-- Durable opaque alias anchors. Deleted messages leave only identity metadata;
+-- nullable live references prevent physical message ID reuse from rebinding links.
+CREATE TABLE IF NOT EXISTS email_work_seeds (
+ ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+ uid TEXT NOT NULL UNIQUE,
+ anchor_message_id BIGINT NOT NULL,
+ live_message_id BIGINT UNIQUE REFERENCES messages(id) ON DELETE SET NULL
+);
+
+-- Undoable local assertions retain opaque identities, never copied mail content.
+CREATE TABLE IF NOT EXISTS email_work_actions (
+ uid TEXT PRIMARY KEY,
+ kind TEXT NOT NULL CHECK(kind IN ('link','handled')),
+ revision BIGINT NOT NULL DEFAULT 1,
+ active BOOLEAN NOT NULL DEFAULT TRUE,
+ actor_kind TEXT NOT NULL,
+ actor_user_id BIGINT NOT NULL,
+ created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS email_work_action_targets (
+ action_uid TEXT NOT NULL REFERENCES email_work_actions(uid) ON DELETE CASCADE,
+ seed_uid TEXT NOT NULL REFERENCES email_work_seeds(uid) ON DELETE CASCADE,
+ PRIMARY KEY(action_uid,seed_uid)
+);

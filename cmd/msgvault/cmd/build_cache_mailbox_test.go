@@ -269,5 +269,5 @@ func TestBuildCacheSchema27MailboxStateUpgrade(t *testing.T) {
 	assertions.Equal(id, *result.Rows[0].AnchorMessageID)
 	state, err = query.ReadCacheSyncState(cache)
 	requirements.NoError(err)
-	assertions.Equal(28, state.SchemaVersion)
+	assertions.Equal(29, state.SchemaVersion)
 }

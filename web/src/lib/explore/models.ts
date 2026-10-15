@@ -128,6 +128,8 @@ export interface ExploreScrollAnchor {
 /** Browser-restorable exploration context. Bulk selection is session-only. */
 export interface ExploreURLState {
   schemaVersion: number;
+  savedViewID?: number;
+  savedViewRevision?: number;
   workspace: ExploreWorkspace;
   directoryQuery: string;
   directoryContactState: string;

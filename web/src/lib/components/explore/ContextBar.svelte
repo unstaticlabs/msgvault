@@ -1,6 +1,6 @@
 <script lang="ts">
   import XIcon from '@lucide/svelte/icons/x';
-  import { Button, IconButton, SelectDropdown } from '@kenn-io/kit-ui';
+  import { Button, Checkbox, IconButton, SelectDropdown } from '@kenn-io/kit-ui';
 
   import type { APIClient } from '../../api/client';
   import type { ExploreFilter, ExploreGroupDimension, ExploreSearchMode, ExploreURLState } from '../../explore/models';
@@ -9,6 +9,7 @@
     groupingOptions,
     isGroupingDimension
   } from '../../grouping/catalog';
+  import { isEmailWork, withEmailWork, withHandlingState, HANDLING_LABELS } from '../../explore/email-work';
   import IdentityFilter from './IdentityFilter.svelte';
  import { filterCaption, mailboxFilterOptions, mailboxFilterValue, withMailboxFilter } from '../../explore/mailbox-state';
 
@@ -43,6 +44,9 @@
   } = $props();
 
   let filtersOpen = $state(false);
+  const handlingValues = $derived(filters.find((filter) => filter.dimension === 'handling_state')?.values ?? []);
+  const handlingValue = $derived(handlingValues.length === 0 ? '' : handlingValues.length === 1 ? handlingValues[0] : handlingValues.length === 2 && handlingValues.includes('actionable') && handlingValues.includes('unknown') ? 'needs_attention' : 'multiple');
+  const handlingOptions = $derived([{value: '', label: 'All handling states'}, ...Object.entries(HANDLING_LABELS).map(([value, label]) => ({value, label})), {value: 'needs_attention', label: 'Actionable or unknown'}, ...(handlingValue === 'multiple' ? [{value: 'multiple', label: 'Multiple handling states', disabled: true}] : [])]);
   const options = $derived(groupingOptions({ excluded: groupingChain, includeUnavailable: true }));
   const firstRequestable = $derived(options.find((option) => !option.disabled)?.value ?? '');
   const presentationOptions = [
@@ -58,6 +62,12 @@
 
 <section class="context-bar" aria-label="Active analytical context">
   <div class="context-controls">
+    <Checkbox checked={isEmailWork(filters)} label="Group related email"
+      onchange={(enabled) => onFiltersChange(withEmailWork(filters, enabled))} />
+    {#if isEmailWork(filters)}
+      <SelectDropdown title="Handling" value={handlingValue} options={handlingOptions}
+        onchange={(value) => onFiltersChange(value === 'needs_attention' ? [...withHandlingState(filters, ''), {dimension: 'handling_state', values: ['actionable', 'unknown']}] : withHandlingState(filters, value))} />
+    {/if}
     <Button
       size="sm"
       surface={filtersOpen || filters.length > 0 ? 'soft' : 'outline'}
@@ -132,6 +142,7 @@
           options={mailboxFilterOptions(filters, 'read_state')}
           onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'read_state', value))} />
       </div>
+      {#if isEmailWork(filters)}<p class="mailbox-note">Related email is grouped within the selected accounts. Handling uses reply evidence and local confirmations; read and Inbox status remain separate.</p>{/if}
       <p class="mailbox-note">Mailbox status reflects saved provider data. Sync to refresh it. Unknown status stays separate.</p>
       <IdentityFilter {client} {filters} onChange={onFiltersChange} />
     </div>

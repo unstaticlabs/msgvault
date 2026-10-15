@@ -19,6 +19,7 @@
     type ExploreColumn,
     type ExploreURLState,
   } from '../../explore/models';
+  import { emailWorkFilterProblem } from '../../explore/email-work';
   import { filterCaption } from '../../explore/mailbox-state';
   import { isGroupingDimension } from '../../grouping/catalog';
   type SavedView = GeneratedSavedView;
@@ -188,6 +189,7 @@
     }));
     onOpen({
       workspace: 'everything',
+      savedViewID: view.id, savedViewRevision: view.revision,
       query: saved.query ?? '',
       searchMode: saved.search_mode === 'semantic' || saved.search_mode === 'hybrid' ? saved.search_mode : 'full_text',
       filters,
@@ -251,6 +253,8 @@
         return 'This saved mailbox filter has an unrecognized status. Select the mailbox status again in Explore and save a new view. Your saved definition is unchanged.';
       }
     }
+    const workProblem = emailWorkFilterProblem((saved.filters ?? []).map((filter) => ({dimension: FILTER_ALIASES.get(filter.field) ?? filter.field, values: filter.values})));
+    if (workProblem) return workProblem;
     if (identityValues && (sourceValues?.length !== 1 || BigInt(sourceValues[0]!) !== BigInt(identityValues[0]!))) {
       return 'This identity view needs its matching source. Select the source and identity again in Explore and save a new view. Your saved definition is unchanged.';
     }

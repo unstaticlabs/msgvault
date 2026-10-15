@@ -13,6 +13,7 @@
   import { rebaseVirtualScroll, RowGeometry, tableViewportHeight } from '../../theme/preferences.svelte';
   import IdentityBadge from './IdentityBadge.svelte';
   import RowKind from './RowKind.svelte';
+ import { HANDLING_LABELS } from '../../explore/email-work';
  import { mailboxCaption } from '../../explore/mailbox-state';
 
   interface Props {
@@ -70,7 +71,17 @@
   }: Props = $props();
 
   const geometry = new RowGeometry();
-  const rowHeight = $derived(geometry.height);
+  let narrow = $state(false);
+  const workRows = $derived(rows.some((row) => row.email_work !== undefined));
+  const rowHeight = $derived(geometry.height === undefined ? undefined : narrow && workRows ? Math.max(72, geometry.height) : geometry.height);
+  onMount(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia('(max-width: 640px)');
+    narrow = media.matches;
+    const changed = () => {narrow = media.matches;};
+    media.addEventListener('change', changed);
+    return () => media.removeEventListener('change', changed);
+  });
   const OVERSCAN = 6;
   const ALL_COLUMNS: Array<{ id: ExploreColumn; label: string }> = [
     { id: 'kind', label: 'Kind' },
@@ -422,7 +433,7 @@
   }
 </script>
 
-<section class="everything-table" aria-label="Everything table">
+<section class="everything-table" class:everything-table--work={workRows} aria-label="Everything table">
   <div class="table-tools">
     <details>
       <summary>Columns</summary>
@@ -522,6 +533,7 @@
                    the focused grid opens the same row via handleKeydown. -->
               <div
                 class="data-row"
+                style:height={narrow && workRows ? `${rowHeight}px` : undefined}
                 class:data-row--active={index === activeIndex}
                 class:data-row--selected={selection.isSelected(row.key)}
                 class:data-row--inspected={inspectedKey === row.key}
@@ -548,7 +560,7 @@
                       {/if}
                       <RowKind kind={row.kind} messageType={row.message_type} />
                     {:else if column === 'people'}
-                      {people(row)}
+                      {#if row.email_work}<span class="work-account">{row.source_identifier}</span>{:else}{people(row)}{/if}
                       {#if isEmailMessageType(row.message_type)}
                         <IdentityBadge
                           senderIdentities={row.matched_sender_identities}
@@ -557,7 +569,9 @@
                       {/if}
                     {:else if column === 'title'}
                       <strong>{row.title || '(untitled)'}</strong>
-                      {#if row.kind === 'email'}
+                      {#if row.email_work}
+                        <span class="mailbox-state">{HANDLING_LABELS[row.email_work.state] ?? 'Handling unknown'} · {row.message_count} {row.message_count === 1 ? 'copy' : 'copies'} · {row.email_work.source_ids.length} {row.email_work.source_ids.length === 1 ? 'account' : 'accounts'}</span>
+                      {:else if row.kind === 'email'}
                         <span class="mailbox-state" title={mailboxCaption(row.inbox_state, row.read_state)}>{mailboxCaption(row.inbox_state, row.read_state)}</span>
                       {/if}
                     {:else if column === 'excerpt'}
@@ -775,6 +789,8 @@
     box-shadow: inset 2px 0 0 var(--accent-blue);
   }
 
+  .everything-table--work .cell--title { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; }
+  .everything-table--work .mailbox-state { max-width: 100%; line-height: 1.2; }
   .cell--title {
     display: flex;
     align-items: center;
@@ -924,5 +940,12 @@
     .cell--title strong, .mailbox-state { line-height: 1.2; }
     .cell--title strong { max-width: 100%; }
     .mailbox-state { max-width: 100%; }
+    .everything-table--work .virtual-spacer { min-width: 0; }
+    .everything-table--work .table-header { display: none; }
+    .everything-table--work .data-row { grid-template-columns: minmax(0, 1fr) !important; align-content: center; }
+    .everything-table--work .cell--title { order: 1; padding: 0 var(--space-3); overflow: visible; }
+    .everything-table--work .cell--people { order: 2; padding: 0 var(--space-3); line-height: 1.3; }
+    .everything-table--work .cell--kind, .everything-table--work .cell--excerpt, .everything-table--work .cell--time, .everything-table--work .cell--attachments, .everything-table--work .cell--size { display: none; }
+    .everything-table--work .mailbox-state { flex: auto; }
   }
 </style>

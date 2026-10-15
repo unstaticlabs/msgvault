@@ -699,6 +699,9 @@ export class ExploreState {
     mode: 'push' | 'replace'
   ): void {
     let effectivePatch = patch;
+    if (!('savedViewID' in patch) && ['query', 'searchMode', 'filters', 'groupingChain', 'presentation', 'sort'].some((key) => key in patch && JSON.stringify(patch[key]) !== JSON.stringify(this.current[key]))) {
+      effectivePatch = { ...patch, savedViewID: undefined, savedViewRevision: undefined };
+    }
     if (mode === 'push' && OPERATION_FILTER_FIELDS.some((key) =>
       key in patch && normalize({ ...this.current, ...patch })[key] !== this.current[key])) {
       effectivePatch = { ...patch, operationRunID: null };

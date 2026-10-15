@@ -759,7 +759,12 @@ func seedMessageAtID(t *testing.T, st *store.Store, n int, id int64) int64 {
 		return id
 	}
 	got := seedMessage(t, st, n)
-	_, err := st.DB().Exec(
+	// Construct a pre-UID legacy edge-ID fixture. Its just-created allocation
+	// has never been published; real live allocations must reject PK mutation.
+	// The separate native identity lifecycle test protects that invariant.
+	_, err := st.DB().Exec(st.Rebind(`DELETE FROM email_work_seeds WHERE live_message_id=?`), got)
+	require.NoError(t, err)
+	_, err = st.DB().Exec(
 		st.Rebind(`UPDATE messages SET id = ? WHERE id = ?`), id, got)
 	require.NoErrorf(t, err, "move message %d to id %d", n, id)
 	return id

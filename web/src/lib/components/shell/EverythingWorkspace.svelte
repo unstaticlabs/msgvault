@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { PrincipalInfo } from '../../api/generated/models';
   import { Button, KbdBadge, SearchInput } from '@kenn-io/kit-ui';
   import { onDestroy, untrack } from 'svelte';
 
@@ -40,6 +41,7 @@
 
   interface Props {
     client: APIClient;
+    principal?: PrincipalInfo;
     exploreState: ExploreState;
     loader: ExploreLoader;
     session: EverythingSessionState;
@@ -68,6 +70,7 @@
 
   let {
     client,
+    principal = undefined,
     exploreState,
     loader,
     session,
@@ -715,12 +718,18 @@
         {#if readingTargetKey}
           <ReadingPane
             {client}
+            {principal}
             selection={readingSelection}
             targetKey={readingTargetKey}
             status={readingState.status}
             statusMessage={readingState.message}
             unavailable={readingState.unavailable}
             predicate={exploreState.predicate()}
+            cacheRevision={loader.result?.cacheRevision ?? ''}
+            onRefresh={loader.retry}
+            onOpenIndividual={(member) => commitNavigation({query: '', searchMode: 'full_text', filters: [{dimension: 'source', values: [String(member.source_id)]}], groupingChain: [], presentation: 'table', selectedRow: `source:${member.source_id}:message:${member.source_message_id || member.message_id}`, activeRow: null, scrollAnchor: null})}
+            savedViewID={exploreState.current.savedViewID}
+            savedViewRevision={exploreState.current.savedViewRevision}
             onClose={closeReadingPane}
             onOpenSettings={() => commitWorkspace('settings')}
             onOpenRelationship={openRelationship}

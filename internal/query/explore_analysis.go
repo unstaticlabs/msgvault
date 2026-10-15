@@ -54,11 +54,12 @@ func (e *DuckDBEngine) ExploreGroups(ctx context.Context, request ExploreGroupRe
 	if request.GroupKey != "" {
 		keyFilter = " WHERE group_key = ?"
 	}
-	logicalSQL := buildExploreLogicalSQL
-	if spec.noLists {
-		logicalSQL = buildExploreLogicalSQLNoLists
+	logicalPrefix, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, explore, conditions, "NULL::BIGINT", !spec.noLists)
+	if err != nil {
+		return nil, err
 	}
-	queryText := logicalSQL(conditions) + spec.cte + `
+	defer cleanup()
+	queryText := logicalPrefix + spec.cte + `
 ), grouped AS (
 	SELECT ` + spec.key + ` AS group_key, ` + spec.label + ` AS group_label,
 		COUNT(*)::BIGINT AS group_count,
@@ -154,7 +155,7 @@ func sqlActivityEntryEdges(activityGlob, selectExpr, messagePredicate, conversat
 	SELECT le.entry_key, ` + selectExpr + `
 	FROM logical_entries le
 	JOIN ` + activityScan + ` a ON a.message_id = le.anchor_message_id
-	WHERE le.entry_kind <> 'conversation'
+	WHERE le.entry_kind NOT IN ('conversation','email_work_item')
 	  AND a.canonical_id IS NOT NULL` + messagePredicate + `
 	UNION
 	SELECT le.entry_key, ` + selectExpr + `
@@ -163,6 +164,11 @@ func sqlActivityEntryEdges(activityGlob, selectExpr, messagePredicate, conversat
 	JOIN ` + activityScan + ` a ON a.message_id = f.message_id
 	WHERE le.entry_kind = 'conversation'
 	  AND a.canonical_id IS NOT NULL` + conversationPredicate + `
+ UNION
+ SELECT le.entry_key, ` + selectExpr + `
+ FROM logical_entries le JOIN classified f ON f.work_key=le.entry_key
+ JOIN ` + activityScan + ` a ON a.message_id=f.message_id
+ WHERE le.entry_kind='email_work_item' AND a.canonical_id IS NOT NULL` + messagePredicate + `
 `
 }
 
@@ -210,8 +216,12 @@ func exploreGroupExpressions(dimension, activityGlob, peopleGlob string) (groupE
 	switch dimension {
 	case "source":
 		return groupExpressions{
-			key: "CAST(source_id AS VARCHAR)", label: "arg_max(source_identifier, occurred_at)",
-			groupBy: "CAST(source_id AS VARCHAR)", source: "logical_entries",
+			key: "CAST(member_source_id AS VARCHAR)", label: "MAX(member_source_identifier)",
+			groupBy: "member_source_id", source: "source_entries",
+			cte: `), source_entries AS (
+ SELECT le.*,member.id AS member_source_id,s.account_email AS member_source_identifier
+ FROM logical_entries le,UNNEST(le.member_source_ids) AS member(id)
+ JOIN sources s ON s.id=member.id`,
 		}, nil
 	case "participant":
 		// Direct edges only for message entries, matching the aggregated
@@ -453,14 +463,27 @@ func (e *DuckDBEngine) ExploreSelectionStats(ctx context.Context, request Explor
 	if len(selectionConditions) > 0 {
 		selection = " WHERE " + strings.Join(selectionConditions, " AND ")
 	}
-	queryText := buildExploreLogicalSQL(conditions) + `
+	logicalPrefix, population, cleanup, err := e.exploreLogicalSQLLocked(ctx, explore, conditions, "NULL::BIGINT", true)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	if population != nil {
+		if err := e.validateEmailWorkSelectionLocked(ctx, population, request.IncludedKeys); err != nil {
+			return nil, err
+		}
+		if err := e.validateEmailWorkSelectionLocked(ctx, population, request.ExcludedKeys); err != nil {
+			return nil, err
+		}
+	}
+	queryText := logicalPrefix + `
 )
 SELECT COUNT(*)::BIGINT, COALESCE(SUM(estimated_bytes), 0)::BIGINT,
 	COALESCE(SUM(CASE WHEN deletable THEN 1 ELSE 0 END), 0)::BIGINT,
 	COALESCE(SUM(attachment_count), 0)::BIGINT,
 	COALESCE(SUM(CASE WHEN attachment_count > 0 THEN 1 ELSE 0 END), 0)::BIGINT,
 	COALESCE(SUM(CASE WHEN deletable THEN 1 ELSE 0 END), 0)::BIGINT,
-	CASE WHEN COUNT(*) = 1 AND MIN(entry_kind) <> 'conversation'
+	CASE WHEN COUNT(*) = 1 AND MIN(entry_kind) NOT IN ('conversation','email_work_item')
 		THEN MIN(anchor_message_id) ELSE NULL END
 FROM logical_entries` + selection
 	response := &ExploreSelectionStats{CacheRevision: state.Revision(), SearchProvenance: provenance}
@@ -477,7 +500,7 @@ FROM logical_entries` + selection
 		} else {
 			deletableSelection += " AND deletable"
 		}
-		rows, err := e.db.QueryContext(ctx, buildExploreLogicalSQL(conditions)+`)
+		rows, err := e.db.QueryContext(ctx, logicalPrefix+`)
 SELECT anchor_message_id FROM logical_entries`+deletableSelection+`
 ORDER BY anchor_message_id`, args...)
 		if err != nil {
@@ -528,12 +551,25 @@ func (e *DuckDBEngine) ExploreFiles(ctx context.Context, request ExploreFilesReq
 	if limit == 0 {
 		limit = maxExploreFilesLimit
 	}
-	queryText := `
-WITH selected AS (
-	SELECT * FROM analytical_entries WHERE ` + conditions + `
-), facts AS (
+	selectedPrefix := `WITH selected AS (SELECT * FROM analytical_entries WHERE ` + conditions + `)`
+	fileEntryKey := sqlEntryKeyExpr("s.")
+	if explore.Context.RowUnit != RowUnitDefault {
+		logicalPrefix, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, explore, conditions, "NULL::BIGINT", true)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		selectedPrefix = logicalPrefix + `), selected AS (
+ SELECT le.entry_key,f.* FROM logical_entries le JOIN classified f ON
+ (le.entry_kind='email_work_item' AND f.work_key=le.entry_key)
+ OR (le.entry_kind='conversation' AND f.is_chat AND f.source_id=le.source_id AND f.conversation_id=le.conversation_id)
+ OR (le.entry_kind NOT IN ('conversation','email_work_item') AND f.message_id=le.anchor_message_id)
+ )`
+		fileEntryKey = "s.entry_key"
+	}
+	queryText := selectedPrefix + `, facts AS (
 	SELECT
-		` + sqlEntryKeyExpr("s.") + ` AS entry_key,
+		` + fileEntryKey + ` AS entry_key,
 		s.message_id, s.conversation_id, s.occurred_at, s.source_id, s.source_identifier,
 		COALESCE(NULLIF(s.subject, ''), NULLIF(s.conversation_title, ''), s.snippet, '') AS title,
 		a.attachment_id, a.filename, a.mime_type, a.size
@@ -610,9 +646,14 @@ func (e *DuckDBEngine) ExploreMatchCounts(ctx context.Context, request ExploreMa
 		placeholders[i] = "?"
 		args = append(args, key)
 	}
-	queryText := buildExploreLogicalSQL(conditions) + `
+	logicalPrefix, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, explore, conditions, "NULL::BIGINT", true)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	queryText := logicalPrefix + `
 )
-SELECT entry_key, message_count FROM logical_entries
+SELECT entry_key, matched_message_count FROM logical_entries
 WHERE entry_key IN (` + strings.Join(placeholders, ",") + `)`
 	rows, err := e.db.QueryContext(ctx, queryText, args...)
 	if err != nil {

@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -32,7 +33,11 @@ func NewScopedEngine(inner Engine, visible []int64) Engine {
 		base.set[id] = struct{}{}
 	}
 	if _, ok := inner.(Explorer); ok {
-		return &scopedAnalyticalEngine{scopedTextEngine: &scopedTextEngine{scopedEngine: base}}
+		analytical := &scopedAnalyticalEngine{scopedTextEngine: &scopedTextEngine{scopedEngine: base}}
+		if _, ok := inner.(EmailWorkExplorer); ok {
+			return &scopedEmailWorkEngine{scopedAnalyticalEngine: analytical}
+		}
+		return analytical
 	}
 	if _, ok := inner.(TextEngine); ok {
 		return &scopedTextEngine{scopedEngine: base}
@@ -113,6 +118,12 @@ func (s *scopedEngine) restrictQuery(q *search.Query) *search.Query {
 
 func (s *scopedEngine) restrictContext(analytical Context) Context {
 	analytical.SourceIDs = s.restrict(analytical.SourceIDs)
+	if analytical.RowUnit == RowUnitEmailWork {
+		visible := slices.Clone(s.visible)
+		slices.Sort(visible)
+		visible = slices.Compact(visible)
+		analytical.WorkAuthorityKey = fmt.Sprintf("%s|visible:%v", analytical.WorkAuthorityKey, visible)
+	}
 	return analytical
 }
 
@@ -574,4 +585,17 @@ func (s *scopedAnalyticalEngine) GroupFiles(ctx context.Context, request FileGro
 // QuerySQL cannot be confined to a set of sources.
 func (s *scopedAnalyticalEngine) QuerySQL(context.Context, string) (*QueryResult, error) {
 	return nil, ErrScopedSQL
+}
+
+// scopedEmailWorkEngine preserves the optional native family-reader capability.
+type scopedEmailWorkEngine struct{ *scopedAnalyticalEngine }
+
+func (s *scopedEmailWorkEngine) EmailWorkMembers(ctx context.Context, request EmailWorkMembersRequest) (*EmailWorkMembersResponse, error) {
+	request.Explore.Context.RowUnit = RowUnitEmailWork
+	request.Explore = s.restrictExplore(request.Explore)
+	reader, ok := s.inner.(EmailWorkExplorer)
+	if !ok {
+		return nil, &CacheUnavailableError{Readiness: CacheAbsent}
+	}
+	return reader.EmailWorkMembers(ctx, request)
 }

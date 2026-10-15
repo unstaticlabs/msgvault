@@ -567,6 +567,92 @@ func (d DiscoverEventType) Validate() error {
 	}
 }
 
+type EmailWorkActionPreviewKind string
+
+const (
+	Handled EmailWorkActionPreviewKind = "handled"
+	Link    EmailWorkActionPreviewKind = "link"
+)
+
+// Validate checks if the EmailWorkActionPreviewKind value is valid
+func (e EmailWorkActionPreviewKind) Validate() error {
+	switch e {
+	case Handled, Link:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionPreviewKind value, got: %v", e))
+	}
+}
+
+type EmailWorkActionRequestKind string
+
+const (
+	EmailWorkActionRequestKindHandled EmailWorkActionRequestKind = "handled"
+	EmailWorkActionRequestKindLink    EmailWorkActionRequestKind = "link"
+)
+
+// Validate checks if the EmailWorkActionRequestKind value is valid
+func (e EmailWorkActionRequestKind) Validate() error {
+	switch e {
+	case EmailWorkActionRequestKindHandled, EmailWorkActionRequestKindLink:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionRequestKind value, got: %v", e))
+	}
+}
+
+type EmailWorkActionResponseCacheState string
+
+const (
+	EmailWorkActionResponseCacheStateReady EmailWorkActionResponseCacheState = "ready"
+	EmailWorkActionResponseCacheStateStale EmailWorkActionResponseCacheState = "stale"
+)
+
+// Validate checks if the EmailWorkActionResponseCacheState value is valid
+func (e EmailWorkActionResponseCacheState) Validate() error {
+	switch e {
+	case EmailWorkActionResponseCacheStateReady, EmailWorkActionResponseCacheStateStale:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkActionResponseCacheState value, got: %v", e))
+	}
+}
+
+type EmailWorkMemberFactLocalReadState string
+
+const (
+	EmailWorkMemberFactLocalReadStateRead    EmailWorkMemberFactLocalReadState = "read"
+	EmailWorkMemberFactLocalReadStateUnknown EmailWorkMemberFactLocalReadState = "unknown"
+	EmailWorkMemberFactLocalReadStateUnread  EmailWorkMemberFactLocalReadState = "unread"
+)
+
+// Validate checks if the EmailWorkMemberFactLocalReadState value is valid
+func (e EmailWorkMemberFactLocalReadState) Validate() error {
+	switch e {
+	case EmailWorkMemberFactLocalReadStateRead, EmailWorkMemberFactLocalReadStateUnknown, EmailWorkMemberFactLocalReadStateUnread:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkMemberFactLocalReadState value, got: %v", e))
+	}
+}
+
+type EmailWorkPrepareResponseCacheState string
+
+const (
+	EmailWorkPrepareResponseCacheStateReady EmailWorkPrepareResponseCacheState = "ready"
+	EmailWorkPrepareResponseCacheStateStale EmailWorkPrepareResponseCacheState = "stale"
+)
+
+// Validate checks if the EmailWorkPrepareResponseCacheState value is valid
+func (e EmailWorkPrepareResponseCacheState) Validate() error {
+	switch e {
+	case EmailWorkPrepareResponseCacheStateReady, EmailWorkPrepareResponseCacheStateStale:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid EmailWorkPrepareResponseCacheState value, got: %v", e))
+	}
+}
+
 type EmploymentBodySource string
 
 const (
@@ -659,12 +745,14 @@ const (
 	ExploreFilterDimensionParticipant ExploreFilterDimension = "participant"
 	ExploreFilterDimensionReadState   ExploreFilterDimension = "read_state"
 	ExploreFilterDimensionSource      ExploreFilterDimension = "source"
+	HandlingState                     ExploreFilterDimension = "handling_state"
+	RowUnit                           ExploreFilterDimension = "row_unit"
 )
 
 // Validate checks if the ExploreFilterDimension value is valid
 func (e ExploreFilterDimension) Validate() error {
 	switch e {
-	case ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionInboxState, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionReadState, ExploreFilterDimensionSource:
+	case ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionInboxState, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionReadState, ExploreFilterDimensionSource, HandlingState, RowUnit:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ExploreFilterDimension value, got: %v", e))

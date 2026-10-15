@@ -616,6 +616,11 @@ type GetGmailIDsByFilterQuery struct {
 	AggregateKey *string `json:"aggregate_key,omitempty"`
 }
 
+type GetMessageQuery struct {
+	// ExpectedMessageUID Opaque identity of a cached work-item copy; prevents an old link opening reused message IDs
+	ExpectedMessageUID *string `json:"expected_message_uid,omitempty"`
+}
+
 type GetMessageInlinePartQuery struct {
 	// Cid Inline MIME Content-ID
 	Cid string `json:"cid" validate:"required"`

@@ -169,6 +169,16 @@ func seedChangedMessageAtID(t *testing.T, st *store.Store, id int64) int64 {
 		return id
 	}
 	got := seedChangedMessages(t, st, 1)[0]
+	// This fixture deliberately rewrites an allocated SQLite rowid. Remove its
+	// opaque identity and extraction dependents first; production IDs are immutable.
+	for _, table := range []string{"email_linkage_facts", "email_work_seeds"} {
+		column := "message_id"
+		if table == "email_work_seeds" {
+			column = "live_message_id"
+		}
+		_, err := st.DB().Exec("DELETE FROM "+table+" WHERE "+column+" = ?", got)
+		require.NoError(t, err)
+	}
 	_, err := st.DB().Exec(
 		st.Rebind(`UPDATE messages SET id = ? WHERE id = ?`), id, got)
 	require.NoErrorf(t, err, "move message %d to id %d", got, id)

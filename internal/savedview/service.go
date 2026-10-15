@@ -124,3 +124,35 @@ func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error)
 func validateExecutable(state store.SavedViewStateEnvelope) error {
 	return store.ValidateSavedViewState(state)
 }
+
+// EmailWorkReader keeps a work-item read on the exact Saved View and archive
+// revisions that produced its row, rather than silently broadening account scope.
+type EmailWorkReader interface {
+	GetEmailWorkItem(ctx context.Context, viewID, viewRevision int64, uid, cacheRevision string, limit, offset int) (*query.EmailWorkMembersResponse, error)
+}
+
+// EmailWorkRecoveryPlan fixes local intent and optimistic revisions. It grants
+// no authority: the daemon rechecks the current caller and every message copy.
+type EmailWorkRecoveryPlan struct {
+	UID               string                        `json:"uid"`
+	Kind              string                        `json:"kind"`
+	Targets           []store.EmailWorkActionTarget `json:"targets"`
+	Snapshot          string                        `json:"snapshot"`
+	CacheRevision     string                        `json:"cache_revision"`
+	SavedViewID       int64                         `json:"saved_view_id"`
+	SavedViewRevision int64                         `json:"saved_view_revision"`
+	Messages          []query.EmailWorkMemberFact   `json:"messages,omitempty"`
+}
+
+type EmailWorkRecoveryResult struct {
+	Action     *store.EmailWorkAction `json:"action"`
+	CacheState string                 `json:"cache_state"`
+}
+
+// EmailWorkRecovery preserves the native Member curation surface through the
+// revision-pinned Saved View workflow; it never modifies an email provider.
+type EmailWorkRecovery interface {
+	PreviewEmailWorkAction(ctx context.Context, viewID, viewRevision int64, kind string, uids []string, cacheRevision string) (*EmailWorkRecoveryPlan, error)
+	ApplyEmailWorkAction(ctx context.Context, plan EmailWorkRecoveryPlan) (*EmailWorkRecoveryResult, error)
+	UndoEmailWorkAction(ctx context.Context, viewID, viewRevision int64, uid, snapshot, cacheRevision string, actionRevision int64) (*EmailWorkRecoveryResult, error)
+}
