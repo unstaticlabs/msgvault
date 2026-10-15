@@ -384,7 +384,6 @@ jobs:
           go test -timeout 60m -tags "fts5 sqlite_vec" `
             ./internal/api `
             ./internal/importer `
-            ./internal/store `
             ./scripts
 
   test-windows-sharded:
@@ -395,6 +394,10 @@ jobs:
         include:
           - name: cli
             package: ./cmd/msgvault/cmd
+          # The full store binary exceeded 60m on a hosted Windows runner;
+          # keep every test and its timeout, using the existing isolated shards.
+          - name: store
+            package: ./internal/store
           - name: sync-vector-embed
             package: ./internal/sync
             package2: ./internal/vector/embed
