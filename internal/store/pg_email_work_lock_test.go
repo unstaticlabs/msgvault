@@ -46,8 +46,9 @@ func pgWorkAwait(t *testing.T, result <-chan error) error {
 	}
 }
 
-// Real maintenance must wait behind each new writer's early table lock. The
-// blocker is an actual row/table lock, never a stubbed production operation.
+// Real maintenance must wait behind each writer's early lock. Attribution
+// writers hold the identity row before touching message tables; the other
+// writers hold an early table lock. Every blocker is a real PostgreSQL lock.
 func TestPostgreSQLEmailWorkWritersSerializeSourceRemoval(t *testing.T) {
 	for _, kind := range []string{"backfill", "raw", "create", "undo"} {
 		t.Run(kind, func(t *testing.T) {
@@ -107,15 +108,22 @@ func TestPostgreSQLEmailWorkWritersSerializeSourceRemoval(t *testing.T) {
 			pgWorkWait(t, st, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE ?=ANY(pg_blocking_pids(pid)))`, blockerPID)
 			maintenance := make(chan error, 1)
 			go func() { _, _, err := st.RemoveSourceSerialized(ctx, source); maintenance <- err }()
-			relation := "messages"
-			mode := "RowExclusiveLock"
-			switch kind {
-			case "backfill":
-				relation = "sources"
-			case "raw":
-				mode = "RowShareLock"
+			if kind == "raw" {
+				// MIME attribution holds the shared identity row first, so
+				// maintenance waits there before reaching its table locks.
+				// Prove the full maintenance -> writer -> fixture chain.
+				pgWorkWait(t, st, `SELECT EXISTS(
+					SELECT 1 FROM pg_stat_activity writer
+					JOIN pg_stat_activity maintenance ON writer.pid=ANY(pg_blocking_pids(maintenance.pid))
+					WHERE ?=ANY(pg_blocking_pids(writer.pid))
+				)`, blockerPID)
+			} else {
+				relation := "messages"
+				if kind == "backfill" {
+					relation = "sources"
+				}
+				pgWorkWait(t, st, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='%s'::regclass AND mode='ExclusiveLock' AND NOT granted) AND EXISTS(SELECT 1 FROM pg_locks WHERE relation='%s'::regclass AND mode='RowExclusiveLock' AND granted)`, relation, relation))
 			}
-			pgWorkWait(t, st, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='%s'::regclass AND mode='ExclusiveLock' AND NOT granted) AND EXISTS(SELECT 1 FROM pg_locks WHERE relation='%s'::regclass AND mode='%s' AND granted)`, relation, relation, mode))
 			r.NoError(blocker.Rollback())
 			r.NoError(pgWorkAwait(t, writer))
 			r.NoError(pgWorkAwait(t, maintenance))
@@ -136,9 +144,10 @@ func TestPostgreSQLEmailWorkWritersSerializeSourceRemoval(t *testing.T) {
 	}
 }
 
-// The real scoped transaction fences sync_runs before its callback. Maintenance
-// holds identity then waits on that first table; scoped writes must finish
-// without trying to acquire identity after the fence.
+// The real scoped transaction fences sync_runs before its callback. MIME
+// attribution holds identity before that fence, so maintenance waits on identity;
+// backfill instead makes maintenance wait on the fenced table. Neither path may
+// try to acquire identity after the fence.
 func TestPostgreSQLEmailWorkScopedRawMaintenanceLiveness(t *testing.T) {
 	for _, kind := range []string{"raw", "backfill"} {
 		t.Run(kind, func(t *testing.T) {
@@ -187,7 +196,15 @@ func TestPostgreSQLEmailWorkScopedRawMaintenanceLiveness(t *testing.T) {
 				}
 				maintenance <- err
 			}()
-			pgWorkWait(t, st, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='sync_runs'::regclass AND mode='ExclusiveLock' AND NOT granted)`)
+			if kind == "raw" {
+				pgWorkWait(t, st, `SELECT EXISTS(
+					SELECT 1 FROM pg_stat_activity writer
+					JOIN pg_stat_activity maintenance ON writer.pid=ANY(pg_blocking_pids(maintenance.pid))
+					WHERE ?=ANY(pg_blocking_pids(writer.pid))
+				)`, pid)
+			} else {
+				pgWorkWait(t, st, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation='sync_runs'::regclass AND mode='ExclusiveLock' AND NOT granted)`)
+			}
 			r.NoError(blocker.Rollback())
 			r.NoError(pgWorkAwait(t, writer))
 			r.NoError(pgWorkAwait(t, maintenance))
