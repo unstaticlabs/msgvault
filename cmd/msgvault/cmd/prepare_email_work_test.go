@@ -72,13 +72,11 @@ func TestPrepareEmailWorkCLIUsesNativeResumableDaemonAndSourceAuthority(t *testi
 	endpoint := httptest.NewServer(mux)
 	t.Cleanup(endpoint.Close)
 	writeStatsHTTPDaemonRuntime(t, home, endpoint)
-	savedCfg, savedLocal := cfg, useLocal
-	t.Cleanup(func() { cfg = savedCfg; useLocal = savedLocal })
-	cfg = &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}, Remote: config.RemoteConfig{URL: endpoint.URL, APIKey: "synthetic-prepare-member", AllowInsecure: true}}
-	useLocal = false
+	cliConfig := &config.Config{HomeDir: home, Data: config.DataConfig{DataDir: home}, Remote: config.RemoteConfig{URL: endpoint.URL, APIKey: "synthetic-prepare-member", AllowInsecure: true}}
 	run := func(arguments ...string) (*bytes.Buffer, error) {
 		output := &bytes.Buffer{}
 		root := newTestRootCmd()
+		root.SetContext(testInvocationContext(ctx, cliConfig, invocationOptions{}))
 		root.SetOut(output)
 		root.SetErr(io.Discard)
 		root.AddCommand(newPrepareEmailWorkCommand())
@@ -87,13 +85,13 @@ func TestPrepareEmailWorkCLIUsesNativeResumableDaemonAndSourceAuthority(t *testi
 	}
 	_, err = run(strconv.FormatInt(excluded.ID, 10))
 	requirements.Error(err, "member cannot prepare excluded source")
-	cfg.Remote.APIKey = "synthetic-prepare-viewer"
+	cliConfig.Remote.APIKey = "synthetic-prepare-viewer"
 	_, err = run(strconv.FormatInt(source.ID, 10))
 	requirements.Error(err, "viewer cannot allocate derived identities")
 	var count int
 	requirements.NoError(st.DB().QueryRow("SELECT COUNT(*) FROM email_work_seeds").Scan(&count))
 	assertions.Zero(count)
-	cfg.Remote.APIKey = "synthetic-prepare-member"
+	cliConfig.Remote.APIKey = "synthetic-prepare-member"
 	output, err := run(strconv.FormatInt(source.ID, 10), "--batch-size", "2", "--all")
 	requirements.NoError(err, output.String())
 	decoder := json.NewDecoder(output)

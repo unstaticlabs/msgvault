@@ -6,7 +6,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"go.kenn.io/msgvault/internal/namematch"
 )
 
 const (
@@ -35,7 +38,7 @@ const (
 type DirectoryPeopleQuery struct {
 	Query             string     `json:"query,omitempty"`
 	Cursor            string     `json:"cursor,omitempty"`
-	Limit             int        `json:"limit,omitempty"`
+	Limit             int        `json:"limit,omitzero"`
 	ContactState      string     `json:"contact_state,omitempty"`
 	Category          string     `json:"category,omitempty"`
 	Organization      string     `json:"organization,omitempty"`
@@ -49,14 +52,16 @@ type DirectoryPeopleQuery struct {
 // a durable person root. ContactState is "active" when a contact projection
 // has a last-contact timestamp and "inactive" otherwise.
 type DirectoryPersonSummary struct {
-	ID             int64      `json:"id"`
-	DisplayName    *string    `json:"display_name,omitempty"`
-	Revision       int64      `json:"revision"`
-	PrimaryChannel string     `json:"primary_channel,omitempty"`
-	ContactState   string     `json:"contact_state"`
-	LastContactAt  *time.Time `json:"last_contact_at,omitempty"`
-	Categories     []string   `json:"categories" nullable:"false"`
-	Organizations  []string   `json:"organizations" nullable:"false"`
+	ID              int64            `json:"id"`
+	VCardUID        string           `json:"vcard_uid"`
+	CardDAVBindings []CardDAVBinding `json:"carddav_bindings"`
+	DisplayName     *string          `json:"display_name,omitzero" nullable:"false"`
+	Revision        int64            `json:"revision"`
+	PrimaryChannel  string           `json:"primary_channel,omitempty"`
+	ContactState    string           `json:"contact_state"`
+	LastContactAt   *time.Time       `json:"last_contact_at,omitempty"`
+	Categories      []string         `json:"categories" nullable:"false"`
+	Organizations   []string         `json:"organizations" nullable:"false"`
 }
 
 // DirectoryPeoplePage is one stable keyset page of directory people.
@@ -173,7 +178,7 @@ func normalizeDirectoryPeopleQuery(query DirectoryPeopleQuery) (normalizedDirect
 		PrimaryChannel:   normalized.primaryChannel,
 		LastContactAfter: normalized.lastContactAfter, LastContactBefore: normalized.lastContactBefore,
 		Sort: normalized.sort,
-	})
+	}, json.Deterministic(true))
 	if err != nil {
 		return normalized, fmt.Errorf("encode directory filters: %w", err)
 	}
@@ -468,51 +473,7 @@ func directoryCandidateQuality(tokens, terms []string) (int, bool) {
 }
 
 func directoryEditDistanceAtMostOne(left, right string) bool {
-	a, b := []rune(left), []rune(right)
-	if len(a)-len(b) > 1 || len(b)-len(a) > 1 {
-		return false
-	}
-	if len(a) == len(b) {
-		first, second := -1, -1
-		for index := range a {
-			if a[index] == b[index] {
-				continue
-			}
-			if first == -1 {
-				first = index
-			} else if second == -1 {
-				second = index
-			} else {
-				return false
-			}
-		}
-		if second == first+1 && a[first] == b[second] && a[second] == b[first] {
-			return true
-		}
-	}
-	previous, current := make([]int, len(b)+1), make([]int, len(b)+1)
-	for index := range previous {
-		previous[index] = index
-	}
-	for i := 1; i <= len(a); i++ {
-		current[0] = i
-		minimum := current[0]
-		for j := 1; j <= len(b); j++ {
-			cost := 0
-			if a[i-1] != b[j-1] {
-				cost = 1
-			}
-			current[j] = min(previous[j]+1, current[j-1]+1, previous[j-1]+cost)
-			if current[j] < minimum {
-				minimum = current[j]
-			}
-		}
-		if minimum > 1 {
-			return false
-		}
-		previous, current = current, previous
-	}
-	return previous[len(b)] <= 1
+	return namematch.AtMostOne(left, right)
 }
 
 func directoryTermProjectionSQL(term string, index int) (string, []any) {
@@ -559,7 +520,7 @@ func (s *Store) hydrateDirectoryPeopleTx(ctx context.Context, tx *loggedTx, cand
 		byID[candidates[index].summary.ID] = index
 	}
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-	rows, err := tx.QueryContext(ctx, `SELECT person.id, person.display_name, person.revision,
+	rows, err := tx.QueryContext(ctx, `SELECT person.id, person.vcard_uid, person.display_name, person.revision,
 		projection.primary_channel, projection.contact_state, projection.last_contact_key
 		FROM persons person JOIN directory_people projection ON projection.person_id = person.id
 		WHERE person.id IN (`+placeholders+`)`, ids...)
@@ -568,13 +529,17 @@ func (s *Store) hydrateDirectoryPeopleTx(ctx context.Context, tx *loggedTx, cand
 	}
 	for rows.Next() {
 		var id int64
+		var vcardUID string
 		var displayName sql.NullString
+		var revision int64
 		var primaryChannel, contactState, lastContactKey string
-		if err := rows.Scan(&id, &displayName, &candidates[byID[id]].summary.Revision, &primaryChannel, &contactState, &lastContactKey); err != nil {
+		if err := rows.Scan(&id, &vcardUID, &displayName, &revision, &primaryChannel, &contactState, &lastContactKey); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan hydrated directory person: %w", err)
 		}
 		candidate := &candidates[byID[id]]
+		candidate.summary.VCardUID = vcardUID
+		candidate.summary.Revision = revision
 		candidate.summary.PrimaryChannel = primaryChannel
 		candidate.summary.ContactState = contactState
 		if lastContactKey != "" {
@@ -598,6 +563,17 @@ func (s *Store) hydrateDirectoryPeopleTx(ctx context.Context, tx *loggedTx, cand
 	}
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("close hydrated directory people: %w", err)
+	}
+	personIDs := make([]int64, len(candidates))
+	for index := range candidates {
+		personIDs[index] = candidates[index].summary.ID
+	}
+	bindings, err := s.listCardDAVBindingsTx(ctx, tx, personIDs)
+	if err != nil {
+		return err
+	}
+	for index := range candidates {
+		candidates[index].summary.CardDAVBindings = bindings[candidates[index].summary.ID]
 	}
 	if err := hydrateDirectoryValuesTx(ctx, tx, `SELECT person_id, original_value
 		FROM person_categories WHERE active_until IS NULL AND superseded_at IS NULL
@@ -640,7 +616,7 @@ func hydrateDirectoryValuesTx(ctx context.Context, tx *loggedTx, query string, a
 }
 
 func encodeDirectoryPeopleCursor(cursor directoryPeopleCursor) (string, error) {
-	encoded, err := json.Marshal(cursor)
+	encoded, err := json.Marshal(cursor, json.Deterministic(true))
 	if err != nil {
 		return "", fmt.Errorf("encode directory cursor: %w", err)
 	}
@@ -656,9 +632,9 @@ func decodeDirectoryPeopleCursor(value string) (directoryPeopleCursor, error) {
 		return directoryPeopleCursor{}, ErrInvalidDirectoryCursor
 	}
 	var cursor directoryPeopleCursor
-	decoder := json.NewDecoder(strings.NewReader(string(decoded)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cursor); err != nil ||
+	decoder := jsontext.NewDecoder(strings.NewReader(string(decoded)), json.RejectUnknownMembers(true))
+
+	if err := json.UnmarshalDecode(decoder, &cursor); err != nil ||
 		cursor.Version != directoryCursorVersion ||
 		!validLowerSHA256(cursor.Fingerprint) ||
 		!validLowerSHA256(cursor.AnchorHash) ||
@@ -666,7 +642,7 @@ func decodeDirectoryPeopleCursor(value string) (directoryPeopleCursor, error) {
 		cursor.PersonID <= 0 {
 		return directoryPeopleCursor{}, ErrInvalidDirectoryCursor
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := json.UnmarshalDecode(decoder, &struct{}{}); !errors.Is(err, io.EOF) {
 		return directoryPeopleCursor{}, ErrInvalidDirectoryCursor
 	}
 	return cursor, nil

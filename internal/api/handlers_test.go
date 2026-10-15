@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -39,11 +40,13 @@ import (
 	"go.kenn.io/msgvault/internal/gcal"
 	"go.kenn.io/msgvault/internal/granola"
 	"go.kenn.io/msgvault/internal/meetingimport"
+	"go.kenn.io/msgvault/internal/muesli"
 	"go.kenn.io/msgvault/internal/notionmeetings"
 	"go.kenn.io/msgvault/internal/opserr"
 	"go.kenn.io/msgvault/internal/personenrichment"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/query/querytest"
+	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/synctechsms"
@@ -54,6 +57,8 @@ import (
 	"go.kenn.io/msgvault/internal/vector/hybrid"
 	"go.kenn.io/msgvault/internal/vector/visual"
 )
+
+const ordinaryQueryCeiling = 20 * time.Millisecond
 
 // stubEmbedder is an EmbeddingClient placeholder for tests where the
 // engine never reaches the embed step (e.g. ResolveActiveForFingerprint
@@ -146,6 +151,7 @@ func decodeNDJSONEvents[T any](t *testing.T, body io.Reader) []T {
 }
 
 func TestHandleStats(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, _ := newTestServerWithMockStore(t)
@@ -176,9 +182,16 @@ func TestHandleStats(t *testing.T) {
 	require.NoError(json.Unmarshal(bodyBytes, &raw), "decode raw")
 	_, exists := raw["vector_search"]
 	assert.False(exists, "vector_search key present in JSON; want omitted entirely (raw=%s)", string(raw["vector_search"]))
+	for _, size := range []int64{0, 1024} {
+		body, err := json.Marshal(statsResponseFromStore(&store.Stats{DatabaseSize: size}))
+		require.NoError(err)
+		require.NoError(json.Unmarshal(body, &raw))
+		assert.JSONEq(strconv.FormatInt(size, 10), string(raw["database_size_bytes"]))
+	}
 }
 
 func TestHandleCLIStatsCollectionScope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -205,6 +218,7 @@ func TestHandleCLIStatsCollectionScope(t *testing.T) {
 }
 
 func TestHandleCLIStatsAccountScopeIncludesAssociatedCalendarSources(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -237,6 +251,7 @@ func TestHandleCLIStatsAccountScopeIncludesAssociatedCalendarSources(t *testing.
 }
 
 func TestHandleCLIStatsAccountLookupErrorReturnsInternal(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, st := newTestServerWithMockStore(t)
@@ -256,10 +271,12 @@ func TestHandleCLIStatsAccountLookupErrorReturnsInternal(t *testing.T) {
 }
 
 func TestMarkedCLIGlobalStatsCancellationInterruptsStore(t *testing.T) {
+	t.Parallel()
 	testMarkedCLIStatsCancellationInterruptsStore(t, "/api/v1/cli/stats", false)
 }
 
 func TestMarkedCLIScopedStatsCancellationInterruptsStore(t *testing.T) {
+	t.Parallel()
 	testMarkedCLIStatsCancellationInterruptsStore(
 		t,
 		"/api/v1/cli/stats?collection=Important",
@@ -361,6 +378,7 @@ func testMarkedCLIStatsCancellationInterruptsStore(t *testing.T, target string, 
 }
 
 func TestHandleCLICreateDeletionManifest(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	manifest := deletion.NewManifest("tui selection", []string{"gid1", "gid2"})
@@ -395,6 +413,7 @@ func TestHandleCLICreateDeletionManifest(t *testing.T) {
 }
 
 func TestHandleCLICreateDeletionManifestRejectsTraversalID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	manifest := deletion.NewManifest("tui selection", []string{"gid1"})
@@ -424,6 +443,7 @@ func TestHandleCLICreateDeletionManifestRejectsTraversalID(t *testing.T) {
 }
 
 func TestHandleCLIIdentities(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -466,6 +486,7 @@ func TestHandleCLIIdentities(t *testing.T) {
 }
 
 func TestHandleCLIIdentitiesPrimaryOnlyAccount(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -503,6 +524,7 @@ func TestHandleCLIIdentitiesPrimaryOnlyAccount(t *testing.T) {
 }
 
 func TestHandleCLIIdentityAddAndRemove(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -557,6 +579,7 @@ func TestHandleCLIIdentityAddAndRemove(t *testing.T) {
 }
 
 func TestHandleCLICollectionMutations(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -644,6 +667,7 @@ func TestHandleCLICollectionMutations(t *testing.T) {
 }
 
 func TestDocsPageDisabledOpenAPISpecStillServed(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -663,6 +687,7 @@ func TestDocsPageDisabledOpenAPISpecStillServed(t *testing.T) {
 }
 
 func TestOpenAPIExportsCLIIdentityContracts(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -692,6 +717,7 @@ func TestOpenAPIExportsCLIIdentityContracts(t *testing.T) {
 }
 
 func TestOpenAPIExportsServerRouteTable(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	st := testutil.NewTestStore(t)
 	srv := NewServer(&config.Config{Server: config.ServerConfig{APIPort: 8080}}, st, nil, testLogger())
@@ -724,6 +750,8 @@ func TestOpenAPIExportsServerRouteTable(t *testing.T) {
 		"/api/v1/cli/repair-encoding":            {"post"},
 		"/api/v1/cli/message":                    {"get"},
 		"/api/v1/cli/message/raw":                {"get"},
+		"/api/v1/cli/message/original":           {"get"},
+		"/api/v1/cli/message/thread":             {"get"},
 		"/api/v1/cli/attachment":                 {"get"},
 		"/api/v1/cli/collections":                {"get", "post"},
 		"/api/v1/cli/collections/{name}":         {"delete"},
@@ -737,6 +765,7 @@ func TestOpenAPIExportsServerRouteTable(t *testing.T) {
 		"/api/v1/messages":                       {"get"},
 		"/api/v1/messages/{id}":                  {"get"},
 		"/api/v1/messages/{id}/inline":           {"get"},
+		"/api/v1/messages/{id}/recordings":       {"get"},
 		"/api/v1/search":                         {"get"},
 		"/api/v1/query":                          {"post"},
 		"/api/v1/aggregates":                     {"get"},
@@ -794,6 +823,7 @@ func TestOpenAPIExportsServerRouteTable(t *testing.T) {
 }
 
 func TestCLIInitDBRunsStartupMigrationsAndReturnsStats(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -819,6 +849,7 @@ func TestCLIInitDBRunsStartupMigrationsAndReturnsStats(t *testing.T) {
 }
 
 func TestCLICacheStatsReportsMissingCacheThroughDaemon(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -840,6 +871,7 @@ func TestCLICacheStatsReportsMissingCacheThroughDaemon(t *testing.T) {
 }
 
 func TestCLICacheStatsReportsInterruptedCacheThroughDaemon(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -865,6 +897,7 @@ func TestCLICacheStatsReportsInterruptedCacheThroughDaemon(t *testing.T) {
 }
 
 func TestHandleCLIBuildCacheStreamsOutput(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -892,6 +925,7 @@ func TestHandleCLIBuildCacheStreamsOutput(t *testing.T) {
 }
 
 func TestHandleCLISyncFullStreamsOutput(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -930,6 +964,7 @@ func TestHandleCLISyncFullStreamsOutput(t *testing.T) {
 }
 
 func TestHandleCLISyncAcceptsFolderFilters(t *testing.T) {
+	t.Parallel()
 	var gotReq CLISyncRequest
 	st := &mockStore{
 		syncFunc: func(_ context.Context, req CLISyncRequest, _ func(CLISyncEvent) error) error {
@@ -953,6 +988,7 @@ func TestHandleCLISyncAcceptsFolderFilters(t *testing.T) {
 }
 
 func TestHandleCLISyncParsesExactSourceID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -976,6 +1012,7 @@ func TestHandleCLISyncParsesExactSourceID(t *testing.T) {
 }
 
 func TestHandleCLISyncRejectsInvalidSourceID(t *testing.T) {
+	t.Parallel()
 	srv := newCLIHandlerTestServer(&mockStore{})
 	for _, path := range []string{
 		"/api/v1/cli/sync?source_id=0",
@@ -988,6 +1025,7 @@ func TestHandleCLISyncRejectsInvalidSourceID(t *testing.T) {
 }
 
 func TestHandleCLIVerifyStreamsOutput(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1023,6 +1061,7 @@ func TestHandleCLIVerifyStreamsOutput(t *testing.T) {
 }
 
 func TestHandleCLIRepairEncodingStreamsOutput(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1046,6 +1085,7 @@ func TestHandleCLIRepairEncodingStreamsOutput(t *testing.T) {
 }
 
 func TestHandleCLIRunStreamsGenericCommandOutput(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1081,6 +1121,7 @@ func TestHandleCLIRunStreamsGenericCommandOutput(t *testing.T) {
 }
 
 func TestHandleCLIRunProtectsAddAccountGrantDecision(t *testing.T) {
+	t.Parallel()
 	t.Run("caller supplied flag is rejected", func(t *testing.T) {
 		runs := 0
 		st := &mockStore{runFunc: func(
@@ -1159,6 +1200,7 @@ func TestHandleCLIRunProtectsAddAccountGrantDecision(t *testing.T) {
 }
 
 func TestHandleCLIRunAllowsLegacyBuildEmbeddingsCommand(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1190,6 +1232,7 @@ func TestHandleCLIRunAllowsLegacyBuildEmbeddingsCommand(t *testing.T) {
 }
 
 func TestHandleCLIRunAllowsLogsCommand(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1221,81 +1264,97 @@ func TestHandleCLIRunAllowsLogsCommand(t *testing.T) {
 }
 
 func TestHandleCLIRunBypassesStandardRequestTimeout(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	canceled := false
-	st := &mockStore{
-		runFunc: func(ctx context.Context, req CLIRunRequest, emit func(CLIRunEvent) error) error {
-			assert.Equal([]string{"deduplicate", "--dry-run"}, req.Args, "args")
-			time.Sleep(40 * time.Millisecond)
-			if err := ctx.Err(); err != nil {
-				canceled = true
-				return err
-			}
-			return emit(CLIRunEvent{Type: cliStreamEventTypeComplete})
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config:         &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:          st,
-		Logger:         testLogger(),
-		RequestTimeout: 5 * time.Millisecond,
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		canceled := false
+		st := &mockStore{
+			runFunc: func(ctx context.Context, req CLIRunRequest, emit func(CLIRunEvent) error) error {
+				assert.Equal([]string{"deduplicate", "--dry-run"}, req.Args, "args")
+				synctest.Sleep(40 * time.Millisecond)
+				if err := ctx.Err(); err != nil {
+					canceled = true
+					return err
+				}
+				return emit(CLIRunEvent{Type: cliStreamEventTypeComplete})
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config:         &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:          st,
+			Logger:         testLogger(),
+			RequestTimeout: 5 * time.Millisecond,
+		})
+		defer func() { require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
+
+		body := strings.NewReader(`{"args":["deduplicate","--dry-run"]}`)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", body)
+		req.Header.Set("Content-Type", "application/json")
+		resp := httptest.NewRecorder()
+		srv.Router().ServeHTTP(resp, req)
+
+		require.Equal(http.StatusOK, resp.Code, "status: %s", resp.Body.String())
+		assert.False(canceled, "cli runner context should not use the standard request timeout")
+		assert.Contains(resp.Body.String(), `"type":"complete"`, "body")
 	})
-
-	body := strings.NewReader(`{"args":["deduplicate","--dry-run"]}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", body)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-	srv.Router().ServeHTTP(resp, req)
-
-	require.Equal(http.StatusOK, resp.Code, "status: %s", resp.Body.String())
-	assert.False(canceled, "cli runner context should not use the standard request timeout")
-	assert.Contains(resp.Body.String(), `"type":"complete"`, "body")
 }
 
 func TestHandleQueryEnforcesQueryTimeout(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	started := make(chan struct{})
-	srv := NewServerWithOptions(ServerOptions{
-		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Logger: testLogger(),
-		SQLQueryRunner: func(ctx context.Context, _ string) (*query.QueryResult, error) {
-			close(started)
-			<-ctx.Done() // simulate a runaway query that only stops on cancellation
-			return nil, ctx.Err()
-		},
-	})
-	// Test seam: shrink the query ceiling so the timeout fires immediately.
-	srv.queryTimeout = 20 * time.Millisecond
+	t.Parallel()
+	for _, path := range []string{queryEndpointPath, archiveQueryEndpointPath} {
+		t.Run(path, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			started := make(chan struct{})
+			waitForCancellation := func(ctx context.Context) error {
+				close(started)
+				<-ctx.Done() // simulate a runaway query that only stops on cancellation
+				return ctx.Err()
+			}
+			srv := NewServerWithOptions(ServerOptions{
+				Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+				Logger: testLogger(),
+				SQLQueryRunner: func(ctx context.Context, _ string, _ bool) (*query.QueryResult, *CacheBuildAccepted, error) {
+					return nil, nil, waitForCancellation(ctx)
+				},
+				ArchiveSQLQueryRunner: func(ctx context.Context, _ string, _ bool) (*query.QueryResult, *CacheBuildAccepted, error) {
+					return nil, nil, waitForCancellation(ctx)
+				},
+			})
+			// Test seam: shrink the query ceiling so the timeout fires immediately.
+			srv.queryTimeout = ordinaryQueryCeiling
 
-	body := strings.NewReader(`{"sql":"SELECT 1"}`)
-	req := httptest.NewRequest(http.MethodPost, queryEndpointPath, body)
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
+			body := strings.NewReader(`{"sql":"SELECT 1"}`)
+			req := httptest.NewRequest(http.MethodPost, path, body)
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
 
-	done := make(chan struct{})
-	go func() {
-		srv.Router().ServeHTTP(resp, req)
-		close(done)
-	}()
+			done := make(chan struct{})
+			go func() {
+				srv.Router().ServeHTTP(resp, req)
+				close(done)
+			}()
 
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		require.FailNow("query runner never started")
+			select {
+			case <-started:
+			case <-time.After(2 * time.Second):
+				require.FailNow("query runner never started")
+			}
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				require.FailNow("request did not return after query timeout")
+			}
+
+			require.Equal(http.StatusServiceUnavailable, resp.Code, "body: %s", resp.Body.String())
+			assert.Contains(resp.Body.String(), "query_timeout")
+		})
 	}
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		require.FailNow("request did not return after query timeout")
-	}
-
-	require.Equal(http.StatusServiceUnavailable, resp.Code, "body: %s", resp.Body.String())
-	assert.Contains(resp.Body.String(), "query_timeout")
 }
 
 func TestMarkedCLIQueryCancellationInterruptsDuckDB(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	engine, err := query.NewDuckDBEngine("", "", nil)
@@ -1312,17 +1371,17 @@ func TestMarkedCLIQueryCancellationInterruptsDuckDB(t *testing.T) {
 			APIKey:  cliTimeoutTestAPIKey,
 		}},
 		Logger: testLogger(),
-		SQLQueryRunner: func(ctx context.Context, sql string) (*query.QueryResult, error) {
+		SQLQueryRunner: func(ctx context.Context, sql string, _ bool) (*query.QueryResult, *CacheBuildAccepted, error) {
 			_, hasDeadline := ctx.Deadline()
 			queryHasDeadline <- hasDeadline
 			close(queryStarted)
 			result, err := engine.QuerySQL(ctx, sql)
 			queryErr <- err
 			close(queryReturned)
-			return result, err
+			return result, nil, err
 		},
 	})
-	srv.queryTimeout = 20 * time.Millisecond
+	srv.queryTimeout = ordinaryQueryCeiling
 	httpServer := httptest.NewServer(srv.Router())
 	t.Cleanup(httpServer.Close)
 
@@ -1345,14 +1404,11 @@ func TestMarkedCLIQueryCancellationInterruptsDuckDB(t *testing.T) {
 		requestDone <- err
 	}()
 
-	require.Eventually(func() bool {
-		select {
-		case <-queryStarted:
-			return true
-		default:
-			return false
-		}
-	}, 2*time.Second, 10*time.Millisecond, "DuckDB query starts")
+	select {
+	case <-queryStarted:
+	case <-time.After(2 * time.Second):
+		require.FailNow("DuckDB query did not start")
+	}
 	assert.False(<-queryHasDeadline, "marked query context must not have a server deadline")
 	assert.Never(func() bool {
 		select {
@@ -1361,7 +1417,7 @@ func TestMarkedCLIQueryCancellationInterruptsDuckDB(t *testing.T) {
 		default:
 			return false
 		}
-	}, 60*time.Millisecond, 5*time.Millisecond,
+	}, 3*ordinaryQueryCeiling, 5*time.Millisecond,
 		"marked query survives the 20ms ordinary query ceiling")
 
 	cancel()
@@ -1375,6 +1431,7 @@ func TestMarkedCLIQueryCancellationInterruptsDuckDB(t *testing.T) {
 }
 
 func TestHandleCLIRunRejectsDisallowedEnv(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	st := &mockStore{
@@ -1396,6 +1453,7 @@ func TestHandleCLIRunRejectsDisallowedEnv(t *testing.T) {
 }
 
 func TestHandleCLIRunEnforcesPersonEnrichmentCommandEnvironments(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	checks := assert.New(t)
 	var runs []CLIRunRequest
@@ -1446,6 +1504,7 @@ func TestHandleCLIRunEnforcesPersonEnrichmentCommandEnvironments(t *testing.T) {
 }
 
 func TestHandleCLIAddCalendarPlanReturnsPrompt(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1486,6 +1545,7 @@ func TestHandleCLIAddCalendarPlanReturnsPrompt(t *testing.T) {
 }
 
 func TestHandleCLIEmbeddingsPlanReturnsPrompt(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1521,6 +1581,7 @@ func TestHandleCLIEmbeddingsPlanReturnsPrompt(t *testing.T) {
 }
 
 func TestHandleCLIDeleteStagedPlanReturnsPrompt(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1575,6 +1636,7 @@ func TestHandleCLIDeleteStagedPlanReturnsPrompt(t *testing.T) {
 }
 
 func TestHandleCLIDeduplicatePlanReturnsItems(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1626,6 +1688,7 @@ func TestHandleCLIDeduplicatePlanReturnsItems(t *testing.T) {
 }
 
 func TestHandleCLIDeduplicatePlanRejectsMissingProtocol(t *testing.T) {
+	t.Parallel()
 	called := false
 	st := &mockStore{
 		planDedupFunc: func(context.Context, CLIDeduplicatePlanRequest) (CLIDeduplicatePlanResponse, error) {
@@ -1646,6 +1709,7 @@ func TestHandleCLIDeduplicatePlanRejectsMissingProtocol(t *testing.T) {
 }
 
 func TestHandleCLIDeduplicatePlanRequestErrorUsesAPIEnvelope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1677,6 +1741,7 @@ func TestHandleCLIDeduplicatePlanRequestErrorUsesAPIEnvelope(t *testing.T) {
 }
 
 func TestHandleCLIDeduplicatePlanInvalidCollectionUsesAPIEnvelope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1707,6 +1772,7 @@ func TestHandleCLIDeduplicatePlanInvalidCollectionUsesAPIEnvelope(t *testing.T) 
 }
 
 func TestHandleCLIRunRejectsDisallowedCommand(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	st := &mockStore{
@@ -1728,6 +1794,7 @@ func TestHandleCLIRunRejectsDisallowedCommand(t *testing.T) {
 }
 
 func TestHandleCLIRunBackupSubcommandAdmission(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		args    []string
@@ -1740,6 +1807,7 @@ func TestHandleCLIRunBackupSubcommandAdmission(t *testing.T) {
 		{"backup unknown subcommand rejected", []string{"backup", "restore"}, false},
 		{"logs still allowed", []string{"logs"}, true},
 		{"gc allowed", []string{"gc", "--yes"}, true},
+		{"import-maildir allowed", []string{"import-maildir", "--identifier", "me@example.test", "dir"}, true},
 		{"import-eml allowed", []string{"import-eml", "--identifier", "me@example.test", "dir"}, true},
 		{"remove-account still allowed", []string{"remove-account", "alice@example.com", "--yes"}, true},
 		{"purge excluded media dry-run allowed", []string{"purge-excluded-media", "--dry-run"}, true},
@@ -1786,6 +1854,7 @@ func TestHandleCLIRunBackupSubcommandAdmission(t *testing.T) {
 }
 
 func TestHandleCLIRunAcceptsDiscordTokenEnvWithoutExposingSecret(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	const secret = "synthetic-discord-secret"
@@ -1836,6 +1905,7 @@ func TestHandleCLIRunAcceptsDiscordTokenEnvWithoutExposingSecret(t *testing.T) {
 }
 
 func TestCLIDeleteDedupedPlansAndExecutesThroughDaemon(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1906,6 +1976,7 @@ func TestCLIDeleteDedupedPlansAndExecutesThroughDaemon(t *testing.T) {
 }
 
 func TestCLIDeleteDedupedRejectsChangedBatchPlan(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1952,6 +2023,7 @@ func TestCLIDeleteDedupedRejectsChangedBatchPlan(t *testing.T) {
 }
 
 func TestCLIDeleteDedupedRequiresExpectedBatchesForBatchExecute(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -2008,6 +2080,7 @@ func createAPIDedupMessage(t *testing.T, f *storetest.Fixture, sourceMessageID, 
 }
 
 func TestHandleCLIIdentityAddPreservesErrorEnvelope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2034,6 +2107,7 @@ func TestHandleCLIIdentityAddPreservesErrorEnvelope(t *testing.T) {
 }
 
 func TestHandleCLIIdentityAddMissingAccountUsesNotFoundCode(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2061,6 +2135,7 @@ func TestHandleCLIIdentityAddMissingAccountUsesNotFoundCode(t *testing.T) {
 }
 
 func TestOperationErrorPoliciesDocumentNotFoundStatus(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	srv := &Server{logger: testLogger()}
 
@@ -2093,6 +2168,7 @@ func TestOperationErrorPoliciesDocumentNotFoundStatus(t *testing.T) {
 }
 
 func TestResolveCLIStatsScopeRejectsMutuallyExclusiveScope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2105,6 +2181,7 @@ func TestResolveCLIStatsScopeRejectsMutuallyExclusiveScope(t *testing.T) {
 }
 
 func TestHandleCLISearchCollectionScope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2145,77 +2222,75 @@ func TestHandleCLISearchCollectionScope(t *testing.T) {
 // completeness probe (a minute on a large archive) or a backfill is running,
 // reporting the background work's state instead of waiting on it.
 func TestHandleCLISearchDoesNotBlockOnIndexBuild(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-
-	probeRelease := make(chan struct{})
-	backfillEntered := make(chan struct{})
-	backfillRelease := make(chan struct{})
-	st := &mockStore{
-		needsFTSBackfillFunc: func() bool {
-			<-probeRelease // closed channel unblocks both probe calls
-			return true
-		},
-		backfillFTSFunc: func(func(done, total int64)) (int64, error) {
-			close(backfillEntered)
-			<-backfillRelease
-			return 12, nil
-		},
-	}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(ctx context.Context, _ *search.Query, _, _ int) ([]query.MessageSummary, error) {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			return []query.MessageSummary{{ID: 1, Subject: "match"}}, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config:         &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:          st,
-		Engine:         engine,
-		Logger:         testLogger(),
-		RequestTimeout: 5 * time.Millisecond,
-	})
-
-	searchIndexState := func() string {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello&limit=10", nil)
-		w := httptest.NewRecorder()
-		srv.Router().ServeHTTP(w, req)
-		require.Equal(http.StatusOK, w.Code, "status: %s", w.Body.String())
-		var resp struct {
-			Results []struct {
-				Subject string `json:"subject"`
-			} `json:"results"`
-			IndexBuilt bool   `json:"index_built"`
-			IndexState string `json:"index_state"`
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		probeRelease := make(chan struct{})
+		backfillEntered := make(chan struct{})
+		backfillRelease := make(chan struct{})
+		var probeReleaseOnce sync.Once
+		releaseProbe := func() { probeReleaseOnce.Do(func() { close(probeRelease) }) }
+		var backfillReleaseOnce sync.Once
+		releaseBackfill := func() { backfillReleaseOnce.Do(func() { close(backfillRelease) }) }
+		st := &mockStore{
+			needsFTSBackfillFunc: func() bool { <-probeRelease; return true },
+			backfillFTSFunc: func(func(done, total int64)) (int64, error) {
+				close(backfillEntered)
+				<-backfillRelease
+				return 12, nil
+			},
 		}
-		require.NoError(json.NewDecoder(w.Body).Decode(&resp), "decode response")
-		require.Len(resp.Results, 1, "results")
-		assert.Equal("match", resp.Results[0].Subject, "subject")
-		assert.False(resp.IndexBuilt, "index_built is a pre-0.18 synchronous-build field")
-		return resp.IndexState
-	}
-
-	// The full probe is blocked and the quick tail-check found nothing, so
-	// the first search answers instantly and quietly.
-	assert.Equal("checking", searchIndexState(), "state while the probe runs")
-
-	close(probeRelease)
-	select {
-	case <-backfillEntered:
-	case <-time.After(time.Second):
-		require.FailNow("background worker never reached the backfill")
-	}
-	assert.Equal("building", searchIndexState(), "state while the backfill runs")
-
-	close(backfillRelease)
-	require.Eventually(func() bool { return srv.ftsIndexComplete.Load() },
-		time.Second, 5*time.Millisecond, "backfill completion must set the memo flag")
-	assert.Empty(searchIndexState(), "state once the index is complete")
+		engine := &querytest.MockEngine{
+			SearchFunc: func(ctx context.Context, _ *search.Query, _, _ int) ([]query.MessageSummary, error) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				return []query.MessageSummary{{ID: 1, Subject: "match"}}, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:  st, Engine: engine, Logger: testLogger(), RequestTimeout: 5 * time.Millisecond,
+		})
+		defer func() {
+			releaseProbe()
+			releaseBackfill()
+			require.NoError(srv.Shutdown(context.Background()), "shutdown")
+			synctest.Wait()
+		}()
+		searchIndexState := func() string {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello&limit=10", nil)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+			require.Equal(http.StatusOK, w.Code, "status: %s", w.Body.String())
+			var resp struct {
+				Results []struct {
+					Subject string `json:"subject"`
+				} `json:"results"`
+				IndexBuilt bool   `json:"index_built"`
+				IndexState string `json:"index_state"`
+			}
+			require.NoError(json.NewDecoder(w.Body).Decode(&resp), "decode response")
+			require.Len(resp.Results, 1, "results")
+			assert.Equal("match", resp.Results[0].Subject, "subject")
+			assert.False(resp.IndexBuilt, "index_built is a pre-0.18 synchronous-build field")
+			return resp.IndexState
+		}
+		assert.Equal("checking", searchIndexState(), "state while the probe runs")
+		releaseProbe()
+		synctest.Wait()
+		<-backfillEntered
+		assert.Equal("building", searchIndexState(), "state while the backfill runs")
+		releaseBackfill()
+		synctest.Wait()
+		assert.True(srv.ftsIndexComplete.Load(), "backfill completion must set the memo flag")
+		assert.Empty(searchIndexState(), "state once the index is complete")
+	})
 }
 
 func TestHandleCLISearchDeletionScope(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		rawScope  string
@@ -2253,6 +2328,7 @@ func TestHandleCLISearchDeletionScope(t *testing.T) {
 }
 
 func TestHandleCLISearchRejectsInvalidDeletionScope(t *testing.T) {
+	t.Parallel()
 	called := false
 	engine := &querytest.MockEngine{
 		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
@@ -2281,58 +2357,61 @@ func TestHandleCLISearchRejectsInvalidDeletionScope(t *testing.T) {
 // the rebuild fails, so re-memoizing complete=true would make later searches
 // trust an index the rebuild left partial.
 func TestHandleCLISearchProbeDiscardsResultStaleAfterRebuild(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 
-	probeEntered := make(chan struct{})
-	releaseProbe := make(chan struct{})
-	st := &mockStore{
-		needsFTSBackfillFunc: func() bool {
-			close(probeEntered)
-			<-releaseProbe
-			return false // observed the PRE-rebuild, complete index
-		},
-		rebuildFTSFunc: func(func(done, total int64)) (int64, error) {
-			return 0, errors.New("rebuild exploded mid-batch")
-		},
-	}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
-			return nil, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:  st,
-		Engine: engine,
-		Logger: testLogger(),
+		probeEntered := make(chan struct{})
+		releaseProbe := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseProbe) }) }
+		st := &mockStore{
+			needsFTSBackfillFunc: func() bool {
+				close(probeEntered)
+				<-releaseProbe
+				return false // observed the PRE-rebuild, complete index
+			},
+			rebuildFTSFunc: func(func(done, total int64)) (int64, error) {
+				return 0, errors.New("rebuild exploded mid-batch")
+			},
+		}
+		engine := &querytest.MockEngine{
+			SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+				return nil, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:  st,
+			Engine: engine,
+			Logger: testLogger(),
+		})
+		defer func() { release(); require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
+
+		// First search spawns the ensure worker, which blocks inside the probe.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		require.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
+		synctest.Wait()
+		<-probeEntered
+
+		// A rebuild starts and fails while the probe is still scanning.
+		resp := servePOSTTestRequest(srv, "/api/v1/cli/rebuild-fts")
+		requireNDJSONResponse(t, resp)
+		_ = decodeNDJSONEvents[cliRebuildFTSEvent](t, resp.Body)
+		require.False(srv.ftsIndexComplete.Load(),
+			"precondition: a failed rebuild leaves the completeness flag cleared")
+
+		// The probe finishes with its pre-rebuild observation; the worker must
+		// discard it rather than re-memoize complete=true over the failed rebuild.
+		release()
+		synctest.Wait()
+		require.False(srv.ftsEnsureRunning.Load(), "ensure worker must finish")
+		assert.False(srv.ftsIndexComplete.Load(),
+			"a probe result observed before a rebuild must not be memoized")
 	})
-
-	// First search spawns the ensure worker, which blocks inside the probe.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	require.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
-	select {
-	case <-probeEntered:
-	case <-time.After(time.Second):
-		require.FailNow("the search never spawned the FTS completeness probe")
-	}
-
-	// A rebuild starts and fails while the probe is still scanning.
-	resp := servePOSTTestRequest(srv, "/api/v1/cli/rebuild-fts")
-	requireNDJSONResponse(t, resp)
-	_ = decodeNDJSONEvents[cliRebuildFTSEvent](t, resp.Body)
-	require.False(srv.ftsIndexComplete.Load(),
-		"precondition: a failed rebuild leaves the completeness flag cleared")
-
-	// The probe finishes with its pre-rebuild observation; the worker must
-	// discard it rather than re-memoize complete=true over the failed rebuild.
-	close(releaseProbe)
-	require.Eventually(func() bool { return !srv.ftsEnsureRunning.Load() },
-		time.Second, 5*time.Millisecond, "ensure worker must finish")
-	assert.False(srv.ftsIndexComplete.Load(),
-		"a probe result observed before a rebuild must not be memoized")
 }
 
 // TestHandleCLISearchProbeRefusesMemoizeDuringRebuild covers the second
@@ -2342,58 +2421,58 @@ func TestHandleCLISearchProbeDiscardsResultStaleAfterRebuild(t *testing.T) {
 // A "complete" observation under an odd generation must not be memoized —
 // here the rebuild is still running when the probe finishes, then fails.
 func TestHandleCLISearchProbeRefusesMemoizeDuringRebuild(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 
-	rebuildEntered := make(chan struct{})
-	releaseRebuild := make(chan struct{})
-	st := &mockStore{
-		needsFTSBackfill: false, // probe sees the pre-clear "complete" index
-		rebuildFTSFunc: func(func(done, total int64)) (int64, error) {
-			close(rebuildEntered)
-			<-releaseRebuild
-			return 0, errors.New("rebuild exploded mid-batch")
-		},
-	}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
-			return nil, nil
-		},
-	}
-	srv := newCLIHandlerTestServer(st)
-	srv.SetAnalyticsEngine(engine, srv.AnalyticsMode())
+		rebuildEntered := make(chan struct{})
+		releaseRebuild := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseRebuild) }) }
+		st := &mockStore{
+			needsFTSBackfill: false, // probe sees the pre-clear "complete" index
+			rebuildFTSFunc: func(func(done, total int64)) (int64, error) {
+				close(rebuildEntered)
+				<-releaseRebuild
+				return 0, errors.New("rebuild exploded mid-batch")
+			},
+		}
+		engine := &querytest.MockEngine{
+			SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+				return nil, nil
+			},
+		}
+		srv := newCLIHandlerTestServer(st)
+		srv.SetAnalyticsEngine(engine, srv.AnalyticsMode())
+		defer func() { release(); require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
 
-	rebuildDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		rebuildDone <- servePOSTTestRequest(srv, "/api/v1/cli/rebuild-fts")
-	}()
-	select {
-	case <-rebuildEntered:
-	case <-time.After(time.Second):
-		require.FailNow("rebuild never started")
-	}
+		rebuildDone := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			rebuildDone <- servePOSTTestRequest(srv, "/api/v1/cli/rebuild-fts")
+		}()
+		synctest.Wait()
+		<-rebuildEntered
 
-	// A search arrives while the rebuild is mid-flight; its ensure worker
-	// probes the (snapshot-wise still complete) index.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	require.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
-	require.Eventually(func() bool { return !srv.ftsEnsureRunning.Load() },
-		time.Second, 5*time.Millisecond, "ensure worker must finish")
+		// A search arrives while the rebuild is mid-flight; its ensure worker
+		// probes the (snapshot-wise still complete) index.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		require.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
+		synctest.Wait()
+		require.False(srv.ftsEnsureRunning.Load(), "ensure worker must finish")
 
-	assert.False(srv.ftsIndexComplete.Load(),
-		"a probe observation made while a rebuild is mid-flight must not be memoized")
+		assert.False(srv.ftsIndexComplete.Load(),
+			"a probe observation made while a rebuild is mid-flight must not be memoized")
 
-	close(releaseRebuild)
-	select {
-	case resp := <-rebuildDone:
+		release()
+		synctest.Wait()
+		resp := <-rebuildDone
 		requireNDJSONResponse(t, resp)
-	case <-time.After(time.Second):
-		require.FailNow("rebuild request did not finish")
-	}
-	assert.False(srv.ftsIndexComplete.Load(),
-		"the failed rebuild must leave the completeness flag cleared")
+		assert.False(srv.ftsIndexComplete.Load(),
+			"the failed rebuild must leave the completeness flag cleared")
+	})
 }
 
 // TestHandleCLISearchQuickCheckReportsBuildingImmediately verifies that when
@@ -2402,6 +2481,7 @@ func TestHandleCLISearchProbeRefusesMemoizeDuringRebuild(t *testing.T) {
 // results right away instead of staying silent for the minutes the full
 // completeness probe can take (roborev finding on 2328a4f).
 func TestHandleCLISearchQuickCheckReportsBuildingImmediately(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	probeRelease := make(chan struct{})
 	t.Cleanup(func() { close(probeRelease) })
@@ -2438,53 +2518,61 @@ func TestHandleCLISearchQuickCheckReportsBuildingImmediately(t *testing.T) {
 }
 
 func TestHandleCLISearchBackfillUsesOperationGate(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	gate := NewSerialOperationGate()
-	releaseGate, ok := gate.BeginWork()
-	require.True(ok, "occupy operation gate")
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		gate := NewSerialOperationGate()
+		releaseGate, ok := gate.BeginWork()
+		require.True(ok, "occupy operation gate")
 
-	backfillStarted := make(chan struct{}, 1)
-	st := &mockStore{
-		needsFTSBackfill: true,
-		backfillFTSFunc: func(func(done, total int64)) (int64, error) {
-			backfillStarted <- struct{}{}
-			return 1, nil
-		},
-	}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
-			return []query.MessageSummary{{ID: 1, Subject: "match"}}, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config:        &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:         st,
-		Engine:        engine,
-		Logger:        testLogger(),
-		OperationGate: gate,
+		backfillStarted := make(chan struct{}, 1)
+		st := &mockStore{
+			needsFTSBackfill: true,
+			backfillFTSFunc: func(func(done, total int64)) (int64, error) {
+				backfillStarted <- struct{}{}
+				return 1, nil
+			},
+		}
+		engine := &querytest.MockEngine{
+			SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+				return []query.MessageSummary{{ID: 1, Subject: "match"}}, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config:        &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:         st,
+			Engine:        engine,
+			Logger:        testLogger(),
+			OperationGate: gate,
+		})
+		defer func() { require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
+
+		// The search itself must not queue behind the held gate.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello&limit=10", nil)
+		resp := httptest.NewRecorder()
+		srv.Router().ServeHTTP(resp, req)
+		assert.Equal(http.StatusOK, resp.Code, "status: %s", resp.Body.String())
+
+		synctest.Wait()
+		assert.Empty(backfillStarted, "backfill started while operation gate was occupied")
+
+		// The full probe found a gap, but rebuilding still waits for sync.
+		queuedReq := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
+		queuedResp := httptest.NewRecorder()
+		srv.Router().ServeHTTP(queuedResp, queuedReq)
+		require.Equal(http.StatusOK, queuedResp.Code)
+		var queued struct {
+			IndexState string `json:"index_state"`
+		}
+		require.NoError(json.NewDecoder(queuedResp.Body).Decode(&queued))
+		assert.Equal("building", queued.IndexState, "known gaps must be visible while rebuilding is queued")
+
+		releaseGate()
+		synctest.Wait()
+		assert.NotEmpty(backfillStarted, "backfill did not start after gate release")
+		assert.True(srv.ftsIndexComplete.Load(), "backfill completion must set the memo flag")
 	})
-
-	// The search itself must not queue behind the held gate.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello&limit=10", nil)
-	resp := httptest.NewRecorder()
-	srv.Router().ServeHTTP(resp, req)
-	assert.Equal(http.StatusOK, resp.Code, "status: %s", resp.Body.String())
-
-	select {
-	case <-backfillStarted:
-		assert.Fail("backfill started while operation gate was occupied")
-	case <-time.After(40 * time.Millisecond):
-	}
-
-	releaseGate()
-	select {
-	case <-backfillStarted:
-	case <-time.After(500 * time.Millisecond):
-		require.FailNow("backfill did not start after gate release")
-	}
-	require.Eventually(func() bool { return srv.ftsIndexComplete.Load() },
-		time.Second, 5*time.Millisecond, "backfill completion must set the memo flag")
 }
 
 // TestHandleCLISearchMemoizesFTSComplete verifies that once the FTS index is
@@ -2492,37 +2580,41 @@ func TestHandleCLISearchBackfillUsesOperationGate(t *testing.T) {
 // NeedsFTSBackfill probe (an anti-join that scans every message on a healthy
 // index). This is the fix for the CLI-search-slow-vs-fast-search divergence.
 func TestHandleCLISearchMemoizesFTSComplete(t *testing.T) {
-	assert := assert.New(t)
-	st := &mockStore{needsFTSBackfill: false}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
-			return []query.MessageSummary{{ID: 1, Subject: "match"}}, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:  st,
-		Engine: engine,
-		Logger: testLogger(),
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		st := &mockStore{needsFTSBackfill: false}
+		engine := &querytest.MockEngine{
+			SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+				return []query.MessageSummary{{ID: 1, Subject: "match"}}, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:  st,
+			Engine: engine,
+			Logger: testLogger(),
+		})
+		defer func() { require.NoError(t, srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
+
+		doSearch := func() {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello&limit=10", nil)
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, req)
+			assert.Equal(http.StatusOK, w.Code, "status: %s", w.Body.String())
+		}
+
+		doSearch()
+		// The probe runs in a background worker now; wait for it to confirm
+		// completeness before checking that later searches skip it.
+		synctest.Wait()
+		assert.True(srv.ftsIndexComplete.Load(), "probe must confirm the index complete")
+		doSearch()
+		doSearch()
+
+		assert.Equal(int32(1), st.needsFTSBackfillCalls.Load(),
+			"NeedsFTSBackfill should be probed once, then memoized")
 	})
-
-	doSearch := func() {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello&limit=10", nil)
-		w := httptest.NewRecorder()
-		srv.Router().ServeHTTP(w, req)
-		assert.Equal(http.StatusOK, w.Code, "status: %s", w.Body.String())
-	}
-
-	doSearch()
-	// The probe runs in a background worker now; wait for it to confirm
-	// completeness before checking that later searches skip it.
-	require.Eventually(t, func() bool { return srv.ftsIndexComplete.Load() },
-		time.Second, 5*time.Millisecond, "probe must confirm the index complete")
-	doSearch()
-	doSearch()
-
-	assert.Equal(int32(1), st.needsFTSBackfillCalls.Load(),
-		"NeedsFTSBackfill should be probed once, then memoized")
 }
 
 // TestHandleCLISearchReportsProbeInAuthenticatedHealth verifies that while
@@ -2530,59 +2622,60 @@ func TestHandleCLISearchMemoizesFTSComplete(t *testing.T) {
 // completeness probe, authenticated /health tells clients what the daemon is
 // doing instead of reporting it idle.
 func TestHandleCLISearchReportsProbeInAuthenticatedHealth(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 
-	probeEntered := make(chan struct{})
-	releaseProbe := make(chan struct{})
-	st := &mockStore{needsFTSBackfillFunc: func() bool {
-		close(probeEntered)
-		<-releaseProbe
-		return false
-	}}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
-			return nil, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080, APIKey: "secret-key"}},
-		Store:  st,
-		Engine: engine,
-		Logger: testLogger(),
-	})
+		probeEntered := make(chan struct{})
+		releaseProbe := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseProbe) }) }
+		st := &mockStore{needsFTSBackfillFunc: func() bool {
+			close(probeEntered)
+			<-releaseProbe
+			return false
+		}}
+		engine := &querytest.MockEngine{
+			SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+				return nil, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Server: config.ServerConfig{APIPort: 8080, APIKey: "secret-key"}},
+			Store:  st,
+			Engine: engine,
+			Logger: testLogger(),
+		})
+		defer func() { release(); require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
 
-	// The first search spawns the probe worker and returns without waiting.
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
-	req.Header.Set("X-Api-Key", "secret-key")
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	assert.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
+		// The first search spawns the probe worker and returns without waiting.
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
+		req.Header.Set("X-Api-Key", "secret-key")
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		assert.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
 
-	select {
-	case <-probeEntered:
-	case <-time.After(time.Second):
-		require.FailNow("the search never spawned the FTS completeness probe")
-	}
+		synctest.Wait()
 
-	healthReq := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
-	healthReq.Header.Set("X-Api-Key", "secret-key")
-	healthResp := httptest.NewRecorder()
-	srv.Router().ServeHTTP(healthResp, healthReq)
-	require.Equal(http.StatusOK, healthResp.Code, "health status")
-	var health HealthResponse
-	require.NoError(json.Unmarshal(healthResp.Body.Bytes(), &health), "decode health body")
-	require.NotNil(health.Operation, "health must report the running probe")
-	assert.True(health.Operation.Busy, "probe must report busy")
-	assert.Equal("checking the search index", health.Operation.Label, "probe label")
-	assert.NotNil(health.Operation.StartedAt, "probe start time")
+		healthReq := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+		healthReq.Header.Set("X-Api-Key", "secret-key")
+		healthResp := httptest.NewRecorder()
+		srv.Router().ServeHTTP(healthResp, healthReq)
+		require.Equal(http.StatusOK, healthResp.Code, "health status")
+		var health HealthResponse
+		require.NoError(json.Unmarshal(healthResp.Body.Bytes(), &health), "decode health body")
+		require.NotNil(health.Operation, "health must report the running probe")
+		assert.True(health.Operation.Busy, "probe must report busy")
+		assert.Equal("checking the search index", health.Operation.Label, "probe label")
+		assert.NotNil(health.Operation.StartedAt, "probe start time")
 
-	close(releaseProbe)
-	require.Eventually(func() bool {
+		release()
+		synctest.Wait()
 		_, _, active := srv.currentActivity()
-		return !active && srv.ftsIndexComplete.Load()
-	}, time.Second, 5*time.Millisecond,
-		"activity must clear and the memo flag must set once the probe finishes")
+		assert.False(active, "activity must clear once the probe finishes")
+		assert.True(srv.ftsIndexComplete.Load(), "probe must set the memo flag")
+	})
 }
 
 // TestHandleCLISearchBackfillProgressUpdatesActivityLabel verifies the
@@ -2590,43 +2683,48 @@ func TestHandleCLISearchReportsProbeInAuthenticatedHealth(t *testing.T) {
 // label, so clients polling /health see live counts rather than a static
 // gate label.
 func TestHandleCLISearchBackfillProgressUpdatesActivityLabel(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 
-	st := &mockStore{needsFTSBackfill: true}
-	engine := &querytest.MockEngine{
-		SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
-			return nil, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:  st,
-		Engine: engine,
-		Logger: testLogger(),
+		st := &mockStore{needsFTSBackfill: true}
+		engine := &querytest.MockEngine{
+			SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) {
+				return nil, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:  st,
+			Engine: engine,
+			Logger: testLogger(),
+		})
+		defer func() { require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
+
+		var labelDuringBackfill string
+		st.backfillFTSFunc = func(progress func(done, total int64)) (int64, error) {
+			progress(2, 4)
+			labelDuringBackfill, _, _ = srv.currentActivity()
+			return 4, nil
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		require.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
+
+		synctest.Wait()
+		require.True(srv.ftsIndexComplete.Load(), "background backfill must complete")
+		assert.Equal("building the search index (2/4 messages)", labelDuringBackfill,
+			"activity label must carry backfill progress")
+		_, _, active := srv.currentActivity()
+		assert.False(active, "activity must be cleared once the backfill finishes")
 	})
-
-	var labelDuringBackfill string
-	st.backfillFTSFunc = func(progress func(done, total int64)) (int64, error) {
-		progress(2, 4)
-		labelDuringBackfill, _, _ = srv.currentActivity()
-		return 4, nil
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q=hello", nil)
-	w := httptest.NewRecorder()
-	srv.Router().ServeHTTP(w, req)
-	require.Equal(http.StatusOK, w.Code, "search status: %s", w.Body.String())
-
-	require.Eventually(func() bool { return srv.ftsIndexComplete.Load() },
-		time.Second, 5*time.Millisecond, "background backfill must complete")
-	assert.Equal("building the search index (2/4 messages)", labelDuringBackfill,
-		"activity label must carry backfill progress")
-	_, _, active := srv.currentActivity()
-	assert.False(active, "activity must be cleared once the backfill finishes")
 }
 
 func TestHandleCLIRebuildFTSStreamsProgress(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := &mockStore{
@@ -2658,6 +2756,7 @@ func TestHandleCLIRebuildFTSStreamsProgress(t *testing.T) {
 // searches re-probe instead of trusting a stale cache) and re-set only after a
 // successful rebuild.
 func TestHandleCLIRebuildFTSInvalidatesCompletenessCache(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	var duringRebuild bool
@@ -2684,6 +2783,7 @@ func TestHandleCLIRebuildFTSInvalidatesCompletenessCache(t *testing.T) {
 // rebuild leaves the completeness flag cleared, so later CLI searches re-detect
 // the (possibly incomplete) index instead of trusting a stale cache.
 func TestHandleCLIRebuildFTSFailureLeavesCacheInvalidated(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	st := &mockStore{
@@ -2703,6 +2803,7 @@ func TestHandleCLIRebuildFTSFailureLeavesCacheInvalidated(t *testing.T) {
 }
 
 func TestHandleCLIRebuildFTSFlushesProgressThroughMiddleware(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	releaseComplete := make(chan struct{})
@@ -2743,7 +2844,7 @@ func TestHandleCLIRebuildFTSFlushesProgressThroughMiddleware(t *testing.T) {
 	case resp = <-respCh:
 	case err := <-errCh:
 		require.NoError(err, "post rebuild-fts")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		require.FailNow("rebuild-fts response did not flush before completion")
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -2766,7 +2867,7 @@ func TestHandleCLIRebuildFTSFlushesProgressThroughMiddleware(t *testing.T) {
 	case event = <-decodeCh:
 	case err := <-decodeErrCh:
 		require.NoError(err, "decode first progress event")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		require.FailNow("rebuild-fts progress event was not flushed before completion")
 	}
 	assert.Equal("progress", event.Type, "event type")
@@ -2790,46 +2891,49 @@ func TestHandleCLIRebuildFTSFlushesProgressThroughMiddleware(t *testing.T) {
 }
 
 func TestHandleCLIRebuildFTSBypassesStandardRequestTimeoutWhileQueued(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	gate := NewSerialOperationGate()
-	releaseGate, ok := gate.BeginWork()
-	require.True(ok, "occupy operation gate")
-	defer releaseGate()
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
+		gate := NewSerialOperationGate()
+		releaseGate, ok := gate.BeginWork()
+		require.True(ok, "occupy operation gate")
+		t.Cleanup(releaseGate)
 
-	st := &mockStore{
-		rebuildFTSFunc: func(progress func(done, total int64)) (int64, error) {
-			progress(1, 1)
-			return 1, nil
-		},
-	}
-	srv := NewServerWithOptions(ServerOptions{
-		Config:         &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:          st,
-		Logger:         testLogger(),
-		OperationGate:  gate,
-		RequestTimeout: 5 * time.Millisecond,
+		st := &mockStore{
+			rebuildFTSFunc: func(progress func(done, total int64)) (int64, error) {
+				progress(1, 1)
+				return 1, nil
+			},
+		}
+		srv := NewServerWithOptions(ServerOptions{
+			Config:         &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+			Store:          st,
+			Logger:         testLogger(),
+			OperationGate:  gate,
+			RequestTimeout: 5 * time.Millisecond,
+		})
+		defer func() { require.NoError(srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/rebuild-fts", nil)
+		resp := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			srv.Router().ServeHTTP(resp, req)
+			close(done)
+		}()
+
+		synctest.Wait()
+		synctest.Sleep(6 * time.Millisecond)
+		releaseGate()
+		synctest.Wait()
+		<-done
+		assert.Equal(http.StatusOK, resp.Code, "status: %s", resp.Body.String())
 	})
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/rebuild-fts", nil)
-	resp := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		srv.Router().ServeHTTP(resp, req)
-		close(done)
-	}()
-
-	time.Sleep(40 * time.Millisecond)
-	releaseGate()
-	select {
-	case <-done:
-	case <-time.After(500 * time.Millisecond):
-		require.FailNow("rebuild-fts request did not complete after gate release")
-	}
-	assert.Equal(http.StatusOK, resp.Code, "status: %s", resp.Body.String())
 }
 
 func TestHandleCLIAccountsReturnsSourceCounts(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2879,6 +2983,7 @@ func TestHandleCLIAccountsReturnsSourceCounts(t *testing.T) {
 }
 
 func TestHandleCLIAccountsReturnsOAuthApp(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2920,6 +3025,7 @@ func TestHandleCLIAccountsReturnsOAuthApp(t *testing.T) {
 }
 
 func TestHandleCLIUpdateAccountDisplayName(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -2959,6 +3065,7 @@ func TestHandleCLIUpdateAccountDisplayName(t *testing.T) {
 }
 
 func TestHandleCLIUpdateAccountTargetsExactSourceID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -2993,6 +3100,7 @@ func TestHandleCLIUpdateAccountTargetsExactSourceID(t *testing.T) {
 }
 
 func TestHandleCLIUpdateAccountResolvesCurrentDisplayName(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3032,6 +3140,7 @@ func TestHandleCLIUpdateAccountResolvesCurrentDisplayName(t *testing.T) {
 }
 
 func TestHandleCLIMessageResolvesSourceMessageID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3053,6 +3162,7 @@ func TestHandleCLIMessageResolvesSourceMessageID(t *testing.T) {
 			SourceID:        src.ID,
 			ConversationID:  convID,
 			SourceMessageID: "gmail-42",
+			RFC822MessageID: sql.NullString{String: "Case-ID@example.test", Valid: true},
 			MessageType:     "email",
 			Subject:         sql.NullString{String: "Hello", Valid: true},
 			SentAt:          sql.NullTime{Time: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), Valid: true},
@@ -3071,17 +3181,70 @@ func TestHandleCLIMessageResolvesSourceMessageID(t *testing.T) {
 	var resp struct {
 		ID              int64  `json:"id"`
 		SourceMessageID string `json:"source_message_id"`
+		RFC822MessageID string `json:"rfc822_message_id"`
 		Subject         string `json:"subject"`
 		BodyText        string `json:"body_text"`
 	}
 	require.NoError(json.NewDecoder(w.Body).Decode(&resp), "decode response")
 	assert.Equal(int64(1), resp.ID, "ID")
 	assert.Equal("gmail-42", resp.SourceMessageID, "SourceMessageID")
+	assert.Equal("Case-ID@example.test", resp.RFC822MessageID)
 	assert.Equal("Hello", resp.Subject, "Subject")
 	assert.Equal("Body text", resp.BodyText, "BodyText")
 }
 
+func TestHandleCLIMessageInvalidUTF8SnippetReturnsCompleteJSON(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	if st.IsPostgreSQL() {
+		t.Skip("PostgreSQL rejects invalid UTF-8")
+	}
+	engine := query.NewEngine(st.DB(), st.IsPostgreSQL())
+	defer func() { _ = engine.Close() }()
+	srv := NewServerWithOptions(ServerOptions{
+		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+		Store:  st,
+		Engine: engine,
+		Logger: testLogger(),
+	})
+
+	src, err := st.GetOrCreateSource("gmail", "alice@example.com")
+	require.NoError(err)
+	convID, err := st.EnsureConversation(src.ID, "thread-utf8", "")
+	require.NoError(err)
+	_, err = st.PersistMessage(&store.MessagePersistData{
+		Message: &store.Message{
+			SourceID: src.ID, ConversationID: convID, SourceMessageID: "gmail-utf8",
+			MessageType: "email",
+			Subject:     sql.NullString{String: "Lunch", Valid: true},
+			SentAt:      sql.NullTime{Time: time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC), Valid: true},
+		},
+		BodyText: sql.NullString{String: "Body text", Valid: true},
+	})
+	require.NoError(err)
+	// "Calendar: lunch " followed by the first two bytes of a four-byte emoji.
+	_, err = st.DB().Exec(
+		`UPDATE messages SET snippet = CAST(X'43616c656e6461723a206c756e636820f09f' AS TEXT) WHERE source_message_id = ?`,
+		"gmail-utf8")
+	require.NoError(err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cli/message?id=gmail-utf8", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	assert.Equal(http.StatusOK, w.Code)
+	var resp struct {
+		Snippet  string `json:"snippet"`
+		BodyText string `json:"body_text"`
+	}
+	require.NoError(json.Unmarshal(w.Body.Bytes(), &resp), "body: %q", w.Body.String())
+	assert.Equal("Calendar: lunch ��", resp.Snippet)
+	assert.Equal("Body text", resp.BodyText)
+}
+
 func TestHandleCLIMessageRawResolvesSourceMessageID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3124,6 +3287,7 @@ func TestHandleCLIMessageRawResolvesSourceMessageID(t *testing.T) {
 }
 
 func TestHandleCLIMessageRawMissingMessageUsesStableErrorCode(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3148,6 +3312,7 @@ func TestHandleCLIMessageRawMissingMessageUsesStableErrorCode(t *testing.T) {
 }
 
 func TestHandleCLIMessageRawMissingRawUsesStableErrorCode(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3188,6 +3353,7 @@ func TestHandleCLIMessageRawMissingRawUsesStableErrorCode(t *testing.T) {
 }
 
 func TestHandleCLIAttachmentReturnsContentAddressedBytes(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	dataDir := t.TempDir()
@@ -3253,6 +3419,7 @@ func buildTestPack(t *testing.T, attachmentsDir string, content []byte) store.Pa
 // BlobStore-configured server (the nil-BlobStore path is exercised
 // separately by TestHandleCLIAttachmentReturnsContentAddressedBytes).
 func TestCLIAttachmentServesPackedBlob(t *testing.T) {
+	t.Parallel()
 	must := require.New(t)
 	dataDir := t.TempDir()
 	attachmentsDir := filepath.Join(dataDir, "attachments")
@@ -3402,6 +3569,7 @@ func TestCLIAttachmentServesPackedBlob(t *testing.T) {
 }
 
 func TestHandleListMessages(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, _ := newTestServerWithMockStore(t)
@@ -3433,6 +3601,7 @@ func TestHandleListMessages(t *testing.T) {
 }
 
 func TestHandleListMessagesPagination(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	srv, _ := newTestServerWithMockStore(t)
 
@@ -3455,6 +3624,7 @@ func TestHandleListMessagesPagination(t *testing.T) {
 // default (20), while absent/too-small values fall back to the default and
 // non-numeric values are rejected with 400.
 func TestPageSizeClamping(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name         string
 		query        string
@@ -3512,6 +3682,7 @@ func TestPageSizeClamping(t *testing.T) {
 }
 
 func TestHandleSourceStatus(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3599,11 +3770,81 @@ func TestHandleSourceStatus(t *testing.T) {
 	assert.Equal("ingest_error", got.LastSuccessfulSync.ItemErrors[0].ErrorKind, "LastSuccessfulSync.ItemErrors[0].ErrorKind")
 	assert.Equal("parse MIME: malformed header", got.LastSuccessfulSync.ItemErrors[0].ErrorMessage, "LastSuccessfulSync.ItemErrors[0].ErrorMessage")
 	assert.NotEmpty(got.LastSuccessfulSync.ItemErrors[0].CreatedAt, "LastSuccessfulSync.ItemErrors[0].CreatedAt")
-	require.NotNil(got.LastSuccessfulSync.CursorAfter, "LastSuccessfulSync.CursorAfter")
-	assert.Equal("history-2", *got.LastSuccessfulSync.CursorAfter, "LastSuccessfulSync.CursorAfter")
+}
+
+func TestHandleSourceStatusDoesNotRecoverUnownedRun(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	dbPath := filepath.Join(t.TempDir(), "status-read-only.db")
+	first, err := store.OpenForTest(dbPath)
+	require.NoError(err)
+	require.NoError(first.InitSchema())
+	source, err := first.GetOrCreateSource("gmail", "unowned@example.com")
+	require.NoError(err)
+	runID, err := first.StartSync(source.ID, "full")
+	require.NoError(err)
+	require.NoError(first.Close())
+
+	second, err := store.OpenForTest(dbPath)
+	require.NoError(err)
+	t.Cleanup(func() { _ = second.Close() })
+	srv := NewServer(&config.Config{Server: config.ServerConfig{APIPort: 8080}}, second, newMockScheduler(), testLogger())
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sources/status", nil))
+	require.Equal(http.StatusOK, w.Code)
+
+	var status string
+	require.NoError(second.DB().QueryRow(`SELECT status FROM sync_runs WHERE id = ?`, runID).Scan(&status))
+	assert.Equal(store.SyncStatusRunning, status)
+}
+
+func TestHandleSourceStatusStopsWaitingForDatabaseAfterCancellation(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	srv := NewServer(&config.Config{Server: config.ServerConfig{APIPort: 8080}}, st, newMockScheduler(), testLogger())
+	db := st.DB()
+	db.SetMaxOpenConns(1)
+	conn, err := db.Conn(t.Context())
+	require.NoError(err)
+	t.Cleanup(func() { _ = conn.Close() })
+	initialWaits := db.Stats().WaitCount
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	w := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sources/status", nil).WithContext(ctx))
+	}()
+
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for db.Stats().WaitCount == initialWaits {
+		select {
+		case <-deadline.C:
+			_ = conn.Close()
+			require.FailNow("status request did not wait for the held database connection")
+		case <-poll.C:
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+		require.Empty(w.Body.String())
+	case <-time.After(2 * time.Second):
+		_ = conn.Close()
+		<-done
+		require.FailNow("cancelled status request remained blocked on the database connection")
+	}
 }
 
 func TestHandleSourceStatusExposesServerAuthorizedSyncCapability(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3635,6 +3876,7 @@ func TestHandleSourceStatusExposesServerAuthorizedSyncCapability(t *testing.T) {
 }
 
 func TestHandleSourceStatusDisablesSyncWhileSchedulerReportsAccountRunning(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3660,6 +3902,7 @@ func TestHandleSourceStatusDisablesSyncWhileSchedulerReportsAccountRunning(t *te
 }
 
 func TestHandleSourceStatusNoSyncRuns(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3693,6 +3936,7 @@ func TestHandleSourceStatusNoSyncRuns(t *testing.T) {
 // scheduled must report Scheduled=true, surface the job's schedule/next-run,
 // and set CanSync=true.
 func TestHandleSourceStatusGenericJobScheduled(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3729,6 +3973,7 @@ func TestHandleSourceStatusGenericJobScheduled(t *testing.T) {
 // same generic-job path: a running matching job must report
 // sync_already_running and CanSync=false, exactly like a running account job.
 func TestHandleSourceStatusGenericJobRunning(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3763,6 +4008,7 @@ func TestHandleSourceStatusGenericJobRunning(t *testing.T) {
 // generic-job-type source (no matching job registered) still reports
 // sync_not_configured, rather than falling through to some other reason.
 func TestHandleSourceStatusGenericJobUnscheduled(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3791,6 +4037,7 @@ func TestHandleSourceStatusGenericJobUnscheduled(t *testing.T) {
 // singleton "beeper" scheduler job, so two beeper sources must both surface
 // that one job's scheduled/running state.
 func TestHandleSourceStatusBeeperSharesSingleJob(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -3828,6 +4075,7 @@ func TestHandleSourceStatusBeeperSharesSingleJob(t *testing.T) {
 // passes source_type explicitly, so the handler resolves the generic job name
 // authoritatively (no store scan) and starts it asynchronously via StartJob.
 func TestHandleTriggerSyncGenericSource(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	sched := newMockScheduler()
@@ -3841,9 +4089,44 @@ func TestHandleTriggerSyncGenericSource(t *testing.T) {
 	assert.Empty(sched.triggeredJobs, "TriggerJob must not be used for the async trigger path")
 }
 
+// TestHandleTriggerSyncGenericDisposition proves the 202 body reports what the
+// trigger did, and never says "started" when the job was already running.
+func TestHandleTriggerSyncGenericDisposition(t *testing.T) {
+	t.Parallel()
+	for _, disp := range []scheduler.JobDisposition{scheduler.JobStarted, scheduler.JobPending, scheduler.JobCoalesced} {
+		t.Run(string(disp), func(t *testing.T) {
+			t.Parallel()
+			require := require.New(t)
+			assert := assert.New(t)
+			sched := newMockScheduler()
+			sched.scheduledJobs = map[string]bool{"granola:acct-1": true}
+			sched.startJobFn = func(string) (scheduler.JobDisposition, error) { return disp, nil }
+			srv := NewServer(&config.Config{Server: config.ServerConfig{APIPort: 8080}}, nil, sched, testLogger())
+
+			resp := servePOSTTestRequest(srv, "/api/v1/sync/acct-1?source_type=granola")
+
+			require.Equal(http.StatusAccepted, resp.Code, resp.Body.String())
+			var body TriggerSyncResponse
+			require.NoError(json.Unmarshal(resp.Body.Bytes(), &body))
+			assert.Equal(string(disp), body.Disposition)
+			assert.Equal("accepted", body.Status)
+			if disp == scheduler.JobStarted {
+				assert.Contains(body.Message, "started")
+			} else {
+				assert.NotContains(body.Message, "started")
+			}
+			if disp == scheduler.JobCoalesced {
+				assert.Contains(body.Message, "no additional run")
+				assert.NotContains(body.Message, "running", "a queued initial run is not running yet")
+			}
+		})
+	}
+}
+
 // TestHandleTriggerSyncBeeperSource confirms a beeper source (one of many under
 // the singleton "beeper" job) starts that shared job.
 func TestHandleTriggerSyncBeeperSource(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	sched := newMockScheduler()
@@ -3859,6 +4142,7 @@ func TestHandleTriggerSyncBeeperSource(t *testing.T) {
 // TestHandleTriggerSyncGenericSourceNotScheduled confirms a generic source
 // whose job is not scheduled still returns 404 and starts nothing.
 func TestHandleTriggerSyncGenericSourceNotScheduled(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	sched := newMockScheduler() // no scheduledJobs
@@ -3876,6 +4160,7 @@ func TestHandleTriggerSyncGenericSourceNotScheduled(t *testing.T) {
 // still trigger the GRANOLA job via source_type dispatch, never the account
 // scheduler's TriggerSync for that email.
 func TestHandleTriggerSyncGenericIdentifierCollidesWithScheduledAccount(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	const collidingIdentifier = "shared@example.com"
@@ -3896,6 +4181,7 @@ func TestHandleTriggerSyncGenericIdentifierCollidesWithScheduledAccount(t *testi
 // granola source whose identifier equals a scheduled account email must
 // report the generic job's state, not the account scheduler's.
 func TestHandleSourceStatusGenericIdentifierCollidesWithScheduledAccount(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	const collidingIdentifier = "shared@example.com"
@@ -3931,6 +4217,7 @@ func TestHandleSourceStatusGenericIdentifierCollidesWithScheduledAccount(t *test
 }
 
 func TestMeetingImportIdentifierCollisionDoesNotEnableAccountSync(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	const collidingIdentifier = "shared@example.com"
@@ -3978,6 +4265,7 @@ func TestMeetingImportIdentifierCollisionDoesNotEnableAccountSync(t *testing.T) 
 }
 
 func TestAccountScheduledSourceTypesSupportStatusAndTrigger(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		sourceType string
@@ -4047,6 +4335,7 @@ func TestAccountScheduledSourceTypesSupportStatusAndTrigger(t *testing.T) {
 // account-scheduler type (gmail), which must report ok=false since it's
 // governed by the account scheduler, not a generic job.
 func TestSchedulerJobNameForSource(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	cases := []struct {
@@ -4060,9 +4349,12 @@ func TestSchedulerJobNameForSource(t *testing.T) {
 		{"gcal", gcal.SourceType, "alice@example.com/primary", "gcal:alice@example.com", true},
 		{"gcal no calendar id", gcal.SourceType, "alice@example.com", "", false},
 		{"granola", granola.SourceType, "acct-1", "granola:acct-1", true},
+		{"omi", "omi", "omi-work", "omi:omi-work", true},
 		{"circleback", circleback.SourceType, "acct-2", "circleback:acct-2", true},
 		{"notion meetings", notionmeetings.SourceType, "acct-3", "notion-meetings:acct-3", true},
+		{"muesli", muesli.SourceType, "mac", "muesli:mac", true},
 		{"beeper", "beeper", "beeper-account-1", "beeper", true},
+		{"matrix", "matrix", "@archive:example.org", "matrix", true},
 		{"slack", "slack", "T01:U01", "slack", true},
 		{"account scheduler type", "gmail", "alice@example.com", "", false},
 	}
@@ -4076,8 +4368,10 @@ func TestSchedulerJobNameForSource(t *testing.T) {
 }
 
 func TestHandleGetMessage(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
-	srv, _ := newTestServerWithMockStore(t)
+	srv, mock := newTestServerWithMockStore(t)
+	mock.messages[0].ConversationTitle = "Team chat"
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/1", nil)
 	w := httptest.NewRecorder()
@@ -4091,10 +4385,12 @@ func TestHandleGetMessage(t *testing.T) {
 
 	assert.Equal(int64(1), resp.ID, "id")
 	assert.Equal("Test Subject", resp.Subject, "subject")
+	assert.Equal("Team chat", resp.ConversationTitle, "conversation title")
 	assert.Equal("This is the full message body text.", resp.Body, "body")
 }
 
 func TestHandleGetMessageNotFound(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/99999", nil)
@@ -4106,6 +4402,7 @@ func TestHandleGetMessageNotFound(t *testing.T) {
 }
 
 func TestHandleGetMessageInvalidID(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/messages/invalid", nil)
@@ -4117,6 +4414,7 @@ func TestHandleGetMessageInvalidID(t *testing.T) {
 }
 
 func TestHandleGetMessage_EngineBodyHTML(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
@@ -4158,6 +4456,7 @@ func TestHandleGetMessage_EngineBodyHTML(t *testing.T) {
 // deleted_at in the response when the underlying message has a
 // deleted_from_source_at timestamp.
 func TestHandleGetMessage_EngineDeletedAt(t *testing.T) {
+	t.Parallel()
 	deletedAt := time.Date(2024, 7, 1, 9, 30, 0, 0, time.UTC)
 	engine := &querytest.MockEngine{
 		Messages: map[int64]*query.MessageDetail{
@@ -4186,6 +4485,7 @@ func TestHandleGetMessage_EngineDeletedAt(t *testing.T) {
 }
 
 func TestHandleSearchMissingQuery(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/search", nil)
@@ -4197,6 +4497,7 @@ func TestHandleSearchMissingQuery(t *testing.T) {
 }
 
 func TestHandleSearch(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=Test", nil)
@@ -4216,6 +4517,7 @@ func TestHandleSearch(t *testing.T) {
 // searches being routed through the raw full-text path instead of the Store
 // predicate that owns List-Id matching.
 func TestHandleSearchListIDUsesStructuredStoreQuery(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource("gmail", "list-search@example.test")
@@ -4246,6 +4548,7 @@ func TestHandleSearchListIDUsesStructuredStoreQuery(t *testing.T) {
 }
 
 func TestHandleSearchInvalidOperatorValueReturns400(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		query     string
@@ -4279,6 +4582,7 @@ func TestHandleSearchInvalidOperatorValueReturns400(t *testing.T) {
 }
 
 func TestHandleSearchPlainTextAccountScopeUsesStructuredSearch(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, st := newTestServerWithMockStore(t)
@@ -4301,6 +4605,7 @@ func TestHandleSearchPlainTextAccountScopeUsesStructuredSearch(t *testing.T) {
 }
 
 func TestHandleSearchAccountLookupErrorReturnsInternal(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, st := newTestServerWithMockStore(t)
@@ -4320,6 +4625,7 @@ func TestHandleSearchAccountLookupErrorReturnsInternal(t *testing.T) {
 }
 
 func TestHandleTriggerSync(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 		Accounts: []config.AccountSchedule{
@@ -4341,6 +4647,7 @@ func TestHandleTriggerSync(t *testing.T) {
 }
 
 func TestHandleTriggerSyncNotFound(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 	}
@@ -4357,6 +4664,7 @@ func TestHandleTriggerSyncNotFound(t *testing.T) {
 }
 
 func TestHandleTriggerSyncConflict(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 	}
@@ -4378,6 +4686,7 @@ func TestHandleTriggerSyncConflict(t *testing.T) {
 }
 
 func TestErrorResponseShape(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	// Test with invalid ID to get a 400 error
@@ -4394,6 +4703,7 @@ func TestErrorResponseShape(t *testing.T) {
 }
 
 func TestMessageSummaryNilSlices(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -4439,12 +4749,14 @@ func TestMessageSummaryNilSlices(t *testing.T) {
 }
 
 func TestQueryMessageSummaryPreservesSourceID(t *testing.T) {
+	t.Parallel()
 	summary := toMessageSummaryFromQuery(query.MessageSummary{ID: 1, SourceID: 42})
 
 	assert.Equal(t, int64(42), summary.SourceID)
 }
 
 func TestMessageSummaryCcBccInResponse(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, ms := newTestServerWithMockStore(t)
@@ -4484,6 +4796,7 @@ func TestMessageSummaryCcBccInResponse(t *testing.T) {
 }
 
 func TestMessageSummaryCcBccOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, _ := newTestServerWithMockStore(t)
@@ -4507,6 +4820,7 @@ func TestMessageSummaryCcBccOmittedWhenEmpty(t *testing.T) {
 }
 
 func TestGetMessageCcBccInResponse(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, ms := newTestServerWithMockStore(t)
@@ -4529,6 +4843,7 @@ func TestGetMessageCcBccInResponse(t *testing.T) {
 }
 
 func TestGetMessageIncludesAttachmentID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, ms := newTestServerWithMockStore(t)
@@ -4556,6 +4871,7 @@ func TestGetMessageIncludesAttachmentID(t *testing.T) {
 }
 
 func TestHandleUploadToken(t *testing.T) {
+	t.Parallel()
 	// Create temp directory for tokens
 	tmpDir := t.TempDir()
 
@@ -4588,6 +4904,7 @@ func TestHandleUploadToken(t *testing.T) {
 }
 
 func TestHandleUploadToken_PreservesClientID(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	tmpDir := t.TempDir()
 
@@ -4626,6 +4943,7 @@ func TestHandleUploadToken_PreservesClientID(t *testing.T) {
 }
 
 func TestHandleUploadTokenInvalidJSON(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
@@ -4651,6 +4969,7 @@ func TestHandleUploadTokenInvalidJSON(t *testing.T) {
 }
 
 func TestHandleUploadTokenMissingRefreshToken(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
@@ -4682,6 +5001,7 @@ func TestHandleUploadTokenMissingRefreshToken(t *testing.T) {
 }
 
 func TestHandleUploadTokenInvalidEmail(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 	}
@@ -4713,6 +5033,7 @@ func TestHandleUploadTokenInvalidEmail(t *testing.T) {
 }
 
 func TestHandleUploadTokenMissingEmail(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 	}
@@ -4730,6 +5051,7 @@ func TestHandleUploadTokenMissingEmail(t *testing.T) {
 }
 
 func TestHandleAddAccount(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
@@ -4760,6 +5082,7 @@ func TestHandleAddAccount(t *testing.T) {
 }
 
 func TestHandleAddAccountDuplicate(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 		Accounts: []config.AccountSchedule{
@@ -4784,6 +5107,7 @@ func TestHandleAddAccountDuplicate(t *testing.T) {
 }
 
 func TestHandleAddAccountInvalidCron(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 	}
@@ -4805,6 +5129,7 @@ func TestHandleAddAccountInvalidCron(t *testing.T) {
 }
 
 func TestHandleAddAccountInvalidEmail(t *testing.T) {
+	t.Parallel()
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 	}
@@ -4834,6 +5159,7 @@ func TestHandleAddAccountInvalidEmail(t *testing.T) {
 }
 
 func TestHandleAddAccountSaveFailure(t *testing.T) {
+	t.Parallel()
 	// Point HomeDir to a file (not a directory) so Save() fails
 	tmpFile := filepath.Join(t.TempDir(), "not-a-dir")
 	require.NoError(t, os.WriteFile(tmpFile, []byte("x"), 0600), "create blocker file")
@@ -4856,42 +5182,6 @@ func TestHandleAddAccountSaveFailure(t *testing.T) {
 
 	// In-memory state should be rolled back
 	assert.Empty(t, cfg.Accounts, "cfg.Accounts has %d entries, want 0 (rollback failed)", len(cfg.Accounts))
-}
-
-func TestSanitizeTokenPath(t *testing.T) {
-	tokensDir := "/data/tokens"
-
-	tests := []struct {
-		name  string
-		email string
-	}{
-		{"normal email", "user@gmail.com"},
-		{"email with plus", "user+tag@gmail.com"},
-		{"email with dots", "first.last@gmail.com"},
-		{"path traversal attempt", "../../../etc/passwd"},
-		{"slash in email", "user/evil@gmail.com"},
-		{"backslash in email", "user\\evil@gmail.com"},
-		{"null byte", "user\x00evil@gmail.com"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := sanitizeTokenPath(tokensDir, tc.email)
-
-			// Result must be within tokensDir (path traversal prevention)
-			cleanResult := filepath.Clean(result)
-			cleanTokensDir := filepath.Clean(tokensDir)
-			assert.True(t, strings.HasPrefix(cleanResult, cleanTokensDir+string(os.PathSeparator)),
-				"path %q escapes tokensDir %q", result, tokensDir)
-
-			// Result must end with .json
-			assert.True(t, strings.HasSuffix(result, ".json"), "path %q doesn't end with .json", result)
-
-			// Result must not contain path separators in the filename
-			base := filepath.Base(result)
-			assert.False(t, strings.ContainsAny(base, "/\\"), "filename %q contains path separators", base)
-		})
-	}
 }
 
 // newTestServerWithEngine creates a test server with both mock store and mock engine.
@@ -4940,6 +5230,7 @@ func newTestServerWithEngine(t *testing.T, engine query.Engine) *Server {
 }
 
 func TestHandleAggregates(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
@@ -4968,6 +5259,7 @@ func TestHandleAggregates(t *testing.T) {
 // TestHandleAggregatesListsView catches API parsing or response conversion
 // that rejects the Lists view or reports it as another aggregate dimension.
 func TestHandleAggregatesListsView(t *testing.T) {
+	t.Parallel()
 	srv := newTestServerWithEngine(t, &querytest.MockEngine{})
 	w := httptest.NewRecorder()
 
@@ -4981,6 +5273,7 @@ func TestHandleAggregatesListsView(t *testing.T) {
 }
 
 func TestHandleAggregatesNoEngine(t *testing.T) {
+	t.Parallel()
 	// Server without engine
 	cfg := &config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
@@ -5003,6 +5296,7 @@ func TestHandleAggregatesNoEngine(t *testing.T) {
 }
 
 func TestHandleAggregatesInvalidViewType(t *testing.T) {
+	t.Parallel()
 	srv := newTestServerWithEngine(t, &querytest.MockEngine{})
 	for _, path := range []string{
 		"/api/v1/aggregates?view_type=invalid",
@@ -5021,6 +5315,7 @@ func TestHandleAggregatesInvalidViewType(t *testing.T) {
 }
 
 func TestHandleSubAggregates(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
 		AggregateRows: []query.AggregateRow{
@@ -5045,6 +5340,7 @@ func TestHandleSubAggregates(t *testing.T) {
 }
 
 func TestHandleFilteredMessages(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	var gotFilter query.MessageFilter
@@ -5086,6 +5382,7 @@ func TestHandleFilteredMessages(t *testing.T) {
 }
 
 func TestHandleGmailIDsByFilterUsesQueryEngine(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	var gotFilter query.MessageFilter
@@ -5118,6 +5415,7 @@ func TestHandleGmailIDsByFilterUsesQueryEngine(t *testing.T) {
 }
 
 func TestHandleGmailIDsByFilterResolvesSearchAndFilterTogether(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	var calls int
@@ -5149,6 +5447,7 @@ func TestHandleGmailIDsByFilterResolvesSearchAndFilterTogether(t *testing.T) {
 }
 
 func TestHandleGmailIDsByFilterResolvesDisplayedAggregateSearch(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	engine := &querytest.MockEngine{
@@ -5179,6 +5478,7 @@ func TestHandleGmailIDsByFilterResolvesDisplayedAggregateSearch(t *testing.T) {
 }
 
 func TestHandleGetAttachmentUsesQueryEngine(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
@@ -5211,13 +5511,14 @@ func TestHandleGetAttachmentUsesQueryEngine(t *testing.T) {
 }
 
 func TestHandleSearchByDomainsUsesQueryEngine(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	var gotDomains []string
 	var gotAfter, gotBefore *time.Time
 	var gotLimit, gotOffset int
 	engine := &querytest.MockEngine{
-		SearchByDomainsFunc: func(_ context.Context, domains []string, after, before *time.Time, limit, offset int) ([]query.MessageSummary, error) {
+		SearchByDomainsFunc: func(_ context.Context, domains []string, after, before *time.Time, limit, offset int, _ []int64) ([]query.MessageSummary, error) {
 			gotDomains = domains
 			gotAfter = after
 			gotBefore = before
@@ -5270,6 +5571,7 @@ func TestHandleSearchByDomainsUsesQueryEngine(t *testing.T) {
 }
 
 func TestHandleFilteredMessagesIncludesDeletedAt(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	deletedAt := time.Date(2026, 3, 18, 15, 0, 0, 0, time.UTC)
 	engine := &querytest.MockEngine{
@@ -5306,6 +5608,7 @@ func TestHandleFilteredMessagesIncludesDeletedAt(t *testing.T) {
 }
 
 func TestHandleFilteredMessagesFormatsPhoneBackedSMSParticipants(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	engine := &querytest.MockEngine{
 		ListResults: []query.MessageSummary{
@@ -5341,6 +5644,7 @@ func TestHandleFilteredMessagesFormatsPhoneBackedSMSParticipants(t *testing.T) {
 }
 
 func TestHandleFilteredMessagesFallsBackToContactNameWhenAddressMissing(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	engine := &querytest.MockEngine{
 		ListResults: []query.MessageSummary{
@@ -5378,6 +5682,7 @@ func TestHandleFilteredMessagesFallsBackToContactNameWhenAddressMissing(t *testi
 }
 
 func TestHandleTotalStats(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
 		Stats: &query.TotalStats{
@@ -5410,6 +5715,7 @@ func TestHandleTotalStats(t *testing.T) {
 }
 
 func TestHandleTotalStatsSearchScope(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		target          string
@@ -5480,6 +5786,7 @@ func TestHandleTotalStatsSearchScope(t *testing.T) {
 }
 
 func TestHandleTotalStatsRejectsInvalidSearchQueryBeforeEngine(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -5502,6 +5809,7 @@ func TestHandleTotalStatsRejectsInvalidSearchQueryBeforeEngine(t *testing.T) {
 }
 
 func TestHandleFastSearch(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
 		SearchFastResults: []query.MessageSummary{
@@ -5533,7 +5841,30 @@ func TestHandleFastSearch(t *testing.T) {
 	assert.Len(resp.Messages, 1, "messages count")
 }
 
+func TestHandleFastSearchReportsCacheEncodingError(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	engine := &querytest.MockEngine{
+		SearchFastWithStatsFunc: func(context.Context, *search.Query, string, query.MessageFilter, query.ViewType, int, int) (*query.SearchFastResult, error) {
+			return nil, fmt.Errorf("materialize search matches: %s", `Invalid Input Error: Invalid string encoding found in Parquet file "x.parquet": value "a\xF0" is not valid UTF8!`)
+		},
+	}
+	srv := newTestServerWithEngine(t, engine)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search/fast?q=invoice", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	assert.Equal(http.StatusInternalServerError, w.Code)
+	var got ErrorResponse
+	require.NoError(json.Unmarshal(w.Body.Bytes(), &got))
+	assert.Equal("cache_encoding_error", got.Error)
+	assert.NotContains(got.Message, "msgvault repair-encoding")
+	assert.Contains(got.Message, "msgvault build-cache --full-rebuild")
+}
+
 func TestHandleFastSearchForwardsSourceIDs(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -5557,6 +5888,7 @@ func TestHandleFastSearchForwardsSourceIDs(t *testing.T) {
 }
 
 func TestHandleFastSearchMissingQuery(t *testing.T) {
+	t.Parallel()
 	engine := &querytest.MockEngine{}
 	srv := newTestServerWithEngine(t, engine)
 
@@ -5569,6 +5901,7 @@ func TestHandleFastSearchMissingQuery(t *testing.T) {
 }
 
 func TestHandleFastSearchInvalidViewType(t *testing.T) {
+	t.Parallel()
 	engine := &querytest.MockEngine{}
 	srv := newTestServerWithEngine(t, engine)
 
@@ -5586,6 +5919,7 @@ func TestHandleFastSearchInvalidViewType(t *testing.T) {
 }
 
 func TestFastSearchPreservesCompleteMessageFilter(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	var gotFilter query.MessageFilter
@@ -5613,6 +5947,7 @@ func TestFastSearchPreservesCompleteMessageFilter(t *testing.T) {
 }
 
 func TestDeepBodySearchRejectsUnsupportedFilterParams(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		param string
@@ -5640,6 +5975,7 @@ func TestDeepBodySearchRejectsUnsupportedFilterParams(t *testing.T) {
 }
 
 func TestDaemonAdapterListIDScopeReachesServerQueryEngine(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	db := dbtest.NewTestDB(t, "../store/schema.sql")
 	db.SeedStandardDataSet()
@@ -5667,6 +6003,7 @@ func TestDaemonAdapterListIDScopeReachesServerQueryEngine(t *testing.T) {
 }
 
 func TestSearchParsedMessageTypeFilterReachesEngine(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		path string
@@ -5699,6 +6036,7 @@ func TestSearchParsedMessageTypeFilterReachesEngine(t *testing.T) {
 }
 
 func TestSearchConversationIDFilterParamReachesEngine(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		path string
@@ -5742,6 +6080,7 @@ func TestSearchConversationIDFilterParamReachesEngine(t *testing.T) {
 // widened query. Regression coverage for the fast/deep gap in the CLI/API
 // search validation.
 func TestFastDeepSearchRejectInvalidOperatorValue(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		path string
@@ -5788,6 +6127,7 @@ func TestFastDeepSearchRejectInvalidOperatorValue(t *testing.T) {
 // deadline/cancellation from the engine surfaces as a structured 503 rather
 // than a generic 500 on the fast and deep search endpoints.
 func TestFastDeepSearchContextErrorReturns503(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		path    string
@@ -5887,6 +6227,7 @@ func (*textEngineWithoutSnapshot) GetTextStats(context.Context, query.TextStatsO
 }
 
 func TestTextRevisionMissingCapabilityReturnsServiceUnavailable(t *testing.T) {
+	t.Parallel()
 	engine := &textEngineWithoutSnapshot{MockEngine: &querytest.MockEngine{}}
 	srv := newTestServerWithEngine(t, engine)
 	for _, path := range []string{
@@ -5903,6 +6244,7 @@ func TestTextRevisionMissingCapabilityReturnsServiceUnavailable(t *testing.T) {
 }
 
 func TestTextSearchDoesNotPublishConversationSnapshotRevision(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	engine := &textEngineWithoutSnapshot{MockEngine: &querytest.MockEngine{}}
@@ -5922,6 +6264,7 @@ func TestTextSearchDoesNotPublishConversationSnapshotRevision(t *testing.T) {
 // while waiting for a DuckDB query slot) surfaces as a structured 503
 // instead of a generic 500 on every text endpoint.
 func TestTextEndpointsContextErrorReturns503(t *testing.T) {
+	t.Parallel()
 	paths := []struct {
 		name string
 		path string
@@ -5965,6 +6308,7 @@ func TestTextEndpointsContextErrorReturns503(t *testing.T) {
 // honors aggregate sort values (count, name, attachment_size) instead of
 // rejecting them via the message-filter parser's message-sort validation.
 func TestSubAggregatesAcceptsAggregateSort(t *testing.T) {
+	t.Parallel()
 	for _, sortVal := range []string{"count", "name", "attachment_size", "size"} {
 		t.Run(sortVal, func(t *testing.T) {
 			require := require.New(t)
@@ -5982,6 +6326,7 @@ func TestSubAggregatesAcceptsAggregateSort(t *testing.T) {
 }
 
 func TestRemoteSearchParsedMessageTypeThroughAPI(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	engine := &querytest.MockEngine{
@@ -6038,6 +6383,7 @@ func TestRemoteSearchParsedMessageTypeThroughAPI(t *testing.T) {
 }
 
 func TestHandleDeepSearch(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	engine := &querytest.MockEngine{
@@ -6069,6 +6415,7 @@ func TestHandleDeepSearch(t *testing.T) {
 }
 
 func TestHandleDeepSearchPreservesCompleteViewFilter(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	var gotFilter query.MessageFilter
@@ -6093,6 +6440,7 @@ func TestHandleDeepSearchPreservesCompleteViewFilter(t *testing.T) {
 }
 
 func TestHandleDeepSearchPreservesHideDeletedCompatibility(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		query     string
@@ -6129,11 +6477,16 @@ type bodySearchTestEngine struct {
 
 func (e *bodySearchTestEngine) SearchMessageBodies(
 	ctx context.Context, q *search.Query, limit, offset int,
-) ([]query.MessageSummary, error) {
-	return e.searchMessageBodiesFunc(ctx, q, limit, offset)
+) (*query.SearchFastResult, error) {
+	messages, err := e.searchMessageBodiesFunc(ctx, q, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return &query.SearchFastResult{Messages: messages}, nil
 }
 
 func TestHandleDeepSearchBodyScope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	var genericCalled, bodyCalled bool
@@ -6190,6 +6543,7 @@ func TestHandleDeepSearchBodyScope(t *testing.T) {
 }
 
 func TestHandleDeepSearchBodyScopeEmptyPageHasUnknownTotal(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -6207,6 +6561,7 @@ func TestHandleDeepSearchBodyScopeEmptyPageHasUnknownTotal(t *testing.T) {
 }
 
 func TestHandleDeepSearchScopeValidation(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		path       string
@@ -6256,6 +6611,7 @@ func TestHandleDeepSearchScopeValidation(t *testing.T) {
 }
 
 func TestHandleDeepSearchBodyReadinessErrorIsActionable(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	engine := &bodySearchTestEngine{
@@ -6278,6 +6634,7 @@ func TestHandleDeepSearchBodyReadinessErrorIsActionable(t *testing.T) {
 }
 
 func TestHandleDeepSearchOmittedScopeUsesGenericSearch(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	var genericCalled bool
@@ -6306,6 +6663,7 @@ func TestHandleDeepSearchOmittedScopeUsesGenericSearch(t *testing.T) {
 }
 
 func TestHandleDeepSearchMissingQuery(t *testing.T) {
+	t.Parallel()
 	engine := &querytest.MockEngine{}
 	srv := newTestServerWithEngine(t, engine)
 
@@ -6329,7 +6687,22 @@ func (m *mockSQLQueryEngine) QuerySQL(_ context.Context, _ string) (*query.Query
 	return m.queryResult, m.queryErr
 }
 
+func TestArchiveQueryRequiresRestrictedRunner(t *testing.T) {
+	t.Parallel()
+	srv := NewServerWithOptions(ServerOptions{
+		Config: &config.Config{},
+		Engine: &mockSQLQueryEngine{queryResult: &query.QueryResult{RowCount: 1}},
+		Logger: testLogger(),
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/query/archive", strings.NewReader(`{"sql":"SELECT 1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	srv.Router().ServeHTTP(response, request)
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code, response.Body.String())
+}
+
 func TestHandleQuery(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	engine := &mockSQLQueryEngine{
@@ -6367,6 +6740,7 @@ func TestHandleQuery(t *testing.T) {
 }
 
 func TestHandleQueryUsesConfiguredRunnerWhenEngineDoesNotSupportSQL(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -6378,13 +6752,13 @@ func TestHandleQueryUsesConfiguredRunnerWhenEngineDoesNotSupportSQL(t *testing.T
 		Config: cfg,
 		Engine: &querytest.MockEngine{},
 		Logger: testLogger(),
-		SQLQueryRunner: func(_ context.Context, sql string) (*query.QueryResult, error) {
+		SQLQueryRunner: func(_ context.Context, sql string, _ bool) (*query.QueryResult, *CacheBuildAccepted, error) {
 			gotSQL = sql
 			return &query.QueryResult{
 				Columns:  []string{"subject"},
 				Rows:     [][]any{{"Hello"}},
 				RowCount: 1,
-			}, nil
+			}, nil, nil
 		},
 	})
 
@@ -6404,7 +6778,68 @@ func TestHandleQueryUsesConfiguredRunnerWhenEngineDoesNotSupportSQL(t *testing.T
 	assert.Equal(1, result.RowCount, "row_count")
 }
 
+func TestHandleQueryAcceptsFreshBuildAndReportsStatus(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	var gotFresh bool
+	srv := NewServerWithOptions(ServerOptions{
+		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+		Engine: &querytest.MockEngine{}, Logger: testLogger(),
+		SQLQueryRunner: func(_ context.Context, sql string, fresh bool) (*query.QueryResult, *CacheBuildAccepted, error) {
+			gotFresh = fresh
+			return nil, &CacheBuildAccepted{Status: CacheBuildQueued, JobID: "synthetic-job"}, nil
+		},
+		CacheBuildStatusReader: func(id string) (CacheBuildStatus, bool) {
+			if id != "synthetic-job" {
+				return CacheBuildStatus{}, false
+			}
+			return CacheBuildStatus{JobID: id, Status: CacheBuildRunning}, true
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/query?fresh=true", strings.NewReader(`{"sql":"SELECT 1","fresh":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+	require.Equal(http.StatusAccepted, w.Code, w.Body.String())
+	assert.True(gotFresh)
+	var accepted CacheBuildAccepted
+	require.NoError(json.NewDecoder(w.Body).Decode(&accepted))
+	assert.Equal("synthetic-job", accepted.JobID)
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/v1/cache-builds/synthetic-job", nil)
+	statusW := httptest.NewRecorder()
+	srv.Router().ServeHTTP(statusW, statusReq)
+	require.Equal(http.StatusOK, statusW.Code, statusW.Body.String())
+	var status CacheBuildStatus
+	require.NoError(json.NewDecoder(statusW.Body).Decode(&status))
+	assert.Equal(CacheBuildRunning, status.Status)
+
+	conflict := httptest.NewRequest(http.MethodPost, "/api/v1/query?fresh=false", strings.NewReader(`{"sql":"SELECT 1","fresh":true}`))
+	conflict.Header.Set("Content-Type", "application/json")
+	conflictW := httptest.NewRecorder()
+	srv.Router().ServeHTTP(conflictW, conflict)
+	assert.Equal(http.StatusBadRequest, conflictW.Code)
+}
+
+func TestParseCLISyncRequestCacheOverrides(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	request := httptest.NewRequest(http.MethodPost,
+		"/api/v1/cli/sync?build-cache=true&no-build-cache=false", nil)
+	parsed, apiErr := parseCLISyncRequest(request, false)
+	require.Nil(apiErr)
+	assert.True(parsed.BuildCache)
+	assert.False(parsed.NoBuildCache)
+
+	conflict := httptest.NewRequest(http.MethodPost,
+		"/api/v1/cli/sync-full?build-cache=true&no-build-cache=true", nil)
+	_, apiErr = parseCLISyncRequest(conflict, true)
+	require.NotNil(apiErr)
+	assert.Equal(http.StatusBadRequest, apiErr.status)
+}
+
 func TestHandleSearch_FTSModeUnchanged(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv, _ := newTestServerWithMockStore(t)
@@ -6425,6 +6860,7 @@ func TestHandleSearch_FTSModeUnchanged(t *testing.T) {
 }
 
 func TestHandleSearch_HybridModeNotConfigured(t *testing.T) {
+	t.Parallel()
 	// newTestServerWithMockStore does not inject a HybridEngine, so
 	// the server must return 503 for any vector/hybrid query.
 	srv, _ := newTestServerWithMockStore(t)
@@ -6467,6 +6903,7 @@ func newHybridServerForErrorTest(t *testing.T, backend vector.Backend) *Server {
 // 503 with error code "index_building". The engine returns this when
 // no active generation exists yet but a build is in progress.
 func TestHandleSearch_HybridErrIndexBuilding(t *testing.T) {
+	t.Parallel()
 	building := &vector.Generation{
 		ID: 1, Model: "nomic-embed", Dimension: 768,
 		Fingerprint: "nomic-embed:768", State: vector.GenerationBuilding,
@@ -6489,6 +6926,7 @@ func TestHandleSearch_HybridErrIndexBuilding(t *testing.T) {
 // 503 with error code "vector_not_enabled". The engine returns this
 // when no generation exists at all (no active, no building).
 func TestHandleSearch_HybridErrNotEnabled(t *testing.T) {
+	t.Parallel()
 	backend := &fakeVectorBackend{} // no active, no building
 	srv := newHybridServerForErrorTest(t, backend)
 
@@ -6540,6 +6978,7 @@ func (blockingEmbedder) Embed(ctx context.Context, _ []string) ([][]float32, err
 // call. If http.TimeoutHandler-style preemption is introduced, this test will
 // fail because the response would be a bare 504 instead of the structured 503.
 func TestHandleSearch_HybridEmbeddingTimeoutReturnsStructuredError(t *testing.T) {
+	t.Parallel()
 	backend := &fakeVectorBackend{
 		active: &vector.Generation{
 			ID: 1, Model: "fake", Dimension: 4,
@@ -6576,6 +7015,7 @@ func TestHandleSearch_HybridEmbeddingTimeoutReturnsStructuredError(t *testing.T)
 // handler must reject this with 400 missing_free_text rather than
 // passing an empty string into the embedder.
 func TestHandleSearch_HybridFilterOnlyReturnsBadRequest(t *testing.T) {
+	t.Parallel()
 	// Construct a real engine so the handler progresses past the
 	// "vector_not_enabled" check before evaluating freeText.
 	backend := &fakeVectorBackend{
@@ -6607,6 +7047,7 @@ func TestHandleSearch_HybridFilterOnlyReturnsBadRequest(t *testing.T) {
 }
 
 func TestEmbeddingBodyText_HTMLOnlyUsesEmbeddingCorpus(t *testing.T) {
+	t.Parallel()
 	msg := &APIMessage{
 		Body:     "<p>semantic <strong>needle</strong></p>",
 		BodyHTML: "<p>semantic <strong>needle</strong></p>",
@@ -6616,6 +7057,7 @@ func TestEmbeddingBodyText_HTMLOnlyUsesEmbeddingCorpus(t *testing.T) {
 }
 
 func TestHandleSearch_VectorMessageTypeParamReachesFilter(t *testing.T) {
+	t.Parallel()
 	store := &mockStore{
 		messages: []APIMessage{{
 			ID:          42,
@@ -6652,6 +7094,7 @@ func TestHandleSearch_VectorMessageTypeParamReachesFilter(t *testing.T) {
 }
 
 func TestHandleSearch_VectorAccountParamReachesFilter(t *testing.T) {
+	t.Parallel()
 	store := &mockStore{
 		messages: []APIMessage{{ID: 42, Subject: "Lunch"}},
 		sourcesByLookup: map[string][]*store.Source{
@@ -6688,6 +7131,7 @@ func TestHandleSearch_VectorAccountParamReachesFilter(t *testing.T) {
 }
 
 func TestHandleSearch_VectorSourceIDParamReachesFilterExactly(t *testing.T) {
+	t.Parallel()
 	store := &mockStore{messages: []APIMessage{{ID: 42, Subject: "Lunch", SourceID: 77}}}
 	backend := &fakeVectorBackend{
 		active: &vector.Generation{
@@ -6717,6 +7161,7 @@ func TestHandleSearch_VectorSourceIDParamReachesFilterExactly(t *testing.T) {
 }
 
 func TestHandleSearch_FTSRejectsStructuredSemanticFilters(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 	filters := []string{
 		"sender=alice%40example.test",
@@ -6752,6 +7197,7 @@ func TestHandleSearch_FTSRejectsStructuredSemanticFilters(t *testing.T) {
 }
 
 func TestHandleSearch_DefaultFTSRejectsStructuredSemanticFilter(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/search?q=lunch&source_id=77", nil)
@@ -6765,6 +7211,7 @@ func TestHandleSearch_DefaultFTSRejectsStructuredSemanticFilter(t *testing.T) {
 }
 
 func TestHandleSearch_FTSAppliesConversationIDParam(t *testing.T) {
+	t.Parallel()
 	srv, st := newTestServerWithMockStore(t)
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/search?q=lunch&mode=fts&conversation_id=42", nil)
@@ -6777,6 +7224,7 @@ func TestHandleSearch_FTSAppliesConversationIDParam(t *testing.T) {
 }
 
 func TestHandleSearch_VectorRejectsInvalidTimePeriod(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	srv, _ := newTestServerWithMockStore(t)
@@ -6793,6 +7241,7 @@ func TestHandleSearch_VectorRejectsInvalidTimePeriod(t *testing.T) {
 }
 
 func TestHandleSearch_VectorCollectionParamReachesFilter(t *testing.T) {
+	t.Parallel()
 	store := &mockStore{
 		messages: []APIMessage{{ID: 42, Subject: "Lunch"}},
 		collections: map[string]*store.CollectionWithSources{
@@ -6839,6 +7288,7 @@ func TestHandleSearch_VectorCollectionParamReachesFilter(t *testing.T) {
 // Catches regressions where the embedded type or omitempty rules
 // drift away from MessageSummary.
 func TestHandleSearch_HybridResponseItemShape(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	deletedAt := time.Date(2024, 1, 20, 0, 0, 0, 0, time.UTC)
@@ -6915,9 +7365,12 @@ func TestHandleSearch_HybridResponseItemShape(t *testing.T) {
 	assert.Equal("Alice", fromName, "from_name")
 	hasA, _ := got["has_attachments"].(bool)
 	assert.True(hasA, "has_attachments")
+	assert.NotContains(got, "attachment_count")
+	assert.NotContains(got, "attachment_names")
 }
 
 func TestHandleSearch_VectorExplainAcceptsBooleanQueryValue(t *testing.T) {
+	t.Parallel()
 	require := require.
 		New(t)
 
@@ -6969,6 +7422,7 @@ func TestHandleSearch_VectorExplainAcceptsBooleanQueryValue(t *testing.T) {
 // roughly 7 queries per hit). Hybrid search must instead make a
 // single GetMessagesSummariesByIDs call carrying every hit's id.
 func TestHandleSearch_HybridUsesBulkHydration(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -7014,6 +7468,7 @@ func TestHandleSearch_HybridUsesBulkHydration(t *testing.T) {
 }
 
 func TestHandleSearch_VectorMatchEnrichmentIsOptInAndPageAware(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -7083,6 +7538,7 @@ func TestHandleSearch_VectorMatchEnrichmentIsOptInAndPageAware(t *testing.T) {
 }
 
 func TestHandleSimilarSearchUsesVectorBackend(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -7144,6 +7600,7 @@ func TestHandleSimilarSearchUsesVectorBackend(t *testing.T) {
 }
 
 func TestHandleSimilarSearchHasAttachmentFalseDoesNotFilter(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -7183,6 +7640,7 @@ func TestHandleSimilarSearchHasAttachmentFalseDoesNotFilter(t *testing.T) {
 }
 
 func TestHandleSimilarSearchRejectsInvalidHasAttachment(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv := NewServerWithOptions(ServerOptions{
@@ -7207,6 +7665,7 @@ func TestHandleSimilarSearchRejectsInvalidHasAttachment(t *testing.T) {
 // TestHandleStats_ContextErrorReturns503 verifies a stats read that overran
 // its context budget surfaces as a structured 503, not a generic 500.
 func TestHandleStats_ContextErrorReturns503(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{statsErr: context.DeadlineExceeded}
@@ -7230,6 +7689,7 @@ func TestHandleStats_ContextErrorReturns503(t *testing.T) {
 // canceled hydration on the hybrid path is surfaced as a structured 503
 // instead of a 200 with missing results.
 func TestHandleSearch_HybridHydrationContextErrorReturns503(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -7269,6 +7729,7 @@ func TestHandleSearch_HybridHydrationContextErrorReturns503(t *testing.T) {
 // TestHandleSimilarSearch_HydrationContextErrorReturns503 verifies the similar
 // search path surfaces a canceled hydration as a structured 503.
 func TestHandleSimilarSearch_HydrationContextErrorReturns503(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	store := &mockStore{
@@ -7317,6 +7778,8 @@ func TestHandleSimilarSearch_HydrationContextErrorReturns503(t *testing.T) {
 // silently drop the field for false values — clients that read
 // "pool not saturated" as a positive signal would break.
 func TestHandleSearch_HybridPoolSaturatedAlwaysEmitted(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
 	require := require.New(t)
 	store := &mockStore{}
 	backend := &fakeVectorBackend{
@@ -7347,7 +7810,12 @@ func TestHandleSearch_HybridPoolSaturatedAlwaysEmitted(t *testing.T) {
 	require.NoError(json.Unmarshal(w.Body.Bytes(), &raw), "decode raw")
 	val, exists := raw["pool_saturated"]
 	require.True(exists, "pool_saturated key missing from successful response; want present (raw=%s)", w.Body.String())
-	assert.Equal(t, "false", string(val), "pool_saturated")
+	assert.Equal("false", string(val), "pool_saturated")
+	var timings map[string]int64
+	require.NoError(json.Unmarshal(raw["timings"], &timings), "decode timings")
+	assert.Contains(timings, "query_embedding_ms")
+	assert.Contains(timings, "retrieval_ms")
+	assert.Contains(timings, "hydration_ms")
 }
 
 // mapKeys returns the keys of a map[string]interface{} for use in
@@ -7362,6 +7830,7 @@ func mapKeys(m map[string]any) []string {
 }
 
 func TestHandleSearch_HybridModePaginationUnsupported(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=test&mode=vector&page=2", nil)
@@ -7377,6 +7846,7 @@ func TestHandleSearch_HybridModePaginationUnsupported(t *testing.T) {
 }
 
 func TestHandleSearch_UnknownMode(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=test&mode=bogus", nil)
@@ -7392,6 +7862,7 @@ func TestHandleSearch_UnknownMode(t *testing.T) {
 }
 
 func TestHandleQuery_SQLiteEngine503(t *testing.T) {
+	t.Parallel()
 	engine := query.NewSQLiteEngine(nil)
 
 	cfg := &config.Config{
@@ -7418,35 +7889,41 @@ func TestHandleQuery_SQLiteEngine503(t *testing.T) {
 }
 
 func TestHandleQuery_DuckDBInitializing503(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	cfg := &config.Config{
-		Server: config.ServerConfig{APIPort: 8080},
+	t.Parallel()
+	for _, mode := range []string{AnalyticsModeInitializing, AnalyticsModeSQLFallback} {
+		t.Run(mode, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			cfg := &config.Config{
+				Server: config.ServerConfig{APIPort: 8080},
+			}
+			runnerCalled := false
+			srv := NewServerWithOptions(ServerOptions{
+				Config:                        cfg,
+				Engine:                        &querytest.MockEngine{},
+				AnalyticsMode:                 mode,
+				AnalyticsInitializationActive: true,
+				SQLQueryRunner: func(context.Context, string, bool) (*query.QueryResult, *CacheBuildAccepted, error) {
+					runnerCalled = true
+					return &query.QueryResult{}, nil, nil
+				},
+				Logger: testLogger(),
+			})
+
+			body := `{"sql": "SELECT 1"}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/query", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			srv.Router().ServeHTTP(w, req)
+
+			assert.Equal(http.StatusServiceUnavailable, w.Code, "status (body: %s)", w.Body.String())
+			var errResp ErrorResponse
+			require.NoError(json.NewDecoder(w.Body).Decode(&errResp), "failed to decode error response")
+			assert.Equal("engine_unavailable", errResp.Error, "error")
+			assert.False(runnerCalled, "initializing DuckDB must not fall through to the SQLite query runner")
+		})
 	}
-	runnerCalled := false
-	srv := NewServerWithOptions(ServerOptions{
-		Config:        cfg,
-		Engine:        &querytest.MockEngine{},
-		AnalyticsMode: AnalyticsModeInitializing,
-		SQLQueryRunner: func(context.Context, string) (*query.QueryResult, error) {
-			runnerCalled = true
-			return &query.QueryResult{}, nil
-		},
-		Logger: testLogger(),
-	})
-
-	body := `{"sql": "SELECT 1"}`
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/query", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	srv.Router().ServeHTTP(w, req)
-
-	assert.Equal(http.StatusServiceUnavailable, w.Code, "status (body: %s)", w.Body.String())
-	var errResp ErrorResponse
-	require.NoError(json.NewDecoder(w.Body).Decode(&errResp), "failed to decode error response")
-	assert.Equal("engine_unavailable", errResp.Error, "error")
-	assert.False(runnerCalled, "initializing DuckDB must not fall through to the SQLite query runner")
 }
 
 // fakeVectorBackend is a test stub implementing vector.Backend. Tests
@@ -7522,6 +7999,7 @@ func (f *fakeVectorBackend) CountRejectedPersons(_ context.Context, _ vector.Gen
 func (f *fakeVectorBackend) Close() error { return nil }
 
 func TestHandleStats_VectorDisabled(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 	// newTestServerWithMockStore uses NewServer (no Backend), so backend == nil.
 
@@ -7540,6 +8018,7 @@ func TestHandleStats_VectorDisabled(t *testing.T) {
 }
 
 func TestHandleStats_VectorEnabledWithActive(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	backend := &fakeVectorBackend{
@@ -7651,6 +8130,7 @@ func (s *archiveRawMessageStore) GetArchivedMessageRaw(context.Context, int64) (
 }
 
 func TestHandleMessageInlineUsesArchiveAwareRawAuthority(t *testing.T) {
+	t.Parallel()
 	raw := rawMIMEWithInlineImage("retained@example", "image/png", []byte("retained"))
 	srv := NewServerWithOptions(ServerOptions{
 		Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
@@ -7665,6 +8145,7 @@ func TestHandleMessageInlineUsesArchiveAwareRawAuthority(t *testing.T) {
 }
 
 func TestHandleMessageInline_ImagePNG(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	imgData := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 	raw := rawMIMEWithInlineImage("logo@example", "image/png", imgData)
@@ -7691,6 +8172,7 @@ func TestHandleMessageInline_ImagePNG(t *testing.T) {
 // Content-ID but Content-Disposition: attachment is not served via the inline
 // endpoint — only parts flagged IsInline by the MIME parser should be reachable.
 func TestHandleMessageInline_NonInlineSkipped(t *testing.T) {
+	t.Parallel()
 	imgData := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 	raw := rawMIMEWithImagePart("logo@example", "image/png", "attachment", imgData)
 
@@ -7707,6 +8189,7 @@ func TestHandleMessageInline_NonInlineSkipped(t *testing.T) {
 }
 
 func TestHandleMessageInline_RejectsXHTML(t *testing.T) {
+	t.Parallel()
 	raw := rawMIMEWithInlineImage("evil@nasty", "application/xhtml+xml", []byte("<script>alert(1)</script>"))
 
 	engine := &querytest.MockEngine{
@@ -7722,6 +8205,7 @@ func TestHandleMessageInline_RejectsXHTML(t *testing.T) {
 }
 
 func TestHandleMessageInline_RejectsSVG(t *testing.T) {
+	t.Parallel()
 	raw := rawMIMEWithInlineImage("vuln@svg", "image/svg+xml", []byte("<svg onload='alert(1)'/>"))
 
 	engine := &querytest.MockEngine{
@@ -7737,6 +8221,7 @@ func TestHandleMessageInline_RejectsSVG(t *testing.T) {
 }
 
 func TestHandleMessageInline_CIDNotFound(t *testing.T) {
+	t.Parallel()
 	raw := rawMIMEWithInlineImage("logo@example", "image/png", []byte{0x89, 'P', 'N', 'G'})
 
 	engine := &querytest.MockEngine{
@@ -7752,6 +8237,7 @@ func TestHandleMessageInline_CIDNotFound(t *testing.T) {
 }
 
 func TestHandleMessageInline_NoEngine(t *testing.T) {
+	t.Parallel()
 	srv, _ := newTestServerWithMockStore(t)
 
 	req := httptest.NewRequest(http.MethodGet, inlineURL(1, "any@cid"), nil)
@@ -7762,6 +8248,7 @@ func TestHandleMessageInline_NoEngine(t *testing.T) {
 }
 
 func TestHandleMessageInline_MessageNotFound(t *testing.T) {
+	t.Parallel()
 	engine := &querytest.MockEngine{
 		RawMessages: map[int64][]byte{},
 	}
@@ -7777,6 +8264,7 @@ func TestHandleMessageInline_MessageNotFound(t *testing.T) {
 // TestHandleMessageInline_CIDWithSlash verifies that Content-IDs containing
 // `/` round-trip correctly through the query parameter.
 func TestHandleMessageInline_CIDWithSlash(t *testing.T) {
+	t.Parallel()
 	cid := "path/with/slashes@example.com"
 	imgData := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}
 	raw := rawMIMEWithInlineImage(cid, "image/png", imgData)
@@ -7797,6 +8285,7 @@ func TestHandleMessageInline_CIDWithSlash(t *testing.T) {
 // TestHandleMessageInline_MissingCID verifies that a request without the
 // `cid` query parameter returns 400.
 func TestHandleMessageInline_MissingCID(t *testing.T) {
+	t.Parallel()
 	engine := &querytest.MockEngine{
 		RawMessages: map[int64][]byte{1: rawMIMEWithInlineImage("logo@example", "image/png", []byte{0x89})},
 	}
@@ -7813,6 +8302,7 @@ func TestHandleMessageInline_MissingCID(t *testing.T) {
 // can't fetch raw MIME (Postgres scaffold, remote engine) surface a stable
 // 501 instead of a generic 500.
 func TestHandleMessageInline_UnsupportedEngine(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		err  error
@@ -7921,6 +8411,7 @@ func requestInline(t *testing.T, srv *Server, cid string) *httptest.ResponseReco
 // of one message loads and parses the raw MIME exactly once while each cid still
 // returns its own bytes and content type.
 func TestHandleMessageInline_ParseOnce(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	parts := inlineImageFixture(8)
@@ -7940,44 +8431,49 @@ func TestHandleMessageInline_ParseOnce(t *testing.T) {
 // concurrent first-fetches for the same message collapses to one parse via
 // singleflight, and every response is correct.
 func TestHandleMessageInline_ConcurrentSingleParse(t *testing.T) {
-	parts := inlineImageFixture(4)
-	engine := &countingRawEngine{raw: rawMIMEWithInlineImages(parts)}
-	// Block the first load until all goroutines are in flight so they contend
-	// on the same singleflight key rather than serializing behind a fast cache
-	// fill.
-	release := make(chan struct{})
-	var gate sync.Once
-	engine.GetMessageRawFunc = func(_ context.Context, _ int64) ([]byte, error) {
-		gate.Do(func() { <-release })
-		engine.loads.Add(1)
-		return append([]byte(nil), engine.raw...), nil
-	}
-	srv := newTestServerWithEngine(t, engine)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		parts := inlineImageFixture(4)
+		engine := &countingRawEngine{raw: rawMIMEWithInlineImages(parts)}
+		// Block the first load until all goroutines are in flight so they contend
+		// on the same singleflight key rather than serializing behind a fast cache
+		// fill.
+		release := make(chan struct{})
+		var gate sync.Once
+		engine.GetMessageRawFunc = func(_ context.Context, _ int64) ([]byte, error) {
+			gate.Do(func() { <-release })
+			engine.loads.Add(1)
+			return append([]byte(nil), engine.raw...), nil
+		}
+		srv := newTestServerWithEngine(t, engine)
+		defer func() { require.NoError(t, srv.Shutdown(context.Background()), "shutdown"); synctest.Wait() }()
 
-	const n = 16
-	var wg sync.WaitGroup
-	codes := make([]int, n)
-	for i := range n {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			codes[idx] = requestInline(t, srv, parts[idx%len(parts)].cid).Code
-		}(i)
-	}
-	// Give goroutines a moment to enter singleflight, then release the load.
-	time.Sleep(20 * time.Millisecond)
-	close(release)
-	wg.Wait()
+		const n = 16
+		var wg sync.WaitGroup
+		codes := make([]int, n)
+		for i := range n {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				codes[idx] = requestInline(t, srv, parts[idx%len(parts)].cid).Code
+			}(i)
+		}
+		// Wait until all request goroutines are blocked on the first load.
+		synctest.Wait()
+		close(release)
+		wg.Wait()
 
-	for i, code := range codes {
-		assert.Equal(t, http.StatusOK, code, "status for request %d", i)
-	}
-	assert.Equal(t, int64(1), engine.loads.Load(), "raw loads (parses) under concurrent fan-out")
+		for i, code := range codes {
+			assert.Equal(t, http.StatusOK, code, "status for request %d", i)
+		}
+		assert.Equal(t, int64(1), engine.loads.Load(), "raw loads (parses) under concurrent fan-out")
+	})
 }
 
 // TestHandleMessageInline_RawTooLarge verifies that a raw message over the size
 // cap is rejected before parsing with 413.
 func TestHandleMessageInline_RawTooLarge(t *testing.T) {
+	t.Parallel()
 	oversized := bytes.Repeat([]byte("x"), maxInlineRawBytes+1)
 	engine := &querytest.MockEngine{RawMessages: map[int64][]byte{1: oversized}}
 	srv := newTestServerWithEngine(t, engine)
@@ -7989,6 +8485,7 @@ func TestHandleMessageInline_RawTooLarge(t *testing.T) {
 // TestHandleMessageInline_TooManyParts verifies that a message carrying more
 // than the distinct-part cap is denied wholesale.
 func TestHandleMessageInline_TooManyParts(t *testing.T) {
+	t.Parallel()
 	parts := inlineImageFixture(maxInlinePartsPerMessage + 1)
 	engine := &querytest.MockEngine{RawMessages: map[int64][]byte{1: rawMIMEWithInlineImages(parts)}}
 	srv := newTestServerWithEngine(t, engine)
@@ -8000,6 +8497,7 @@ func TestHandleMessageInline_TooManyParts(t *testing.T) {
 // TestHandleMessageInline_TwoCIDsHappyPath verifies the ordinary small-message
 // case: both cids serve their own bytes.
 func TestHandleMessageInline_TwoCIDsHappyPath(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	parts := []inlineImagePart{
@@ -8028,6 +8526,7 @@ func TestHandleMessageInline_TwoCIDsHappyPath(t *testing.T) {
 // falls through to the store path so engine-only errors don't break detail
 // responses for engines that don't implement GetMessage.
 func TestHandleGetMessage_EngineUnsupportedFallsBackToStore(t *testing.T) {
+	t.Parallel()
 	engine := &querytest.MockEngine{
 		GetMessageFunc: func(_ context.Context, _ int64) (*query.MessageDetail, error) {
 			return nil, query.ErrNotImplemented
@@ -8073,6 +8572,7 @@ func seedAttachmentFile(t *testing.T, cfg *config.Config, hash string, content [
 }
 
 func TestHandleGetAttachmentContent(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	hash := strings.Repeat("a1", 32) // 64 hex chars
@@ -8099,6 +8599,7 @@ func TestHandleGetAttachmentContent(t *testing.T) {
 }
 
 func TestHandleGetAttachmentContent_MissingMimeAndFilename(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	hash := strings.Repeat("bc", 32)
@@ -8122,6 +8623,7 @@ func TestHandleGetAttachmentContent_MissingMimeAndFilename(t *testing.T) {
 }
 
 func TestHandleGetAttachmentContent_InvalidHash(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	srv, _ := newAttachmentTestServer(t, &querytest.MockEngine{})
 
@@ -8133,6 +8635,7 @@ func TestHandleGetAttachmentContent_InvalidHash(t *testing.T) {
 }
 
 func TestHandleGetAttachmentContent_UnknownHash(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	// Valid hash shape, but no metadata row for it.
 	srv, _ := newAttachmentTestServer(t, &querytest.MockEngine{})
@@ -8145,6 +8648,7 @@ func TestHandleGetAttachmentContent_UnknownHash(t *testing.T) {
 }
 
 func TestHandleGetAttachmentContent_MetadataButFileMissing(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	hash := strings.Repeat("ef", 32)
 	engine := &querytest.MockEngine{
@@ -8162,6 +8666,7 @@ func TestHandleGetAttachmentContent_MetadataButFileMissing(t *testing.T) {
 }
 
 func TestResolveRecordedAttachmentPathRejectsUnsafePaths(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	attachmentsDir := t.TempDir()
 
@@ -8179,6 +8684,7 @@ func TestResolveRecordedAttachmentPathRejectsUnsafePaths(t *testing.T) {
 // detail response carries each attachment's content_hash, so a client can
 // discover the hash to pass to GET /api/v1/attachments/{hash}/content.
 func TestHandleGetMessage_ExposesAttachmentContentHash(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	hash := strings.Repeat("ab", 32)
@@ -8215,6 +8721,7 @@ func TestHandleGetMessage_ExposesAttachmentContentHash(t *testing.T) {
 // ready (the visual lane works), but vector_text_status is disabled so MCP
 // text-tool registration can consult the lane that actually backs it.
 func TestStatsReportsTextLaneSeparatelyFromMultimodal(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	srv := NewServerWithOptions(ServerOptions{
@@ -8243,6 +8750,7 @@ func TestStatsReportsTextLaneSeparatelyFromMultimodal(t *testing.T) {
 }
 
 func TestHandleAggregatesEchoesNormalizedSourceIDs(t *testing.T) {
+	t.Parallel()
 	srv := newTestServerWithEngine(t, &querytest.MockEngine{})
 	w := doGet(srv, "/api/v1/aggregates?view_type=senders&source_id=99&source_ids=8,7&source_ids=8")
 
@@ -8253,6 +8761,7 @@ func TestHandleAggregatesEchoesNormalizedSourceIDs(t *testing.T) {
 }
 
 func TestHandleFilteredMessagesUsesSourceIDsAndEchoesThem(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	var captured query.MessageFilter
@@ -8275,6 +8784,7 @@ func TestHandleFilteredMessagesUsesSourceIDsAndEchoesThem(t *testing.T) {
 }
 
 func TestHandleDeepSearchRejectsSourceIDs(t *testing.T) {
+	t.Parallel()
 	called := false
 	engine := &querytest.MockEngine{
 		SearchFunc: func(_ context.Context, _ *search.Query, _, _ int) ([]query.MessageSummary, error) {
@@ -8290,6 +8800,7 @@ func TestHandleDeepSearchRejectsSourceIDs(t *testing.T) {
 }
 
 func TestHandleGmailIDsEchoesSourceIDs(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	var captured query.MessageFilter
@@ -8310,6 +8821,7 @@ func TestHandleGmailIDsEchoesSourceIDs(t *testing.T) {
 }
 
 func TestDaemonTextSearchScopesBeforePagination(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	db := dbtest.NewTestDB(t, "../store/schema.sql")
 	_, err := db.DB.Exec(`
@@ -8344,4 +8856,206 @@ func TestDaemonTextSearchScopesBeforePagination(t *testing.T) {
 	require.NoError(err)
 	require.Len(messages, 1)
 	assert.Equal(t, int64(2), messages[0].ID)
+}
+
+func TestHandleSourceStatusDisablesSyncForQueuedJobs(t *testing.T) {
+	for _, sourceType := range []string{"gmail", "granola"} {
+		t.Run(sourceType, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			st := testutil.NewTestStore(t)
+			sched := newMockScheduler()
+			identifier := "queued@example.com"
+			_, err := st.GetOrCreateSource(sourceType, identifier)
+			require.NoError(err)
+			if sourceType == "gmail" {
+				sched.scheduled[identifier] = true
+				sched.statuses = []AccountStatus{{Email: identifier, Queued: true}}
+			} else {
+				sched.jobStatuses = []JobStatus{{Name: "granola:" + identifier, Queued: true}}
+			}
+			srv := NewServer(&config.Config{}, st, sched, testLogger())
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sources/status", nil))
+			require.Equal(http.StatusOK, w.Code)
+			var response SourceStatusResponse
+			require.NoError(json.Unmarshal(w.Body.Bytes(), &response))
+			require.Len(response.Sources, 1)
+			assert.True(response.Sources[0].SchedulerQueued)
+			assert.False(response.Sources[0].CanSync)
+			assert.Equal("sync_already_running", response.Sources[0].SyncUnavailableReason)
+		})
+	}
+}
+
+// TestOperationGateStillGatesAccountSyncTrigger pins that only generic-source
+// triggers bypass the gate: an account sync trigger keeps its gate behaviour.
+func TestOperationGateStillGatesAccountSyncTrigger(t *testing.T) { //nolint:paralleltest // swaps the package-level operationGateWaitLimit
+	require := require.New(t)
+	gate := NewSerialOperationGate()
+	sched := newMockScheduler()
+	sched.scheduled["test@gmail.com"] = true
+	srv := NewServerWithOptions(ServerOptions{
+		Config:        &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+		Scheduler:     sched,
+		Logger:        testLogger(),
+		OperationGate: gate,
+	})
+	holderDone, ok := gate.BeginLabeledWorkContext(context.Background(), "holder")
+	require.True(ok)
+	defer holderDone()
+	orig := operationGateWaitLimit
+	operationGateWaitLimit = time.Millisecond
+	t.Cleanup(func() { operationGateWaitLimit = orig })
+
+	resp := servePOSTTestRequest(srv, "/api/v1/sync/test@gmail.com")
+
+	require.Equal(http.StatusServiceUnavailable, resp.Code, resp.Body.String())
+}
+
+func TestHandleSourceStatusPaused(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	src, err := st.GetOrCreateSource("omi", "synthetic-paused")
+	require.NoError(err)
+	complete, err := st.StartSync(src.ID, "omi")
+	require.NoError(err)
+	require.NoError(st.CompleteSync(complete, "synthetic-watermark"))
+	paused, err := st.StartSync(src.ID, "omi")
+	require.NoError(err)
+	require.NoError(st.PauseSyncWithCheckpoint(paused, &store.Checkpoint{PageToken: "synthetic-checkpoint", MessagesProcessed: 3, MessagesAdded: 2}))
+	srv := NewServer(&config.Config{Server: config.ServerConfig{APIPort: 8080}}, st, newMockScheduler(), testLogger())
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/sources/status?source_type=omi", nil))
+	require.Equal(http.StatusOK, w.Code)
+	var response SourceStatusResponse
+	require.NoError(json.NewDecoder(w.Body).Decode(&response))
+	require.Len(response.Sources, 1)
+	got := response.Sources[0]
+	assert.Nil(got.ActiveSync)
+	require.NotNil(got.LatestSync)
+	assert.Equal(store.SyncStatusPaused, got.LatestSync.Status)
+	assert.Empty(got.LatestSync.ErrorMessage)
+	assert.Zero(got.LatestSync.ErrorsCount)
+	require.NotNil(got.LastSuccessfulSync)
+	assert.Equal(complete, got.LastSuccessfulSync.ID)
+	operationServer := newOperationTestServer(st, &operationArchiveRealStore{Store: st, uid: operationTestArchiveUID})
+	history := doGet(operationServer, "/api/v1/operations/runs?state=paused&limit=25")
+	require.Equalf(http.StatusOK, history.Code, "%s", history.Body.String())
+	var runs OperationRunsResponse
+	require.NoError(json.Unmarshal(history.Body.Bytes(), &runs))
+	require.Len(runs.Runs, 1)
+	assert.Equal("paused", string(runs.Runs[0].State))
+}
+
+func TestCLISearchIncludeSnippetBoolean(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	_, id, err := testutil.CreateIndexedSourceMessage(st, "archive@example.org", "message-1", "Plan", "needle context")
+	require.NoError(t, err)
+	require.NoError(t, st.UpsertAttachment(id, "plan.pdf", "application/pdf", "synthetic", "", 10))
+	srv := NewServerWithOptions(ServerOptions{Config: &config.Config{}, Store: st, Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()), Logger: testLogger()})
+	t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
+	for _, tc := range []struct {
+		value  string
+		status int
+		names  bool
+	}{
+		{"true", http.StatusOK, true}, {"1", http.StatusOK, true},
+		{"false", http.StatusOK, false}, {"0", http.StatusOK, false},
+		{"invalid", http.StatusBadRequest, false}, {"", http.StatusBadRequest, false},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			w := doGet(srv, "/api/v1/cli/search?q=needle&include_snippet="+tc.value)
+			require.Equal(tc.status, w.Code, w.Body.String())
+			if tc.status != http.StatusOK {
+				return
+			}
+			var response struct {
+				Results []struct {
+					AttachmentNames []string `json:"attachment_names"`
+				} `json:"results"`
+			}
+			require.NoError(json.Unmarshal(w.Body.Bytes(), &response))
+			require.Len(response.Results, 1)
+			if tc.names {
+				assert.Equal([]string{"plan.pdf"}, response.Results[0].AttachmentNames)
+			} else {
+				assert.Empty(response.Results[0].AttachmentNames)
+			}
+		})
+	}
+}
+
+func TestCLISearchHybridHintAvailability(t *testing.T) {
+	for _, tc := range []struct {
+		name, q, scope string
+		active, want   bool
+		offset         int
+		stale, scoped  bool
+	}{
+		{name: "usable generation", q: "intent", active: true, want: true},
+		{name: "account filter", q: "intent account:archive@example.org", active: true},
+		{name: "received filter", q: "intent received:archive@example.org", active: true},
+		{name: "no generation", q: "intent"},
+		{name: "filters only", q: "from:sender@example.com", active: true},
+		{name: "deleted scope", q: "intent", scope: "deleted", active: true},
+		{name: "later page", q: "intent", active: true, offset: 50},
+		{name: "stale generation", q: "intent", active: true, stale: true},
+		{name: "scoped index without matching type", q: "intent", active: true, scoped: true},
+		{name: "scoped index with matching type", q: "intent message_type:sms", active: true, scoped: true, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := &fakeVectorBackend{}
+			vectorCfg := vector.Config{}
+			if tc.scoped {
+				vectorCfg.Embed.Scope.MessageTypes = []string{"sms"}
+			}
+			if tc.active {
+				fingerprint := vectorCfg.GenerationFingerprint()
+				if tc.stale {
+					fingerprint = "synthetic-stale-generation"
+				}
+				backend.active = &vector.Generation{ID: 1, State: vector.GenerationActive, Fingerprint: fingerprint}
+			}
+			engine := hybrid.NewEngine(backend, nil, stubEmbedder{}, hybrid.Config{})
+			srv := NewServerWithOptions(ServerOptions{Config: &config.Config{}, Store: &mockStore{}, Engine: &querytest.MockEngine{SearchFunc: func(context.Context, *search.Query, int, int) ([]query.MessageSummary, error) { return nil, nil }}, HybridEngine: engine, Backend: backend, VectorCfg: vectorCfg, Logger: testLogger()})
+			t.Cleanup(func() { require.NoError(t, srv.Shutdown(context.Background())) })
+			w := httptest.NewRecorder()
+			srv.Router().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/cli/search?q="+url.QueryEscape(tc.q)+"&deletion_scope="+tc.scope+"&offset="+strconv.Itoa(tc.offset), nil))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var out struct {
+				HybridAvailable bool `json:"hybrid_available"`
+			}
+			require.NoError(t, json.NewDecoder(w.Body).Decode(&out))
+			assert.Equal(t, tc.want, out.HybridAvailable)
+		})
+	}
+}
+
+func TestHybridSearchAttachmentMetadataJSON(t *testing.T) {
+	zero, three := 0, 3
+	for _, tc := range []struct {
+		name  string
+		count *int
+		names []string
+	}{
+		{name: "known empty", count: &zero, names: []string{}},
+		{name: "partial names", count: &three, names: []string{"plan.pdf", "budget.csv"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeJSON(w, http.StatusOK, hybridSearchItem{AttachmentCount: tc.count, AttachmentNames: tc.names})
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+			assert.InDelta(t, float64(*tc.count), got["attachment_count"], 0)
+			names := make([]any, len(tc.names))
+			for i, name := range tc.names {
+				names[i] = name
+			}
+			assert.Equal(t, names, got["attachment_names"])
+		})
+	}
 }

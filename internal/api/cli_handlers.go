@@ -4,7 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -12,12 +13,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/accountops"
+	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/apiprotocol"
 	"go.kenn.io/msgvault/internal/cacheops"
 	"go.kenn.io/msgvault/internal/clirun"
@@ -116,6 +119,7 @@ type ContextCLIStore interface {
 	CountMessagesForSourceContext(ctx context.Context, sourceID int64) (int64, error)
 	CountSourceDeletedMessagesContext(ctx context.Context, sourceIDs ...int64) (int64, error)
 	NeedsFTSBackfillQuickContext(ctx context.Context) bool
+	NeedsFTSBackfillContext(ctx context.Context) (bool, error)
 	RebuildFTSContext(ctx context.Context, progress func(done, total int64)) (int64, error)
 }
 
@@ -443,7 +447,7 @@ func cliDedupStoreUnavailableError() *apiHTTPError {
 type cliStatsResponse struct {
 	Stats            StatsResponse `json:"stats"`
 	ScopeLabel       string        `json:"scope_label,omitempty"`
-	ScopeSourceCount int           `json:"scope_source_count,omitempty"`
+	ScopeSourceCount int           `json:"scope_source_count,omitzero"`
 }
 
 type cliInitDBResponse struct {
@@ -460,18 +464,20 @@ type CLICacheBuildEvent struct {
 }
 
 type CLISyncRequest struct {
-	Full        bool
-	Email       string
-	SourceID    int64
-	SourceIDSet bool
-	Query       string
-	NoResume    bool
-	Before      string
-	After       string
-	Limit       int
-	OperationID string
-	Folders     []string
-	SkipFolders []string
+	Full         bool
+	BuildCache   bool
+	NoBuildCache bool
+	Email        string
+	SourceID     int64
+	SourceIDSet  bool
+	Query        string
+	NoResume     bool
+	Before       string
+	After        string
+	Limit        int
+	OperationID  string
+	Folders      []string
+	SkipFolders  []string
 }
 
 type CLISyncEvent struct {
@@ -501,9 +507,9 @@ type CLIRepairEncodingEvent struct {
 
 type CLIRepairMessageRequest struct {
 	Reference string `json:"reference,omitempty"`
-	SourceID  int64  `json:"source_id,omitempty"`
-	Audit     bool   `json:"audit,omitempty"`
-	JSON      bool   `json:"json,omitempty"`
+	SourceID  int64  `json:"source_id,omitzero"`
+	Audit     bool   `json:"audit,omitzero"`
+	JSON      bool   `json:"json,omitzero"`
 }
 
 type CLIRepairMessageEvent struct {
@@ -517,13 +523,16 @@ type CLIRunRequest struct {
 	Env          map[string]string `json:"env,omitempty"`
 	Cwd          string            `json:"cwd,omitempty"`
 	GrantDecided bool              `json:"-"`
+	// Grant carries the authenticated agent grant when classified AuthModeDelegated. Never decoded from the wire.
+	Grant *agentgrant.Grant `json:"-"`
 }
 
 type CLIAddCalendarPlanRequest struct {
 	Email            string `json:"email"`
 	OAuthApp         string `json:"oauth_app,omitempty"`
-	OAuthAppExplicit bool   `json:"oauth_app_explicit,omitempty"`
-	Headless         bool   `json:"headless,omitempty"`
+	OAuthAppExplicit bool   `json:"oauth_app_explicit,omitzero"`
+	Headless         bool   `json:"headless,omitzero"`
+	Write            bool   `json:"write,omitzero"`
 }
 
 type CLIAddCalendarPlanResponse struct {
@@ -538,14 +547,14 @@ type CLIAddCalendarPlanResponse struct {
 	// binding; false marks an older daemon whose stored named app is
 	// unknown, so the frontend must not authorize with the default app.
 	OAuthApp         string `json:"oauth_app,omitempty"`
-	OAuthAppResolved bool   `json:"oauth_app_resolved,omitempty"`
-	NeedsClientCheck bool   `json:"needs_client_check,omitempty"`
+	OAuthAppResolved bool   `json:"oauth_app_resolved,omitzero"`
+	NeedsClientCheck bool   `json:"needs_client_check,omitzero"`
 }
 
 type CLIEmbeddingsPlanRequest struct {
 	Operation    string `json:"operation"`
 	GenerationID int64  `json:"generation_id"`
-	Force        bool   `json:"force,omitempty"`
+	Force        bool   `json:"force,omitzero"`
 }
 
 type CLIEmbeddingsPlanResponse struct {
@@ -555,13 +564,13 @@ type CLIEmbeddingsPlanResponse struct {
 
 type CLIDeleteStagedPlanRequest struct {
 	BatchID             string `json:"batch_id,omitempty"`
-	Permanent           bool   `json:"permanent,omitempty"`
-	Yes                 bool   `json:"yes,omitempty"`
-	DryRun              bool   `json:"dry_run,omitempty"`
-	List                bool   `json:"list,omitempty"`
+	Permanent           bool   `json:"permanent,omitzero"`
+	Yes                 bool   `json:"yes,omitzero"`
+	DryRun              bool   `json:"dry_run,omitzero"`
+	List                bool   `json:"list,omitzero"`
 	Account             string `json:"account,omitempty"`
-	SourceID            *int64 `json:"source_id,omitempty"`
-	RemoteDeleteEnabled bool   `json:"remote_delete_enabled,omitempty"`
+	SourceID            *int64 `json:"source_id,omitzero" nullable:"false"`
+	RemoteDeleteEnabled bool   `json:"remote_delete_enabled,omitzero"`
 }
 
 type CLIDeleteStagedPlanResponse struct {
@@ -571,18 +580,18 @@ type CLIDeleteStagedPlanResponse struct {
 	ConfirmationMode          string   `json:"confirmation_mode,omitempty"`
 	PlannedBatchIDs           []string `json:"planned_batch_ids,omitempty"`
 	PlanFingerprint           string   `json:"plan_fingerprint,omitempty"`
-	ResolvedSourceID          *int64   `json:"resolved_source_id,omitempty"`
-	NeedsScopeEscalation      bool     `json:"needs_scope_escalation,omitempty"`
+	ResolvedSourceID          *int64   `json:"resolved_source_id,omitzero" nullable:"false"`
+	NeedsScopeEscalation      bool     `json:"needs_scope_escalation,omitzero"`
 	ScopeEscalationHeadline   string   `json:"scope_escalation_headline,omitempty"`
 	ScopeEscalationBodyLines  []string `json:"scope_escalation_body_lines,omitempty"`
 	ScopeEscalationCancelHint string   `json:"scope_escalation_cancel_hint,omitempty"`
-	// ScopeEscalationAccount and ScopeEscalationOAuthApp let the frontend
-	// CLI run the confirmed scope-upgrade authorization client-side before
-	// proxying, instead of opening a browser in the daemon subprocess.
-	ScopeEscalationAccount  string `json:"scope_escalation_account,omitempty"`
-	ScopeEscalationOAuthApp string `json:"scope_escalation_oauth_app,omitempty"`
-	BlockedError            string `json:"blocked_error,omitempty"`
-	RemoteDeleteEnvVar      string `json:"remote_delete_env_var,omitempty"`
+	// ScopeEscalationAccount, ScopeEscalationSourceType and ScopeEscalationOAuthApp
+	// let the frontend CLI authorize before starting the daemon subprocess.
+	ScopeEscalationAccount    string `json:"scope_escalation_account,omitempty"`
+	ScopeEscalationSourceType string `json:"scope_escalation_source_type,omitempty"`
+	ScopeEscalationOAuthApp   string `json:"scope_escalation_oauth_app,omitempty"`
+	BlockedError              string `json:"blocked_error,omitempty"`
+	RemoteDeleteEnvVar        string `json:"remote_delete_env_var,omitempty"`
 }
 
 type CLIDeletionManifestResponse struct {
@@ -595,8 +604,8 @@ type CLIDeduplicatePlanRequest struct {
 	Account                    string `json:"account,omitempty"`
 	Collection                 string `json:"collection,omitempty"`
 	Prefer                     string `json:"prefer,omitempty"`
-	ContentHash                bool   `json:"content_hash,omitempty"`
-	DeleteDupsFromSourceServer bool   `json:"delete_dups_from_source_server,omitempty"`
+	ContentHash                bool   `json:"content_hash,omitzero"`
+	DeleteDupsFromSourceServer bool   `json:"delete_dups_from_source_server,omitzero"`
 }
 
 type CLIDeduplicatePlanResponse struct {
@@ -606,12 +615,12 @@ type CLIDeduplicatePlanResponse struct {
 }
 
 type CLIDeduplicatePlanItem struct {
-	SourceID             int64  `json:"source_id,omitempty"`
+	SourceID             int64  `json:"source_id,omitzero"`
 	ScopeLabel           string `json:"scope_label,omitempty"`
-	ScopeIsCollection    bool   `json:"scope_is_collection,omitempty"`
+	ScopeIsCollection    bool   `json:"scope_is_collection,omitzero"`
 	Stdout               string `json:"stdout,omitempty"`
-	DuplicateMessages    int    `json:"duplicate_messages,omitempty"`
-	PendingBackfillCount int64  `json:"pending_backfill_count,omitempty"`
+	DuplicateMessages    int    `json:"duplicate_messages,omitzero"`
+	PendingBackfillCount int64  `json:"pending_backfill_count,omitzero"`
 	PlanFingerprint      string `json:"plan_fingerprint,omitempty"`
 	NeedsConfirmation    bool   `json:"needs_confirmation"`
 }
@@ -624,12 +633,12 @@ type CLIRunEvent struct {
 
 type cliDeleteDedupedScopeRequest struct {
 	BatchIDs  []string `json:"batch_ids,omitempty"`
-	AllHidden bool     `json:"all_hidden,omitempty"`
+	AllHidden bool     `json:"all_hidden,omitzero"`
 }
 
 type cliDeleteDedupedPlanRequest struct {
 	BatchIDs  []string `json:"batch_ids,omitempty"`
-	AllHidden bool     `json:"all_hidden,omitempty"`
+	AllHidden bool     `json:"all_hidden,omitzero"`
 }
 
 func (r cliDeleteDedupedPlanRequest) scope() cliDeleteDedupedScopeRequest {
@@ -638,8 +647,8 @@ func (r cliDeleteDedupedPlanRequest) scope() cliDeleteDedupedScopeRequest {
 
 type cliDeleteDedupedExecuteRequest struct {
 	BatchIDs           []string                        `json:"batch_ids,omitempty"`
-	AllHidden          bool                            `json:"all_hidden,omitempty"`
-	NoBackup           bool                            `json:"no_backup,omitempty"`
+	AllHidden          bool                            `json:"all_hidden,omitzero"`
+	NoBackup           bool                            `json:"no_backup,omitzero"`
 	ExpectedTotal      *int64                          `json:"expected_total" nullable:"false"`
 	ExpectedBatchCount *int64                          `json:"expected_batch_count" nullable:"false"`
 	ExpectedBatches    []cliDeleteDedupedBatchResponse `json:"expected_batches"`
@@ -670,31 +679,74 @@ type cliDeleteDedupedExecuteResponse struct {
 }
 
 type cliSearchResponse struct {
+	HybridAvailable  bool                   `json:"hybrid_available,omitzero"`
 	Results          []query.MessageSummary `json:"results"`
 	ScopeLabel       string                 `json:"scope_label,omitempty"`
-	ScopeSourceCount int                    `json:"scope_source_count,omitempty"`
+	ScopeSourceCount int                    `json:"scope_source_count,omitzero"`
 	// IndexBuilt/IndexedMessages are only set by daemons that built the FTS
 	// index synchronously inside the request (pre-0.18); current daemons
 	// build in the background and report IndexState instead. Kept in the
 	// schema so new CLIs understand old daemons.
-	IndexBuilt      bool  `json:"index_built,omitempty"`
-	IndexedMessages int64 `json:"indexed_messages,omitempty"`
-	// IndexState is "checking" while the FTS completeness probe runs and
-	// "building" while a backfill is repopulating the index (results may be
-	// incomplete); empty once the index is known complete.
+	IndexBuilt      bool  `json:"index_built,omitzero"`
+	IndexedMessages int64 `json:"indexed_messages,omitzero"`
+	// IndexState is checking, building, or awaiting_owner when repair needs owner authority.
 	IndexState string `json:"index_state,omitempty"`
 }
 
 // CLI search index states reported in cliSearchResponse.IndexState.
 const (
-	cliSearchIndexStateChecking = "checking"
-	cliSearchIndexStateBuilding = "building"
+	cliSearchIndexStateUnverified    = "unverified"
+	cliSearchIndexStateChecking      = "checking"
+	cliSearchIndexStateBuilding      = "building"
+	cliSearchIndexStateAwaitingOwner = "awaiting_owner"
 )
 
 type CLIQueryMessageSummary query.MessageSummary
 
 type cliAccountsResponse struct {
 	Accounts []cliAccountResponse `json:"accounts"`
+	// Stale reports message counts served from an earlier snapshot because
+	// fresh counts did not finish in time; AsOf says when it was taken.
+	Stale bool      `json:"stale,omitempty"`
+	AsOf  time.Time `json:"as_of,omitzero"`
+	// CountsPending reports that the first count refresh is still running, so
+	// every count is a zero placeholder. Only callers sending
+	// apiprotocol.AllowPendingCountsHeader get it.
+	CountsPending bool `json:"counts_pending,omitempty"`
+	// VirtualAccountsUnavailable reports that the catalog read failed, timed
+	// out, or was served from an earlier snapshot. Accounts then carry the
+	// last known virtual_accounts, if any, which can miss identities confirmed
+	// since, so absence from them does not prove an address is unknown.
+	VirtualAccountsUnavailable bool `json:"virtual_accounts_unavailable,omitempty"`
+}
+
+// sourceMessageCounter is implemented by stores that count every source's
+// messages in one pass.
+type sourceMessageCounter interface {
+	CountMessagesBySourceContext(ctx context.Context) (map[int64]store.SourceMessageCounts, error)
+}
+
+// virtualAccountLister reads the virtual account catalog. Its freshness
+// depends on the confirmed identities, so a store that offers the catalog
+// also reports the revision that changes when one is added or removed.
+type virtualAccountLister interface {
+	ListVirtualAccountsContext(ctx context.Context) (map[int64][]store.VirtualAccount, error)
+	AccountIdentityRevisionContext(ctx context.Context) (int64, error)
+}
+
+// virtualAccountCatalogFreshFor is how long a completed catalog read serves
+// as current. Confirming or removing an identity starts a new read at once.
+const virtualAccountCatalogFreshFor = 2 * time.Minute
+
+// virtualAccountCatalogVersion is the identity revision a catalog read
+// depends on, so a read from before an identity change is never fresh.
+func (s *Server) virtualAccountCatalogVersion(ctx context.Context, lister virtualAccountLister) string {
+	revision, err := lister.AccountIdentityRevisionContext(ctx)
+	if err != nil {
+		s.logger.Warn("reading account identity revision for the account catalog", "error", err)
+		return ""
+	}
+	return strconv.FormatInt(revision, 10)
 }
 
 type cliCollectionsResponse struct {
@@ -714,9 +766,9 @@ type cliIdentityRemoveResponse = identityops.RemoveResult
 
 type cliRebuildFTSEvent struct {
 	Type    string `json:"type"`
-	Done    int64  `json:"done,omitempty"`
-	Total   int64  `json:"total,omitempty"`
-	Indexed int64  `json:"indexed,omitempty"`
+	Done    int64  `json:"done,omitzero"`
+	Total   int64  `json:"total,omitzero"`
+	Indexed int64  `json:"indexed,omitzero"`
 	Error   string `json:"error,omitempty"`
 }
 
@@ -807,7 +859,7 @@ type cliIdentityRowResponse struct {
 	Identifier  string     `json:"identifier,omitempty"`
 	Signals     []string   `json:"signals"`
 	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
-	None        bool       `json:"none,omitempty"`
+	None        bool       `json:"none,omitzero"`
 }
 
 type cliAccountResponse struct {
@@ -820,6 +872,9 @@ type cliAccountResponse struct {
 	MessageCount       int64                   `json:"message_count"`
 	SourceDeletedCount int64                   `json:"source_deleted_count"`
 	LastSync           *time.Time              `json:"last_sync"`
+	// VirtualAccounts lists the source's confirmed identities and its
+	// unattributed rows, each with live counts, for account pickers.
+	VirtualAccounts []store.VirtualAccount `json:"virtual_accounts,omitempty"`
 }
 
 type cliMessageResponse struct {
@@ -829,6 +884,7 @@ type cliMessageResponse struct {
 	ReadState            string                    `json:"read_state,omitempty" enum:"read,unread,unknown"`
 	ID                   int64                     `json:"id"`
 	SourceMessageID      string                    `json:"source_message_id"`
+	RFC822MessageID      string                    `json:"rfc822_message_id,omitempty"`
 	ConversationID       int64                     `json:"conversation_id"`
 	SourceConversationID string                    `json:"source_conversation_id"`
 	Subject              string                    `json:"subject"`
@@ -888,6 +944,10 @@ func (s cliScope) displayName() string {
 }
 
 func (s *Server) handleCLIStats(w http.ResponseWriter, r *http.Request) {
+	if s.requestAuthentication(r).Grant != nil {
+		s.agentScopedStats(w, r, true)
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "Database not available")
 		return
@@ -1083,6 +1143,27 @@ func parseCLISyncRequest(r *http.Request, full bool) (CLISyncRequest, *apiHTTPEr
 		Before: values.Get("before"),
 		After:  values.Get("after"),
 	}
+	for _, flag := range []struct {
+		name  string
+		value *bool
+	}{
+		{name: "build-cache", value: &req.BuildCache},
+		{name: "no-build-cache", value: &req.NoBuildCache},
+	} {
+		if raw, present := values[flag.name]; present {
+			if len(raw) != 1 {
+				return CLISyncRequest{}, newAPIHTTPError(http.StatusBadRequest, "invalid_cache_flags", "Cache flags must appear once")
+			}
+			parsed, err := strconv.ParseBool(raw[0])
+			if err != nil {
+				return CLISyncRequest{}, newAPIHTTPError(http.StatusBadRequest, "invalid_cache_flags", "Cache flags must be booleans")
+			}
+			*flag.value = parsed
+		}
+	}
+	if req.BuildCache && req.NoBuildCache {
+		return CLISyncRequest{}, newAPIHTTPError(http.StatusBadRequest, "invalid_cache_flags", "--build-cache and --no-build-cache are mutually exclusive")
+	}
 	if rawSourceID, sourceIDSet := values["source_id"]; sourceIDSet {
 		if len(rawSourceID) != 1 {
 			return CLISyncRequest{}, newAPIHTTPError(
@@ -1245,8 +1326,8 @@ func (s *Server) handleCLIRepairMessage(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req CLIRepairMessageRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -1292,8 +1373,8 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req CLIRunRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -1307,6 +1388,14 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 	if !cliRunCommandAllowed(req.Args) {
 		writeError(w, http.StatusBadRequest, "command_not_allowed", "command is not allowed through the daemon CLI runner")
 		return
+	}
+	auth := s.requestAuthentication(r)
+	if auth.Mode == AuthModeDelegated {
+		if !delegatedCLIRunAdmitted(req.Args, auth.Grant) {
+			writeError(w, http.StatusBadRequest, "command_not_allowed", "command is not allowed through the daemon CLI runner")
+			return
+		}
+		req.Grant = auth.Grant
 	}
 	if cliRunArgsContainFlag(req.Args, "grant-decided") {
 		writeError(w, http.StatusBadRequest, "invalid_args", "--grant-decided is not accepted through the daemon CLI runner")
@@ -1329,7 +1418,11 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 
 	writeEvent := newCLINDJSONEventWriter[CLIRunEvent](w)
 	if err := runner.RunCLICommand(r.Context(), req, writeEvent); err != nil {
-		s.logger.Error("failed to run CLI command", "args", req.Args, "error", err)
+		if coded, ok := errors.AsType[*CLIRunCodedError](err); ok {
+			s.logger.Error("failed to run CLI command", "command", req.Args[0], "error_code", coded.Code, "cause", coded.Err)
+		} else {
+			s.logger.Error("failed to run CLI command", "args", req.Args, "error", err)
+		}
 		if writeErr := writeEvent(CLIRunEvent{Type: cliStreamEventTypeError, Error: err.Error()}); writeErr != nil {
 			s.logger.Error("failed to stream CLI run error event", "error", writeErr)
 		}
@@ -1341,6 +1434,9 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cliRunEnvAllowedForCommand(args []string, name string) bool {
+	if IsCLIRunDraftCreate(args) || IsCLIRunDraftLifecycle(args) || IsCLIRunDraftSendAs(args) {
+		return false
+	}
 	if len(args) >= 3 && args[0] == cliRunPersonCommand {
 		providerCall := args[1] == "provider" && args[2] == "check"
 		sweepCall := args[1] == "sweep" && args[2] == "run"
@@ -1444,8 +1540,8 @@ func (s *Server) handleCLIAddCalendarPlan(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var req CLIAddCalendarPlanRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -1467,8 +1563,8 @@ func (s *Server) handleCLIEmbeddingsPlan(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req CLIEmbeddingsPlanRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -1490,8 +1586,8 @@ func (s *Server) handleCLIDeleteStagedPlan(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var req CLIDeleteStagedPlanRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -1513,8 +1609,8 @@ func (s *Server) handleCLICreateDeletionManifest(w http.ResponseWriter, r *http.
 		return
 	}
 	var manifest deletion.Manifest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&manifest); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &manifest); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -1575,9 +1671,27 @@ const cliRunPersonCommand = "person"
 // nested command path. Backup admits only the frozen create path, documents
 // admits only mutations that must run under the daemon's writer lock, and
 // person admits only the provider consent boundary and sweep operations.
+// cliRunStatusSubcommand is the read-only status subcommand shared by the
+// document and document-vector command groups.
+const cliRunStatusSubcommand = "status"
+
 func cliRunCommandAllowed(args []string) bool {
 	if len(args) == 0 {
 		return false
+	}
+	// Internal subprocess commands are callable only by their owning public
+	// command on the daemon host, never through the generic HTTP runner.
+	if len(args) > 1 && strings.HasPrefix(args[1], "__") {
+		return false
+	}
+	if IsCLIRunDraftCreate(args) {
+		return len(args) >= 2
+	}
+	if IsCLIRunDraftSendAs(args) {
+		return len(args) >= 2
+	}
+	if IsCLIRunDraftLifecycle(args) {
+		return len(args) >= 2
 	}
 	if args[0] == "backup" {
 		return len(args) >= 2 && args[1] == "create"
@@ -1591,14 +1705,14 @@ func cliRunCommandAllowed(args []string) bool {
 				return false
 			}
 			switch args[2] {
-			case "build", "consent", "rebuild", "resume", "retire", "retry", "status":
+			case "build", "consent", "rebuild", "resume", "retire", "retry", cliRunStatusSubcommand:
 				return true
 			default:
 				return false
 			}
 		}
 		switch args[1] {
-		case "build", "consent-mistral", "purge-derived", "resume", "retire", "retry":
+		case "build", "consent-mistral", "consent-docling", "purge-derived", "resume", "retire", "retry", cliRunStatusSubcommand:
 			return true
 		default:
 			return false
@@ -1624,18 +1738,25 @@ func cliRunCommandAllowed(args []string) bool {
 	}
 	switch args[0] {
 	case "add-account",
+		"archive-remote-images",
 		"activity",
 		"add-beeper",
+		"add-matrix",
 		"add-calendar",
 		"add-circleback",
+		"add-plaud",
+		"add-twenty",
 		"add-discord",
 		"add-granola",
+		"add-omi",
 		"add-imap",
+		"add-muesli",
 		"add-notion-meetings",
 		"add-o365",
 		"add-slack",
 		"add-synctech-sms-drive",
 		"add-teams",
+		"add-twilio",
 		"backfill-beeper-media",
 		"backfill-discord-media",
 		"backfill-slack-media",
@@ -1650,9 +1771,11 @@ func cliRunCommandAllowed(args []string) bool {
 		"export-messages",
 		"gc",
 		"import",
+		"import-maildir",
 		"import-eml",
 		"import-emlx",
 		"import-gvoice",
+		"import-imazing-csv",
 		"import-imessage",
 		"import-mbox",
 		"import-messenger",
@@ -1675,14 +1798,20 @@ func cliRunCommandAllowed(args []string) bool {
 		"repair-derived",
 		"show-deletion",
 		"sync-beeper",
+		"sync-matrix",
 		"sync-calendar",
 		"sync-circleback",
+		"sync-plaud",
+		"sync-twenty",
 		"sync-discord",
 		"sync-granola",
+		"sync-muesli",
+		"sync-omi",
 		"sync-notion-meetings",
 		"sync-slack",
 		"sync-synctech-sms",
-		"sync-teams":
+		"sync-teams",
+		"sync-twilio":
 		return true
 	default:
 		return false
@@ -1722,6 +1851,10 @@ func cliRunPersonProviderArgsAllowed(operation string, args []string) bool {
 		maxPositionals = 1
 		boolFlags["json"] = true
 		valueFlags["if-fingerprint"] = true
+	case "reverify":
+		maxPositionals = 1
+		boolFlags["yes"] = true
+		boolFlags["json"] = true
 	default:
 		return false
 	}
@@ -1926,10 +2059,10 @@ func isLowerSHA256(value string) bool {
 func newCLINDJSONEventWriter[T any](w http.ResponseWriter) func(T) error {
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.Header().Set("Cache-Control", "no-store")
-	enc := json.NewEncoder(w)
+	enc := jsontext.NewEncoder(w, jsontext.AllowInvalidUTF8(true))
 	flusher, _ := w.(http.Flusher)
 	return func(event T) error {
-		if err := enc.Encode(event); err != nil {
+		if err := json.MarshalEncode(enc, event, json.Deterministic(true)); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -2243,9 +2376,23 @@ func (s *Server) handleCLISearch(w http.ResponseWriter, r *http.Request) {
 	account := r.URL.Query().Get("account")
 	collection := r.URL.Query().Get("collection")
 
+	includeSnippet := false
+	if r.URL.Query().Has("include_snippet") {
+		var err error
+		includeSnippet, err = strconv.ParseBool(r.URL.Query().Get("include_snippet"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_include_snippet", "include_snippet must be a boolean")
+			return
+		}
+	}
+
 	limit := parseCLISearchInt(r.URL.Query().Get("limit"), 50)
 	if limit <= 0 {
 		limit = 50
+	}
+	if limit > remoteSearchLimit && s.remoteClientRequest(r) {
+		writeError(w, http.StatusBadRequest, "remote_search_limit", fmt.Sprintf("Remote client search limit must not exceed %d", remoteSearchLimit))
+		return
 	}
 	offset := max(parseCLISearchInt(r.URL.Query().Get("offset"), 0), 0)
 
@@ -2271,44 +2418,77 @@ func (s *Server) handleCLISearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var scope cliScope
-	if account != "" || collection != "" {
-		var err error
+	grant := s.requestAuthentication(r).Grant
+	admitted, _ := r.Context().Value(agentReadScopeKey{}).(agentReadScope)
+	if grant != nil {
+		scope = admitted.scope
+		if scope.Collection != nil {
+			collection = scope.Collection.Name
+		}
+	} else if account != "" || collection != "" {
 		scope, err = resolveCLIStatsScope(cliStore, account, collection)
 		if err != nil {
 			writeAPIHTTPError(w, s.cliScopeError(err))
 			return
 		}
-		sourceIDs := scope.sourceIDs()
-		if len(sourceIDs) == 0 {
-			writeError(w, http.StatusBadRequest, "empty_scope", cliEmptyScopeMessage(account, collection))
+	}
+	if scope.Account.Input != "" {
+		if len(scope.sourceIDs()) == 0 {
+			writeError(w, http.StatusBadRequest, "empty_scope", cliEmptyScopeMessage(scope.Account.Input, collection))
 			return
 		}
-		parsed.AccountIDs = append(parsed.AccountIDs, sourceIDs...)
+		parsed.AccountIDs = append(parsed.AccountIDs, scope.sourceIDs()...)
 	}
-
 	if parsed.IsEmpty() {
 		writeError(w, http.StatusBadRequest, "empty_search", "empty search query")
 		return
 	}
-
+	if grant != nil {
+		parsed.AccountIDs = admitted.ids
+	}
 	resp := cliSearchResponse{
 		ScopeLabel:       scope.displayName(),
 		ScopeSourceCount: len(scope.sourceIDs()),
-		// The FTS completeness probe scans every message (a minute on a
-		// large archive, once per daemon process), so the search never
-		// waits on it: the probe and any backfill run in the background
-		// and the response only reports their state so the CLI can warn
-		// that results may be incomplete while a backfill runs.
-		IndexState: s.ensureCLISearchIndexAsync(cliStore),
 	}
 
+	if grant != nil {
+		resp.ScopeSourceCount = admitted.sourceCount()
+		if admitted.scope.Account.Input == "" {
+			resp.ScopeLabel = "agent grant"
+		}
+	}
+	resp.IndexState = admitted.indexState
+	if grant == nil {
+		resp.IndexState = s.ensureCLISearchIndexAsync(cliStore, true)
+	}
 	results, err := s.queryEngineForContext(r.Context()).Search(r.Context(), parsed, limit, offset)
 	if err != nil {
+		if s.writeIfContextError(w, err) {
+			return
+		}
 		s.logger.Error("CLI search failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "search_failed", err.Error())
 		return
 	}
+	if includeSnippet {
+		metadata, err := s.searchMetadata(r.Context(), resultIDs(results), parsed, true)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "search_failed", err.Error())
+			return
+		}
+		for i := range results {
+			if item, ok := metadata[results[i].ID]; ok {
+				results[i].AttachmentNames = item.AttachmentNames
+				results[i].MatchSnippet = item.MatchSnippet
+			}
+		}
+	}
 	resp.Results = results
+	if grant == nil && len(results) == 0 && offset == 0 && len(parsed.TextTerms) > 0 &&
+		len(parsed.AccountAddrs) == 0 && len(parsed.ReceivedAddrs) == 0 &&
+		parsed.DeletionScope != search.DeletionScopeDeleted && parsed.DeletionScope != search.DeletionScopeAny {
+		resp.HybridAvailable = s.hybridHintAvailable(r.Context(), parsed.MessageTypes)
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -2318,84 +2498,170 @@ func (s *Server) handleCLISearch(w http.ResponseWriter, r *http.Request) {
 // never wait on this work: the completeness probe alone scans every message
 // — a minute on a large archive — and it used to run inline on the first
 // search of every daemon process, which reads as a hung CLI. A failed
-// backfill clears the running flag so a later search retries.
-func (s *Server) ensureCLISearchIndexAsync(cliStore CLIStore) string {
+// backfill clears the running flag so an owner search retries; agents retain
+// uncertainty until owner verification, rebuild or restart.
+func (s *Server) ensureCLISearchIndexAsync(cliStore CLIStore, mayRepair bool) string {
+	s.ftsEnsureMu.Lock()
+	defer s.ftsEnsureMu.Unlock()
 	if s.ftsIndexComplete.Load() {
 		return ""
 	}
-	if s.ftsEnsureRunning.CompareAndSwap(false, true) {
-		// The quick probe (a couple of index lookups) classifies the initial
-		// state: a visibly stale index reports "building" right away, so the
-		// very first search already warns that results may be incomplete
-		// instead of staying silent for the minutes the full probe can take.
-		state := cliSearchIndexStateChecking
-		if cliStore.NeedsFTSBackfillQuick() {
-			state = cliSearchIndexStateBuilding
-		}
-		s.ftsIndexState.Store(state)
-		go s.runCLISearchIndexEnsure(cliStore)
-	}
 	state, _ := s.ftsIndexState.Load().(string)
+	if s.ftsEnsureRunning.Load() {
+		if mayRepair {
+			s.ftsEnsureMayRepair = true
+		}
+		return state
+	}
+	if !mayRepair && (state == cliSearchIndexStateUnverified || state == cliSearchIndexStateAwaitingOwner) {
+		return state
+	}
+	knownIncomplete := state == cliSearchIndexStateAwaitingOwner
+	needsQuick := false
+	if mayRepair && !knownIncomplete {
+		s.ftsEnsureMu.Unlock()
+		needsQuick = cliStore.NeedsFTSBackfillQuick()
+		s.ftsEnsureMu.Lock()
+		if s.ftsIndexComplete.Load() {
+			return ""
+		}
+		state, _ = s.ftsIndexState.Load().(string)
+		if s.ftsEnsureRunning.Load() {
+			s.ftsEnsureMayRepair = true
+			return state
+		}
+		knownIncomplete = state == cliSearchIndexStateAwaitingOwner
+	}
+	failed := state == cliSearchIndexStateUnverified
+	state = cliSearchIndexStateChecking
+	if mayRepair && (knownIncomplete || needsQuick) {
+		state = cliSearchIndexStateBuilding
+	} else if failed {
+		state = cliSearchIndexStateUnverified
+	}
+	if bound, ok := cliStore.(*requestCLIStore); ok {
+		cliStore = bound.CLIStore
+	}
+	s.ftsEnsureMayRepair = mayRepair
+	s.ftsEnsureRunning.Store(true)
+	s.ftsIndexState.Store(state)
+	go s.runCLISearchIndexEnsure(cliStore, knownIncomplete, !mayRepair)
 	return state
 }
 
-func (s *Server) runCLISearchIndexEnsure(cliStore CLIStore) {
-	defer s.ftsEnsureRunning.Store(false)
-	// The probe runs outside the operation gate, so a rebuild-fts can clear
-	// and repopulate the index while it scans. A "complete" observation is
-	// only memoized when no rebuild was in progress at the snapshot (even
-	// generation — an odd one means a rebuild handler is mid-flight and the
-	// probe's read snapshot may predate its index clear) and none started
-	// since; otherwise it is discarded and the next search re-triggers the
-	// worker. The backfill path below needs no generation check: it
-	// re-probes and backfills under the gate, serialized with rebuilds.
+func (s *Server) runCLISearchIndexEnsure(cliStore CLIStore, knownIncomplete, bounded bool) {
 	rebuildGen := s.ftsRebuildGen.Load()
-	if !s.probeFTSBackfillNeeded(cliStore) {
-		if rebuildGen%2 == 0 && s.ftsRebuildGen.Load() == rebuildGen {
-			s.ftsIndexComplete.Store(true)
+	state := ""
+	complete := false
+	published := false
+	defer func() {
+		if published {
+			return
 		}
-		s.ftsIndexState.Store("")
+		s.ftsEnsureMu.Lock()
+		defer s.ftsEnsureMu.Unlock()
+		if rebuildGen%2 == 0 && rebuildGen == s.ftsRebuildGen.Load() {
+			if complete {
+				s.ftsIndexComplete.Store(true)
+			}
+			s.ftsIndexState.Store(state)
+		}
+		s.ftsEnsureRunning.Store(false)
+	}()
+	needs := knownIncomplete
+	for !knownIncomplete {
+		var err error
+		needs, err = s.probeFTSBackfillNeeded(cliStore, bounded)
+		if err == nil {
+			break
+		}
+		s.ftsEnsureMu.Lock()
+		if bounded && s.ftsEnsureMayRepair && s.importContext.Err() == nil {
+			s.ftsEnsureMu.Unlock()
+			bounded = false
+			continue
+		}
+		if rebuildGen%2 == 0 && rebuildGen == s.ftsRebuildGen.Load() {
+			state = cliSearchIndexStateUnverified
+			s.ftsIndexState.Store(state)
+		}
+		s.ftsEnsureRunning.Store(false)
+		published = true
+		s.ftsEnsureMu.Unlock()
+		return
+	}
+	if !needs {
+		complete = true
+		return
+	}
+	state = cliSearchIndexStateAwaitingOwner
+	s.ftsEnsureMu.Lock()
+	if !s.ftsEnsureMayRepair {
+		if rebuildGen%2 == 0 && rebuildGen == s.ftsRebuildGen.Load() {
+			s.ftsIndexState.Store(state)
+		}
+		s.ftsEnsureRunning.Store(false)
+		published = true
+		s.ftsEnsureMu.Unlock()
 		return
 	}
 	s.ftsIndexState.Store(cliSearchIndexStateBuilding)
-	// Background gate work, not request work: a backfill queued behind a
-	// long sync should wait its turn rather than force the sync to yield,
-	// since no request is blocked on it anymore.
-	done, ok := s.beginBackgroundOperationGateWork(context.Background(), "a search index build")
+	s.ftsEnsureMu.Unlock()
+	done, ok := s.beginBackgroundOperationGateWork(s.importContext, "a search index build")
 	if !ok {
-		s.ftsIndexState.Store("")
 		return
 	}
 	defer done()
-	if !cliStore.NeedsFTSBackfill() {
-		s.ftsIndexComplete.Store(true)
-		s.ftsIndexState.Store("")
+	if needed, err := s.probeFTSBackfillNeeded(cliStore, false); err != nil {
+		s.logger.Error("failed to verify CLI search index", "error", err)
+		return
+	} else if !needed {
+		state = ""
+		rebuildGen = s.ftsRebuildGen.Load()
+		complete = true
 		return
 	}
-	if _, err := s.backfillFTSWithActivity(cliStore); err != nil {
+	if _, err := s.backfillFTSWithActivity(bindCLIStoreContext(s.importContext, cliStore)); err != nil {
 		s.logger.Error("failed to build CLI search index", "error", err)
-		s.ftsIndexState.Store("")
 		return
 	}
-	s.ftsIndexComplete.Store(true)
-	s.ftsIndexState.Store("")
+	// Repair ran under the rebuild gate, so its final index supersedes earlier observations.
+	state = ""
+	rebuildGen = s.ftsRebuildGen.Load()
+	complete = true
 }
 
-// probeFTSBackfillNeeded runs the expensive first-search completeness probe
-// as a labeled activity, and logs the duration when it is slow enough to be
-// what a user just sat through.
-func (s *Server) probeFTSBackfillNeeded(cliStore CLIStore) bool {
+func (s *Server) probeFTSBackfillNeeded(cliStore CLIStore, bounded bool) (bool, error) {
+	ctx := s.importContext
+	if bounded {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, QueryEndpointTimeout)
+		defer cancel()
+	}
 	end := s.beginActivity("checking the search index")
 	defer end()
 	started := time.Now()
-	needs := cliStore.NeedsFTSBackfill()
-	if elapsed := time.Since(started); elapsed > time.Second {
-		s.logger.Info("search index completeness probe finished",
-			"needs_backfill", needs,
-			"duration", elapsed.Round(time.Millisecond).String(),
-		)
+	if bounded && bindCLIStoreContext(ctx, cliStore).NeedsFTSBackfillQuick() {
+		s.ftsEnsureMu.Lock()
+		state := cliSearchIndexStateAwaitingOwner
+		if s.ftsEnsureMayRepair {
+			state = cliSearchIndexStateBuilding
+		}
+		s.ftsIndexState.Store(state)
+		s.ftsEnsureMu.Unlock()
 	}
-	return needs
+	var needs bool
+	var err error
+	if st, ok := cliStore.(ContextCLIStore); ok {
+		needs, err = st.NeedsFTSBackfillContext(ctx)
+	} else {
+		needs = cliStore.NeedsFTSBackfill()
+		err = ctx.Err()
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		s.logger.Info("search index completeness probe finished", "needs_backfill", needs, "duration", elapsed.Round(time.Millisecond).String())
+	}
+	return needs, err
 }
 
 // backfillFTSWithActivity runs the FTS backfill with its progress mirrored
@@ -2447,6 +2713,7 @@ func (s *Server) handleCLIRebuildFTS(w http.ResponseWriter, r *http.Request) {
 	s.ftsRebuildGen.Add(1)
 	defer s.ftsRebuildGen.Add(1)
 	s.ftsIndexComplete.Store(false)
+	s.ftsIndexState.Store("")
 
 	var writeErr error
 	indexed, err := cliStore.RebuildFTS(func(done, total int64) {
@@ -2472,6 +2739,7 @@ func (s *Server) handleCLIRebuildFTS(w http.ResponseWriter, r *http.Request) {
 	// The rebuild fully repopulated the index; safe to re-memoize so later CLI
 	// searches skip the expensive backfill probe again.
 	s.ftsIndexComplete.Store(true)
+	s.ftsIndexState.Store("")
 	if writeErr == nil {
 		writeErr = writeEvent(cliRebuildFTSEvent{
 			Type:    "complete",
@@ -2502,8 +2770,38 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.requestAuthentication(r).Grant != nil {
+		sources = slices.DeleteFunc(sources, func(src *store.Source) bool { return !slices.Contains(agentReadSourceIDs(r), src.ID) })
+	}
+	var grouped map[int64]store.SourceMessageCounts
+	var response cliAccountsResponse
+	if counter, ok := s.store.(sourceMessageCounter); ok && s.requestAuthentication(r).Grant == nil {
+		grouped, response.AsOf, response.Stale, err = s.accountCountSnapshots.get(
+			r.Context(), s.importContext, "", s.statsSnapshotWait, counter.CountMessagesBySourceContext,
+		)
+		// Older clients can't tell placeholder zeros from real counts, so only opted-in callers get them.
+		allowPending := r.Header.Get(apiprotocol.AllowPendingCountsHeader) == "true"
+		response.CountsPending = allowPending && errors.Is(err, errSnapshotWaitTimeout)
+		if err != nil && !response.CountsPending {
+			if s.writeIfContextError(w, err) {
+				return
+			}
+			s.logger.Error("failed to count CLI account messages", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list accounts")
+			return
+		}
+	}
+
 	accounts := make([]cliAccountResponse, 0, len(sources))
 	for _, src := range sources {
+		if response.CountsPending {
+			accounts = append(accounts, newCLIAccountResponse(src, 0, 0))
+			continue
+		}
+		if grouped != nil {
+			accounts = append(accounts, newCLIAccountResponse(src, grouped[src.ID].Live, grouped[src.ID].SourceDeleted))
+			continue
+		}
 		count, err := cliStore.CountMessagesForSource(src.ID)
 		if err != nil {
 			s.logger.Error("failed to count CLI account messages",
@@ -2522,28 +2820,61 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to list accounts")
 			return
 		}
-		account := cliAccountResponse{
-			CalendarCoverage:   store.ParseCalendarCoverage(src.SyncConfig),
-			ID:                 src.ID,
-			Email:              src.Identifier,
-			Type:               src.SourceType,
-			MessageCount:       count,
-			SourceDeletedCount: sourceDeleted,
-		}
-		if src.DisplayName.Valid {
-			account.DisplayName = src.DisplayName.String
-		}
-		if src.OAuthApp.Valid {
-			account.OAuthApp = src.OAuthApp.String
-		}
-		if src.LastSyncAt.Valid {
-			lastSync := src.LastSyncAt.Time.UTC()
-			account.LastSync = &lastSync
-		}
-		accounts = append(accounts, account)
+		accounts = append(accounts, newCLIAccountResponse(src, count, sourceDeleted))
 	}
 
-	writeJSON(w, http.StatusOK, cliAccountsResponse{Accounts: accounts})
+	if lister, ok := s.store.(virtualAccountLister); ok {
+		var virtual map[int64][]store.VirtualAccount
+		var stale bool
+		var err error
+		if s.requestAuthentication(r).Grant != nil {
+			// An agent reads the catalog inside its authorization snapshot:
+			// the shared cache may predate a source whose ID was reused.
+			virtual, err = lister.ListVirtualAccountsContext(r.Context())
+		} else {
+			virtual, _, stale, err = s.virtualAccountSnapshots.getVersion(
+				r.Context(), s.importContext, "", s.virtualAccountCatalogVersion(r.Context(), lister),
+				s.statsSnapshotWait, lister.ListVirtualAccountsContext,
+			)
+		}
+		// The catalog is extra detail; a slow or failed read still returns
+		// the accounts with whatever children the last snapshot held.
+		if err != nil && s.writeIfContextError(w, r.Context().Err()) {
+			return
+		}
+		if err != nil {
+			s.logger.Warn("listing accounts without virtual accounts", "error", err)
+		}
+		response.VirtualAccountsUnavailable = stale || err != nil
+		for i := range accounts {
+			accounts[i].VirtualAccounts = virtual[accounts[i].ID]
+		}
+	}
+
+	response.Accounts = accounts
+	writeJSON(w, http.StatusOK, response)
+}
+
+func newCLIAccountResponse(src *store.Source, count, sourceDeleted int64) cliAccountResponse {
+	account := cliAccountResponse{
+		CalendarCoverage:   store.ParseCalendarCoverage(src.SyncConfig),
+		ID:                 src.ID,
+		Email:              src.Identifier,
+		Type:               src.SourceType,
+		MessageCount:       count,
+		SourceDeletedCount: sourceDeleted,
+	}
+	if src.DisplayName.Valid {
+		account.DisplayName = src.DisplayName.String
+	}
+	if src.OAuthApp.Valid {
+		account.OAuthApp = src.OAuthApp.String
+	}
+	if src.LastSyncAt.Valid {
+		lastSync := src.LastSyncAt.Time.UTC()
+		account.LastSync = &lastSync
+	}
+	return account
 }
 
 func (s *Server) updateCLIAccount(
@@ -2584,6 +2915,11 @@ func (s *Server) handleCLICollections(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]cliCollectionResponse, 0, len(collections))
 	for _, coll := range collections {
+		if s.requestAuthentication(r).Grant != nil {
+			if len(coll.SourceIDs) == 0 || slices.ContainsFunc(coll.SourceIDs, func(id int64) bool { return !slices.Contains(agentReadSourceIDs(r), id) }) {
+				continue
+			}
+		}
 		item, err := cliCollectionResponseFromStore(cliStore, coll)
 		if err != nil {
 			s.logger.Error("failed to hydrate CLI collection", "collection", coll.Name, "error", err)
@@ -2875,9 +3211,9 @@ func (s *Server) importCLIIdentities(
 }
 
 func (s *Server) handleCLIIdentityDiscover(w http.ResponseWriter, r *http.Request) {
-	decoder := json.NewDecoder(r.Body)
-	var rawBody json.RawMessage
-	if err := decoder.Decode(&rawBody); err != nil {
+	decoder := jsontext.NewDecoder(r.Body)
+	var rawBody jsontext.Value
+	if err := json.UnmarshalDecode(decoder, &rawBody); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
@@ -2889,7 +3225,7 @@ func (s *Server) handleCLIIdentityDiscover(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
 	}
-	var fields map[string]json.RawMessage
+	var fields map[string]jsontext.Value
 	if err := json.Unmarshal(rawBody, &fields); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "invalid JSON request body")
 		return
@@ -2925,47 +3261,16 @@ func (s *Server) handleCLIIdentityDiscover(w http.ResponseWriter, r *http.Reques
 			))
 			return
 		}
-		configured, configErr := s.cfg.FastmailSourceFor(cliStore, source.ID)
-		if configErr != nil {
-			wrappedConfigErr := fmt.Errorf("resolve [[fastmail]] configuration for source %d: %w", source.ID, configErr)
-			classifiedConfigErr := opserr.Invalid(wrappedConfigErr)
-			if errors.Is(configErr, config.ErrFastmailSourceLookup) {
-				classifiedConfigErr = opserr.Internal(wrappedConfigErr)
+		externalEvidence, resolveErr = s.discoverProviderIdentityEvidence(r.Context(), cliStore, source)
+		if resolveErr != nil {
+			if s.writeIfContextError(w, resolveErr) {
+				return
 			}
 			writeAPIHTTPError(w, s.operationError(
-				classifiedConfigErr,
-				identityOperationErrorPolicy,
-				"Failed to discover identities",
+				resolveErr, identityOperationErrorPolicy, "Failed to discover identities",
 			))
 			return
 		}
-		if configured == nil {
-			account := source.Identifier
-			if source.DisplayName.Valid && strings.TrimSpace(source.DisplayName.String) != "" {
-				account = strings.TrimSpace(source.DisplayName.String)
-			}
-			writeAPIHTTPError(w, s.operationError(
-				opserr.Invalid(fmt.Errorf(
-					"source %d (%s) has no matching [[fastmail]] configuration",
-					source.ID,
-					account,
-				)),
-				identityOperationErrorPolicy,
-				"Failed to discover identities",
-			))
-			return
-		}
-		inventory := s.fastmailInventoryFactory(configured.APIToken)
-		records, inventoryErr := inventory.ListIdentityRecords(r.Context())
-		if inventoryErr != nil {
-			writeAPIHTTPError(w, s.operationError(
-				opserr.Internal(fmt.Errorf("fastmail identity inventory request failed: %w", inventoryErr)),
-				identityOperationErrorPolicy,
-				"Failed to discover identities",
-			))
-			return
-		}
-		externalEvidence = provideridentity.Evidence(records)
 		req.SourceSelector = identityops.SourceSelector{SourceID: source.ID}
 	}
 
@@ -3007,6 +3312,57 @@ func (s *Server) handleCLIIdentityDiscover(w http.ResponseWriter, r *http.Reques
 	if err := writeEvent(identityops.DiscoverEvent{Type: "result", Result: &result}); err != nil {
 		s.logger.Error("failed to stream CLI identity discovery result", "error", err)
 	}
+}
+
+// discoverProviderIdentityEvidence reads evidence from the selected source's provider.
+func (s *Server) discoverProviderIdentityEvidence(
+	ctx context.Context, cliStore CLIStore, source *store.Source,
+) ([]identityops.ExternalEvidence, error) {
+	if source.SourceType == "gmail" {
+		if s.gmailProfileAddress == nil {
+			return nil, opserr.Invalid(errors.New(
+				"authenticated Gmail profile discovery is unavailable on this daemon",
+			))
+		}
+		address, err := s.gmailProfileAddress(ctx, source)
+		if err != nil {
+			if credentialErr, ok := errors.AsType[*provideridentity.GmailCredentialError](err); ok {
+				if remediation := credentialErr.Remediation(); remediation != "" {
+					return nil, opserr.Invalid(errors.New(remediation))
+				}
+			}
+			return nil, opserr.Internal(fmt.Errorf("authenticated Gmail profile discovery failed: %w", err))
+		}
+		evidence, err := provideridentity.GmailProfileEvidence(source, address)
+		if err != nil {
+			return nil, opserr.Invalid(err)
+		}
+		return evidence, nil
+	}
+
+	configured, err := s.cfg.FastmailSourceFor(cliStore, source.ID)
+	if err != nil {
+		wrapped := fmt.Errorf("resolve [[fastmail]] configuration for source %d: %w", source.ID, err)
+		if errors.Is(err, config.ErrFastmailSourceLookup) {
+			return nil, opserr.Internal(wrapped)
+		}
+		return nil, opserr.Invalid(wrapped)
+	}
+	if configured == nil {
+		account := source.Identifier
+		if source.DisplayName.Valid && strings.TrimSpace(source.DisplayName.String) != "" {
+			account = strings.TrimSpace(source.DisplayName.String)
+		}
+		return nil, opserr.Invalid(fmt.Errorf(
+			"source %d (%s) has no matching [[fastmail]] configuration", source.ID, account,
+		))
+	}
+	inventory := s.fastmailInventoryFactory(configured.APIToken)
+	records, err := inventory.ListIdentityRecords(ctx)
+	if err != nil {
+		return nil, opserr.Internal(fmt.Errorf("fastmail identity inventory request failed: %w", err))
+	}
+	return provideridentity.Evidence(records), nil
 }
 
 func identityDiscoveryTerminalError(err error) identityops.DiscoverError {
@@ -3137,6 +3493,10 @@ func (s *Server) handleCLIMessage(w http.ResponseWriter, r *http.Request) {
 
 	msg, err := s.resolveCLIMessage(r, idStr)
 	if err != nil {
+		if errors.Is(err, query.ErrOriginalMessageTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "remote_message_too_large", "Message content exceeds the remote client byte limit")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve message")
 		return
 	}
@@ -3159,19 +3519,34 @@ func (s *Server) handleCLIMessageRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msg, err := s.resolveCLIMessage(r, idStr)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve message")
+	resolver, ok := s.queryEngineForContext(r.Context()).(query.MessageIDResolver)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", "Raw message export is not available for this archive engine")
 		return
 	}
-	if msg == nil {
+	// Resolve only the ID so the byte limit applies to the raw bytes returned, never the decoded body.
+	id, sourceMessageID, err := resolver.ResolveMessageID(r.Context(), idStr)
+	if errors.Is(err, query.ErrAmbiguousReference) {
+		s.writeOriginalExportError(w, "resolve raw message", err)
+		return
+	}
+	if errors.Is(err, store.ErrMessageNotFound) {
 		writeError(w, http.StatusNotFound, cliErrorMessageNotFound, "Message not found")
 		return
 	}
-
-	raw, err := s.queryEngineForContext(r.Context()).GetMessageRaw(r.Context(), msg.ID)
 	if err != nil {
-		s.logger.Error("failed to get CLI raw message", "id", msg.ID, "error", err)
+		s.logger.Error("failed to resolve CLI raw message", "id", idStr, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve message")
+		return
+	}
+
+	raw, err := s.queryEngineForContext(r.Context()).GetMessageRaw(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, query.ErrOriginalMessageTooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "remote_message_too_large", "Message content exceeds the remote client byte limit")
+			return
+		}
+		s.logger.Error("failed to get CLI raw message", "id", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve raw message")
 		return
 	}
@@ -3181,11 +3556,12 @@ func (s *Server) handleCLIMessageRaw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "message/rfc822")
-	w.Header().Set("X-Msgvault-Message-Id", strconv.FormatInt(msg.ID, 10))
-	w.Header().Set("X-Msgvault-Source-Message-Id", msg.SourceMessageID)
+	w.Header().Set("X-Msgvault-Message-Id", strconv.FormatInt(id, 10))
+	w.Header().Set("X-Msgvault-Source-Message-Id", sourceMessageID)
 	w.WriteHeader(http.StatusOK)
+	// #nosec G705 -- stored MIME bytes are served as message/rfc822, not rendered as HTML.
 	if _, err := w.Write(raw); err != nil {
-		s.logger.Error("failed to write CLI raw message", "id", msg.ID, "error", err)
+		s.logger.Error("failed to write CLI raw message", "id", id, "error", err)
 	}
 }
 
@@ -3203,7 +3579,14 @@ func (s *Server) handleCLIAttachment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_content_hash", err.Error())
 		return
 	}
+	if s.requestAuthentication(r).Grant != nil {
+		if _, apiErr := s.attachmentCandidatesForRequest(r, contentHash); apiErr != nil {
+			writeAPIHTTPError(w, apiErr)
+			return
+		}
+	}
 
+	releaseReadSnapshot(r)
 	if s.blobStore != nil {
 		rc, size, err := s.blobStore.OpenStream(r.Context(), contentHash)
 		if err != nil {
@@ -3213,6 +3596,11 @@ func (s *Server) handleCLIAttachment(w http.ResponseWriter, r *http.Request) {
 			}
 			s.logger.Error("failed to open CLI attachment", "content_hash", contentHash, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve attachment")
+			return
+		}
+		if (size < 0 || size > remoteAttachmentBytes) && s.remoteClientRequest(r) {
+			_ = rc.Close()
+			writeError(w, http.StatusRequestEntityTooLarge, "remote_attachment_too_large", "Attachment exceeds the remote client byte limit")
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -3247,6 +3635,18 @@ func (s *Server) handleCLIAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = f.Close() }()
+	if s.remoteClientRequest(r) {
+		info, err := f.Stat()
+		if err != nil {
+			s.logger.Error("failed to stat CLI attachment", "content_hash", contentHash, "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve attachment")
+			return
+		}
+		if info.Size() > remoteAttachmentBytes {
+			writeError(w, http.StatusRequestEntityTooLarge, "remote_attachment_too_large", "Attachment exceeds the remote client byte limit")
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Msgvault-Content-Hash", contentHash)
@@ -3264,14 +3664,22 @@ func (s *Server) resolveCLIMessage(r *http.Request, idStr string) (*query.Messag
 	if id, parseErr := strconv.ParseInt(idStr, 10, 64); parseErr == nil {
 		msg, err = s.queryEngineForContext(r.Context()).GetMessage(r.Context(), id)
 		if err != nil {
-			s.logger.Error("failed to get CLI message by id", "id", id, "error", err)
+			if !errors.Is(err, query.ErrOriginalMessageTooLarge) {
+				s.logger.Error("failed to get CLI message by id", "id", id, "error", err)
+			}
 			return nil, err
+		}
+		// An internal ID outside the grant may still name a granted message's source ID.
+		if msg != nil && !s.agentObjectSourceAllowed(r, msg.SourceID) {
+			msg = nil
 		}
 	}
 	if msg == nil {
-		msg, err = s.queryEngineForContext(r.Context()).GetMessageBySourceID(r.Context(), idStr)
+		msg, err = s.queryEngineForContext(r.Context()).GetMessageBySourceID(r.Context(), idStr, agentReadSourceIDs(r))
 		if err != nil {
-			s.logger.Error("failed to get CLI message by source id", "id", idStr, "error", err)
+			if !errors.Is(err, query.ErrOriginalMessageTooLarge) {
+				s.logger.Error("failed to get CLI message by source id", "id", idStr, "error", err)
+			}
 			return nil, err
 		}
 	}
@@ -3286,6 +3694,7 @@ func cliMessageResponseFromQuery(msg *query.MessageDetail) cliMessageResponse {
 		ReadState:            providerStateValue(msg.ReadState),
 		SourceMessageID:      msg.SourceMessageID,
 		SourceID:             msg.SourceID,
+		RFC822MessageID:      msg.RFC822MessageID,
 		ConversationID:       msg.ConversationID,
 		SourceConversationID: msg.SourceConversationID,
 		Subject:              msg.Subject,
@@ -3433,7 +3842,7 @@ func statsResponseFromStore(stats *store.Stats) StatsResponse {
 		TotalAccounts:         stats.SourceCount,
 		TotalLabels:           stats.LabelCount,
 		TotalAttach:           stats.AttachmentCount,
-		DatabaseSize:          stats.DatabaseSize,
+		DatabaseSize:          &stats.DatabaseSize,
 	}
 }
 

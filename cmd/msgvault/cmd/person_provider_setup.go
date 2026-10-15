@@ -2,7 +2,8 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -26,21 +27,15 @@ type personProviderSetupDeps struct {
 	negotiate           func(context.Context, peoplesweep.ProviderConfig, peoplesweep.Credential) (peoplesweep.NegotiatedCapabilities, error)
 	credentials         peoplesweep.CredentialStore
 	openCredentialStore func() (peoplesweep.CredentialStore, error)
+	codexAuthHome       string
 	lookupEnv           peoplesweep.CredentialLookup
 	isTerminal          func(uintptr) bool
 	readMasked          func(*os.File, int) ([]byte, error)
 }
 
-type personProviderCreateCredentialStore interface {
-	SaveNew(
-		profileName string,
-		credential peoplesweep.Credential,
-	) (peoplesweep.CredentialCleanupGuard, bool, error)
-	CleanupNew(profileName string, guard peoplesweep.CredentialCleanupGuard) error
-}
-
 type personProviderAddOptions struct {
 	custom              bool
+	presetID            string
 	protocol            string
 	endpoint            string
 	model               string
@@ -91,7 +86,7 @@ func (o personProviderAddOptions) explicitTransport() bool {
 // needsCatalog reports whether add must fetch the models.dev catalog: only
 // when a transport field is missing or a catalog price hint was requested.
 func (o personProviderAddOptions) needsCatalog() bool {
-	return !o.custom && (!o.explicitTransport() || o.acceptCatalogPrices)
+	return o.presetID == "" && !o.custom && (!o.explicitTransport() || o.acceptCatalogPrices)
 }
 
 func defaultPersonProviderSetupDeps() personProviderSetupDeps {
@@ -144,11 +139,13 @@ func newPersonProviderAddCommand(deps personProviderCommandDeps) *cobra.Command 
 		Short: "Add and check a named people inference provider profile",
 		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			return runPersonProviderAdd(command, deps, args[0], options)
 		},
 	}
 	flags := command.Flags()
 	flags.BoolVar(&options.custom, "custom", false, "Skip public catalog suggestions")
+	flags.StringVar(&options.presetID, "provider", "", "First-party provider preset: openai, openrouter, or venice")
 	flags.StringVar(&options.protocol, "protocol", "", "Explicit protocol identifier")
 	flags.StringVar(&options.endpoint, "endpoint", "", "Explicit provider endpoint")
 	flags.StringVar(&options.model, "model", "", "Explicit provider model identifier")
@@ -178,6 +175,7 @@ func newPersonProviderSetCommand(deps personProviderCommandDeps) *cobra.Command 
 		Short: "Update and check a named people inference provider profile",
 		Args:  exactPersonProviderNameArgs,
 		RunE: func(command *cobra.Command, args []string) error {
+			deps := personProviderDepsForContext(command.Context(), deps)
 			return runPersonProviderSet(command, deps, args[0], options)
 		},
 	}
@@ -246,10 +244,6 @@ func runPersonProviderAdd(
 	candidate, err := resolvePersonProviderAddCandidate(options, suggestions)
 	if err != nil {
 		return err
-	}
-	if candidate.Credential == peoplesweep.CredentialStored && !peoplesweep.StoredCredentialsSupported() {
-		return errors.New(
-			"stored people provider credentials are unsupported on this platform; pass --credential-env NAME to reference an environment variable instead")
 	}
 	configured := deps.config()
 	if _, exists := configured.Providers[name]; exists {
@@ -322,28 +316,31 @@ func runPersonProviderAdd(
 		return err
 	}
 
-	var credentialCleanup peoplesweep.CredentialCleanupGuard
+	var createdRevision string
 	if stored {
-		createStore, ok := credentialStore.(personProviderCreateCredentialStore)
-		if !ok {
-			return errors.New("people provider credential store does not support create-only publication")
-		}
-		var createdCredential bool
-		credentialCleanup, createdCredential, err = createStore.SaveNew(name, credential)
+		revision, present, err := credentialStore.Revision(name, candidate.Endpoint)
 		if err != nil {
 			return err
 		}
-		if !createdCredential {
-			return fmt.Errorf("people provider credential %q already exists", name)
+		if !present {
+			createdRevision, err = credentialStore.SaveIfRevision(name, candidate.Endpoint, credential.Value(), revision)
+		}
+		if present || errors.Is(err, peoplesweep.ErrCredentialRevisionConflict) {
+			return fmt.Errorf(
+				"people provider credential %q already exists; run msgvault person provider remove %s to delete it",
+				name, name)
+		}
+		if err != nil {
+			return err
 		}
 	}
 
 	after, err := deps.editConfigTables(before.ETag, plannedEdits)
 	if err != nil {
 		if errors.Is(err, config.ErrConfigChanged) {
-			return rollbackUncertainPersonProviderAdd(err, deps, before, after, credentialStore, name, credentialCleanup)
+			return rollbackUncertainPersonProviderAdd(err, deps, before, after, credentialStore, name, createdRevision)
 		}
-		return rollbackNewPersonProviderCredential(err, credentialStore, name, credentialCleanup)
+		return rollbackNewPersonProviderCredential(err, credentialStore, name, createdRevision)
 	}
 	checkOutput := command.OutOrStdout()
 	if options.jsonOutput {
@@ -356,13 +353,8 @@ func runPersonProviderAdd(
 		err = executeSavedPersonProviderCheck(command, checkedDeps, name, "", checkOutput)
 	}
 	if err != nil {
-		rollbackErr := rollbackPersonProviderAdd(deps, before, after, credentialStore, name, credentialCleanup)
+		rollbackErr := rollbackPersonProviderAdd(deps, before, after, credentialStore, name, createdRevision)
 		return errors.Join(err, rollbackErr)
-	}
-	if credentialCleanup != nil {
-		if err := credentialCleanup.Close(); err != nil {
-			return fmt.Errorf("close newly created people provider credential cleanup guard: %w", err)
-		}
 	}
 	if options.jsonOutput {
 		selected, err := selectPersonProviderConfig(checkedConfig, name)
@@ -374,9 +366,9 @@ func runPersonProviderAdd(
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(command.OutOrStdout()).Encode(personProviderAddOutput{
+		return json.MarshalEncode(jsontext.NewEncoder(command.OutOrStdout()), personProviderAddOutput{
 			Name: name, Fingerprint: profile.Fingerprint, Checked: true,
-		})
+		}, json.Deterministic(true))
 	}
 	_, _ = fmt.Fprintf(command.OutOrStdout(),
 		"Added and checked people provider profile %q; run `msgvault person provider consent %q --yes` to grant consent, then `msgvault person provider use %q` to select and enable it.\n",
@@ -385,19 +377,37 @@ func runPersonProviderAdd(
 }
 
 func personProviderCandidate(options personProviderAddOptions) (peoplesweep.ProviderConfig, error) {
-	if options.protocol == "" || options.endpoint == "" || options.model == "" || options.auth == "" ||
+	if (options.presetID == "" && (options.protocol == "" || options.endpoint == "" || options.auth == "")) || options.model == "" ||
 		options.retentionPosture == "" || options.trainingPosture == "" ||
 		len(options.allowedSources) == 0 || options.sourceSince == "" {
-		return peoplesweep.ProviderConfig{}, errors.New("protocol, endpoint, model, auth, retention, training, source, and source-since are required")
+		return peoplesweep.ProviderConfig{}, errors.New("provider or protocol, endpoint, auth, model, retention, training, source, and source-since are required")
 	}
-	candidate := peoplesweep.ProviderConfig{
-		Protocol: peoplesweep.Protocol(options.protocol), Endpoint: options.endpoint,
-		Model: options.model, Auth: peoplesweep.AuthScheme(options.auth),
-		RetentionPosture: options.retentionPosture, TrainingPosture: options.trainingPosture,
-		SourceSince: options.sourceSince, SourceUntil: options.sourceUntil,
-		AllowSensitive: options.allowSensitive, ReasoningEffort: options.reasoningEffort,
-		ReasoningMode: options.reasoningMode, RequestTimeout: options.requestTimeout,
+	var candidate peoplesweep.ProviderConfig
+	if options.presetID != "" {
+		var err error
+		candidate, err = peoplesweep.PresetProviderConfig(options.presetID, options.model)
+		if err != nil {
+			return peoplesweep.ProviderConfig{}, err
+		}
+		if (options.protocol != "" && options.protocol != string(candidate.Protocol)) ||
+			(options.endpoint != "" && options.endpoint != candidate.Endpoint) ||
+			(options.auth != "" && options.auth != string(candidate.Auth)) {
+			return peoplesweep.ProviderConfig{}, fmt.Errorf("people provider preset %q cannot use a different protocol, endpoint, or auth", options.presetID)
+		}
+	} else {
+		candidate.Protocol = peoplesweep.Protocol(options.protocol)
+		candidate.Endpoint = options.endpoint
+		candidate.Model = options.model
+		candidate.Auth = peoplesweep.AuthScheme(options.auth)
 	}
+	candidate.RetentionPosture = options.retentionPosture
+	candidate.TrainingPosture = options.trainingPosture
+	candidate.SourceSince = options.sourceSince
+	candidate.SourceUntil = options.sourceUntil
+	candidate.AllowSensitive = options.allowSensitive
+	candidate.ReasoningEffort = options.reasoningEffort
+	candidate.ReasoningMode = options.reasoningMode
+	candidate.RequestTimeout = options.requestTimeout
 	for _, source := range options.allowedSources {
 		candidate.AllowedSources = append(candidate.AllowedSources, peoplesweep.SourceClass(source))
 	}
@@ -419,6 +429,9 @@ func personProviderCandidate(options personProviderAddOptions) (peoplesweep.Prov
 }
 
 func validatePersonProviderAddOptions(options personProviderAddOptions) error {
+	if options.presetID != "" && (options.custom || options.acceptCatalogPrices) {
+		return errors.New("--provider cannot be combined with --custom or --accept-catalog-prices")
+	}
 	if options.protocol == string(peoplesweep.ProtocolCodexAppServer) {
 		return errors.New("codex_app_server profiles are not created by person provider add: " +
 			"generic onboarding requires an HTTP endpoint that codex_app_server forbids, and capability negotiation " +
@@ -453,7 +466,7 @@ func resolvePersonProviderAddCandidate(
 	options personProviderAddOptions,
 	suggestions []peoplesweep.ProviderSuggestion,
 ) (peoplesweep.ProviderConfig, error) {
-	if options.custom || options.explicitTransport() {
+	if options.presetID != "" || options.custom || options.explicitTransport() {
 		return personProviderCandidate(options)
 	}
 	selection, err := selectPersonProviderCatalogSuggestion(options, suggestions)
@@ -1024,15 +1037,6 @@ func verifyPersonProviderFingerprint(
 	return nil
 }
 
-func proxySavedPersonProviderRevoke(
-	command *cobra.Command,
-	deps personProviderCommandDeps,
-	name string,
-	fingerprint string,
-) error {
-	return proxySavedPersonProviderOperation(command, deps, "revoke", name, fingerprint, command.OutOrStdout())
-}
-
 func proxySavedPersonProviderRevokeFingerprint(
 	command *cobra.Command,
 	deps personProviderCommandDeps,
@@ -1101,13 +1105,12 @@ func proxySavedPersonProviderOperationWithFlag(
 func rollbackNewPersonProviderCredential(
 	cause error,
 	credentials peoplesweep.CredentialStore,
-	name string,
-	cleanup peoplesweep.CredentialCleanupGuard,
+	name, createdRevision string,
 ) error {
-	if cleanup == nil || credentials == nil {
+	if createdRevision == "" || credentials == nil {
 		return cause
 	}
-	if err := cleanupNewPersonProviderCredential(credentials, name, cleanup); err != nil {
+	if err := cleanupNewPersonProviderCredential(credentials, name, createdRevision); err != nil {
 		return errors.Join(cause, err)
 	}
 	return cause
@@ -1118,48 +1121,36 @@ func rollbackUncertainPersonProviderAdd(
 	deps personProviderCommandDeps,
 	before, expected config.ConfigFile,
 	credentials peoplesweep.CredentialStore,
-	name string,
-	cleanup peoplesweep.CredentialCleanupGuard,
+	name, createdRevision string,
 ) error {
 	return errors.Join(cause,
-		rollbackPersonProviderAdd(deps, before, expected, credentials, name, cleanup))
+		rollbackPersonProviderAdd(deps, before, expected, credentials, name, createdRevision))
 }
 
 func rollbackPersonProviderAdd(
 	deps personProviderCommandDeps,
 	before, after config.ConfigFile,
 	credentials peoplesweep.CredentialStore,
-	name string,
-	cleanup peoplesweep.CredentialCleanupGuard,
+	name, createdRevision string,
 ) error {
 	var rollbackErr error
 	if _, err := deps.restoreConfigFile(after, before); err != nil {
 		rollbackErr = fmt.Errorf("restore people provider config: %w", err)
 	}
-	if cleanup != nil && credentials != nil {
-		if err := cleanupNewPersonProviderCredential(credentials, name, cleanup); err != nil {
+	if createdRevision != "" && credentials != nil {
+		if err := cleanupNewPersonProviderCredential(credentials, name, createdRevision); err != nil {
 			rollbackErr = errors.Join(rollbackErr, err)
 		}
 	}
 	return rollbackErr
 }
 
+// cleanupNewPersonProviderCredential deletes only the key this command
+// created, never one another writer replaced it with.
 func cleanupNewPersonProviderCredential(
-	credentials peoplesweep.CredentialStore,
-	name string,
-	guard peoplesweep.CredentialCleanupGuard,
-) (retErr error) {
-	defer func() {
-		if closeErr := guard.Close(); closeErr != nil {
-			retErr = errors.Join(retErr,
-				fmt.Errorf("close new people provider credential cleanup guard: %w", closeErr))
-		}
-	}()
-	createStore, ok := credentials.(personProviderCreateCredentialStore)
-	if !ok {
-		return errors.New("new people provider credential cleanup conflict: store does not support bound cleanup")
-	}
-	if err := createStore.CleanupNew(name, guard); err != nil {
+	credentials peoplesweep.CredentialStore, name, createdRevision string,
+) error {
+	if _, err := credentials.DeleteIfRevision(name, createdRevision); err != nil {
 		return fmt.Errorf("new people provider credential cleanup conflict: %w", err)
 	}
 	return nil

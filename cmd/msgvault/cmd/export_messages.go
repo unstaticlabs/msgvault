@@ -1,7 +1,9 @@
 package cmd
 
 import (
-	"encoding/json"
+	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"sort"
@@ -17,7 +19,7 @@ import (
 const messageExportSchema = "msgvault-message-export/1"
 
 type exportMessagesDeps struct {
-	openStore func() (*store.Store, func(), error)
+	openStore func(context.Context) (*store.Store, func(), error)
 }
 
 type exportMessagesOptions struct {
@@ -40,7 +42,7 @@ type exportMessagesWindow struct {
 }
 
 type exportMessagesFilters struct {
-	PersonID     *int64                         `json:"person_id,omitempty"`
+	PersonID     *int64                         `json:"person_id,omitzero"`
 	MessageTypes []string                       `json:"message_types"`
 	Sources      []exportMessagesSourceSelector `json:"sources"`
 }
@@ -102,23 +104,23 @@ type exportMessagesCounts struct {
 }
 
 type exportMessagesJSONLSink struct {
-	encoder *json.Encoder
+	encoder *jsontext.Encoder
 }
 
 func (s exportMessagesJSONLSink) Source(source store.MessageExportSource) error {
-	return s.encoder.Encode(exportMessagesSourceRecord{
+	return json.MarshalEncode(s.encoder, exportMessagesSourceRecord{
 		RecordType:           "source",
 		SourceType:           source.SourceType,
 		Identifier:           source.Identifier,
 		DisplayName:          source.DisplayName,
 		LastSuccessfulSyncAt: source.LastSuccessfulSyncAt,
-	})
+	}, json.Deterministic(true))
 }
 
 func (s exportMessagesJSONLSink) Conversation(
 	conversation store.MessageExportConversation,
 ) error {
-	return s.encoder.Encode(exportMessagesConversationRecord{
+	return json.MarshalEncode(s.encoder, exportMessagesConversationRecord{
 		RecordType:       "conversation",
 		SourceType:       conversation.SourceType,
 		SourceIdentifier: conversation.SourceIdentifier,
@@ -126,7 +128,7 @@ func (s exportMessagesJSONLSink) Conversation(
 		Title:            conversation.Title,
 		ConversationType: conversation.ConversationType,
 		ParentID:         conversation.ParentID,
-	})
+	}, json.Deterministic(true))
 }
 
 func (s exportMessagesJSONLSink) Message(message store.MessageExportMessage) error {
@@ -137,7 +139,7 @@ func (s exportMessagesJSONLSink) Message(message store.MessageExportMessage) err
 			Address:     message.Author.Address,
 		}
 	}
-	return s.encoder.Encode(exportMessagesMessageRecord{
+	return json.MarshalEncode(s.encoder, exportMessagesMessageRecord{
 		RecordType:        "message",
 		SourceType:        message.SourceType,
 		SourceIdentifier:  message.SourceIdentifier,
@@ -149,11 +151,13 @@ func (s exportMessagesJSONLSink) Message(message store.MessageExportMessage) err
 		Author:            author,
 		OccurredAt:        message.OccurredAt,
 		DeletedFromSource: message.DeletedFromSource,
-	})
+	}, json.Deterministic(true))
 }
 
 func defaultExportMessagesDeps() exportMessagesDeps {
-	return exportMessagesDeps{openStore: openWritableStoreAndInitForIngest}
+	return exportMessagesDeps{openStore: func(ctx context.Context) (*store.Store, func(), error) {
+		return openWritableStoreAndInitForIngestInvocation(invocationFromContext(ctx))
+	}}
 }
 
 func newExportMessagesCmd(deps exportMessagesDeps) *cobra.Command {
@@ -171,24 +175,37 @@ func newExportMessagesCmd(deps exportMessagesDeps) *cobra.Command {
 func newExportMessagesLocalCmd(deps exportMessagesDeps) *cobra.Command {
 	opts := exportMessagesOptions{Format: "jsonl"}
 	cmd := &cobra.Command{
-		Use:          "export-messages",
-		Short:        "Export a bounded message window as provider-neutral JSONL",
+		Use:   "export-messages",
+		Short: "Export messages in a time window as provider-neutral JSONL",
+		Long: `Write messages sent in [--start, --end) to stdout as JSON Lines. Records
+have a record_type: manifest first, then source, conversation, and message
+records, and a final complete record with counts.
+
+--start and --end are required RFC3339 timestamps. Narrow the export with
+--source <type>:<email> (type and email from 'msgvault list-accounts
+--json', for example mbox:you@example.com), --message-type (exact values
+such as email, sms, whatsapp, meeting_transcript; unknown values match
+nothing), or --person-id from 'msgvault person list'.`,
+		Example: `  msgvault export-messages --start 2026-09-01T00:00:00Z --end 2026-10-01T00:00:00Z > sept.jsonl
+  msgvault export-messages --start 2026-09-01T00:00:00Z --end 2026-10-01T00:00:00Z --source mbox:you@example.com`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runExportMessages(cmd, deps, opts)
 		},
 	}
-	cmd.Flags().StringVar(&opts.Start, "start", "", "inclusive RFC3339 lower bound")
-	cmd.Flags().StringVar(&opts.End, "end", "", "exclusive RFC3339 upper bound")
+	cmd.Flags().StringVar(&opts.Start, "start", "", "inclusive RFC3339 lower bound (required)")
+	cmd.Flags().StringVar(&opts.End, "end", "", "exclusive RFC3339 upper bound (required)")
 	cmd.Flags().StringArrayVar(
 		&opts.MessageTypes, "message-type", nil, "exact message type to include (repeatable)",
 	)
 	cmd.Flags().StringArrayVar(
-		&opts.Sources, "source", nil, "typed source selector type:identifier (repeatable)",
+		&opts.Sources, "source", nil, "source selector type:email from list-accounts --json (repeatable)",
 	)
 	cmd.Flags().Int64Var(&opts.PersonID, "person-id", 0, "export messages for the durable person's bound participants")
 	cmd.Flags().StringVar(&opts.Format, "format", "jsonl", "output format (jsonl)")
+	_ = cmd.MarkFlagRequired("start")
+	_ = cmd.MarkFlagRequired("end")
 	return cmd
 }
 
@@ -215,7 +232,7 @@ func runExportMessages(
 	if deps.openStore == nil {
 		return errors.New("open message archive is not configured")
 	}
-	st, cleanup, err := deps.openStore()
+	st, cleanup, err := deps.openStore(cmd.Context())
 	if err != nil {
 		return err
 	}
@@ -236,9 +253,9 @@ func runExportMessages(
 		scope = &resolved.Scope
 		personID = &resolved.PersonID
 	}
-	encoder := json.NewEncoder(cmd.OutOrStdout())
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(exportMessagesManifest{
+	encoder := jsontext.NewEncoder(cmd.OutOrStdout(), jsontext.EscapeForHTML(false))
+
+	if err := json.MarshalEncode(encoder, exportMessagesManifest{
 		RecordType:      "manifest",
 		Schema:          messageExportSchema,
 		MsgvaultVersion: Version,
@@ -248,7 +265,7 @@ func runExportMessages(
 			MessageTypes: messageTypes,
 			Sources:      selectors,
 		},
-	}); err != nil {
+	}, json.Deterministic(true)); err != nil {
 		return fmt.Errorf("encode message export manifest: %w", err)
 	}
 
@@ -262,14 +279,14 @@ func runExportMessages(
 	if err != nil {
 		return fmt.Errorf("export messages: %w", err)
 	}
-	if err := encoder.Encode(exportMessagesComplete{
+	if err := json.MarshalEncode(encoder, exportMessagesComplete{
 		RecordType: "complete",
 		Counts: exportMessagesCounts{
 			Sources:       counts.Sources,
 			Conversations: counts.Conversations,
 			Messages:      counts.Messages,
 		},
-	}); err != nil {
+	}, json.Deterministic(true)); err != nil {
 		return fmt.Errorf("encode message export completion: %w", err)
 	}
 	return nil

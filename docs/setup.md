@@ -1,8 +1,16 @@
 ---
 title: Setup Guide
-description: Install msgvault, configure OAuth, and sync your first emails.
+description: Install msgvault, choose a source, and explore your first archived messages.
 ---
 
+
+Install msgvault, bring in a small first batch, then open it in the browser or
+terminal. The Gmail walkthrough below includes Google OAuth setup. For other
+mail providers, chats, meetings, contacts, or local exports, use
+[Choose a Source](guides/sources.md) after installation.
+
+Already have an archive? Read [the upgrade notes](changelog.md#before-upgrading) before
+opening an existing archive with a newer build.
 
 ## Install Release
 
@@ -30,6 +38,57 @@ Verify the installation:
 ```bash
 msgvault --help
 ```
+
+## Vendor a pinned binary
+
+Applications can download a release archive directly from
+[GitHub Releases](https://github.com/kenn-io/msgvault/releases). Pin the tag,
+pick the archive for your platform from that release's asset list, and check it
+against the release's `SHA256SUMS` before extracting it. Fail the download if
+the archive or its checksum entry is missing.
+
+Archives use `msgvault_<version>_<os>_<arch>`, with the version's leading `v`
+removed. Use `darwin` for macOS, `linux` for Linux, and `windows` for Windows;
+architectures are `amd64` and `arm64`. macOS and Linux archives end in `.tar.gz`;
+Windows archives end in `.zip`, such as `msgvault_0.21.0_windows_arm64.zip`.
+
+### Migrate before replacing the executable
+
+The following commands are new on `main` and are not in v0.21.0. Use a candidate
+binary that includes them. Run maintenance on the archive host; for a configured
+remote server, use `--local` only when intentionally selecting this host's archive.
+
+1. Download, verify, and extract the candidate into a separate directory.
+2. Stop the daemon and all other processes using the archive. For PostgreSQL,
+   stop users on other hosts too. Back up the archive before migrating.
+3. Compare the candidate's expected archive version with the stored version:
+
+   ```bash
+   ./candidate/msgvault schema-version
+   ./candidate/msgvault --home /path/to/archive-home schema-version --database
+   ```
+
+4. Run the candidate's migrations. Require exit status zero before continuing:
+
+   ```bash
+   ./candidate/msgvault --home /path/to/archive-home migrate
+   ./candidate/msgvault --home /path/to/archive-home schema-version --database
+   ```
+
+5. Require the stored version to equal the candidate's expected version, then
+   replace the installed executable and restart the daemon.
+
+A stored version of `0` means the archive predates this contract or has not
+completed schema initialization. A greater stored version requires a newer
+compatible binary. There is no schema downgrade command.
+
+Migrations can commit progress before failing or being interrupted. A retained
+old version does not make those partial changes safe for an old executable.
+Retry with the candidate, or restore the backup before restarting the old
+binary. Older releases do not have the future-version guard.
+
+See [schema-version](cli-reference.md#schema-version) for the exact probe
+contract and [migrate](cli-reference.md#migrate) for its scope and failure behavior.
 
 ## Conda-Forge
 
@@ -69,7 +128,14 @@ On macOS and Linux this installs to `~/.local/bin` or `$GOPATH/bin`. For a
 debug build use `make build`, or `make build-release` for an optimized binary
 with stripped debug symbols.
 
-On Windows, use the native PowerShell helper:
+On Windows, first build the embedded Web UI from an MSYS2 shell with GNU Make,
+Bun, and Node available:
+
+```bash
+make web-embed
+```
+
+Then use the native PowerShell helper for the Go binary:
 
 ```powershell
 .\scripts\build.ps1          # Debug build
@@ -77,8 +143,9 @@ On Windows, use the native PowerShell helper:
 ```
 
 It detects AMD64 or ARM64 automatically and writes `msgvault.exe` in the
-repository root. See [Development and Roadmap](/docs/development/#windows) for the
-one-time MSYS2 compiler prerequisites.
+repository root. The PowerShell helper does not build the Web UI itself. See
+[Development](/docs/development/#windows) for the UI build step and one-time
+MSYS2 compiler prerequisites.
 
 Verify the installation:
 
@@ -87,6 +154,9 @@ msgvault --help
 ```
 
 ## Configure OAuth
+
+This section is for Gmail and other Google-backed sources. Skip it for local
+imports or a provider with its own authorization guide.
 
 Create a Google Cloud project, enable the Gmail API, and download your `client_secret.json`. If you plan to archive Google Calendar, enable the Google Calendar API too. See the full [OAuth Setup Guide](/docs/guides/oauth-setup/).
 
@@ -184,7 +254,7 @@ msgvault sync-full you@fastmail.com
 IMAP accounts are stored in the same database as Gmail accounts. All tools
 (Web UI, TUI, search, MCP, and REST API) work with IMAP messages the same way.
 To start with only part of a large account, see
-[IMAP Folder Sync](/docs/usage/imap/) for `--folder` and `--skip-folder` examples.
+[IMAP Folder Sync](usage/imap.md) for `--folder` and `--skip-folder` examples.
 
 !!! tip "Microsoft 365 / Outlook.com"
     For Outlook, Hotmail, Live.com, and Microsoft 365 accounts, `add-o365` provides OAuth-based access without app passwords. It auto-detects the correct IMAP host and configures XOAUTH2 authentication. See the [OAuth Setup guide](/docs/guides/oauth-setup/#microsoft-365-outlook-hotmail) for details.
@@ -200,7 +270,10 @@ To start with only part of a large account, see
     4. Use this password when `add-imap` prompts for your credentials
 
 !!! note
-    IMAP sync always performs a full scan of the mailbox. The `sync` (incremental) command falls back to a full sync for IMAP accounts because IMAP does not provide a change-tracking API like Gmail's History API. Messages already in the database are skipped efficiently.
+    After the first scan, `msgvault sync` uses QRESYNC when the server supports
+    it. Otherwise it uses CONDSTORE or a UID-based scan and skips unchanged
+    messages. See [IMAP Sync and Repair](usage/imap.md#how-later-syncs-find-changes)
+    for the fallback order and deletion limits.
 
 ## Sync Email
 
@@ -285,7 +358,10 @@ Reduce this value if you encounter rate limit errors during large syncs.
 
 ### Safety
 
-Sync operations are **read-only**. They use only `messages.list` and `messages.get` Gmail APIs. No write operations are performed. Your Gmail data remains untouched.
+Sync operations are **read-only**. They read the Gmail profile, labels,
+message lists, raw messages, and history as needed. They do not call Gmail
+write APIs or change provider data. Remote deletion is a separate,
+explicitly enabled workflow.
 
 ## Explore
 
@@ -311,19 +387,32 @@ TUI](/docs/usage/tui/) for more.
 ## Optional: Turn On Search and People Lanes
 
 Semantic search, visual and document attachment search, and the people sweep
-are opt-in. Put the API keys you have in the environment and let setup choose
-the rest:
+are opt-in. Put your API keys in the environment so setup can propose search
+features. Hosted people inference also needs an explicit provider and model:
 
 ```bash
 export VOYAGE_API_KEY="..."     # text, people, and visual search
 export MISTRAL_API_KEY="..."    # document attachments
-export OPENAI_API_KEY="..."     # people sweep (and text search without a Voyage key)
-msgvault setup providers        # one consent per provider, then config.toml is written
+export OPENAI_API_KEY="..."     # text search without a Voyage key
+msgvault setup providers        # review provider disclosures and write opt-in config
 msgvault setup status           # what is on, what is off, and why
 ```
 
-The people sweep additionally requires `msgvault setup providers --allow-sensitive`
-to permit sensitive archive excerpts and sensitive personal inferences.
+Message embeddings are authorized by enabling their configuration and have no
+separate stored consent record. Semantic people search, visual processing,
+document extraction and vectors, and people sweeps have separate consent gates;
+`setup status` names any command still required. The people sweep additionally
+requires an explicit hosted provider choice, for example:
+
+```bash
+msgvault setup providers --provider openai --model <model> \
+  --credential-env OPENAI_API_KEY --retention-posture <assertion> \
+  --training-posture <assertion> --allow-sensitive
+```
+
+`--allow-sensitive` permits sensitive archive excerpts and sensitive personal
+inferences. A key alone never selects a hosted people provider. Codex enrollment
+remains unavailable until an approved build ships.
 
 See [Recommended Configuration](/docs/usage/recommended-configuration/) for the
 values it writes and the probe steps the hosted lanes still need.
@@ -344,14 +433,14 @@ full workflow, scheduled sync, and headless-server setup.
 
 ## Open the Web UI
 
-Build the analytical cache and start the daemon:
+Start the daemon:
 
 ```bash
-msgvault build-cache
 msgvault serve
 ```
 
-Open the `API server` URL printed at startup. With the default loopback bind,
+The daemon builds a missing or stale analytical cache during startup. Open the
+`API server` URL it prints. With the default loopback bind,
 the browser is trusted locally. A daemon bound to another interface must use an
 API key; the browser presents a login screen and stores only an in-memory
 daemon session. The release binary contains the complete UI, so no frontend

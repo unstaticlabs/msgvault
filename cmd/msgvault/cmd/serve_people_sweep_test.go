@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/api"
 	configpkg "go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/peoplesweep"
 	"go.kenn.io/msgvault/internal/scheduler"
@@ -122,9 +123,6 @@ func TestProductionPersonSweepConstructsEveryHTTPProtocolAndCredentialSource(t *
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if test.provider.Credential == peoplesweep.CredentialStored {
-				requireStoredCredentialStorePlatform(t)
-			}
 			must := require.New(t)
 			checks := assert.New(t)
 			st := testutil.NewTestStore(t)
@@ -135,8 +133,8 @@ func TestProductionPersonSweepConstructsEveryHTTPProtocolAndCredentialSource(t *
 				t.Setenv(test.provider.CredentialEnv, "environment-test-value")
 			}
 			if test.provider.Credential == peoplesweep.CredentialStored {
-				must.NoError(peoplesweep.NewFileCredentialStore(fullConfig.TokensDir()).
-					Save("production", test.credential))
+				savePeopleCredentialForTest(t, peoplesweep.NewStoredCredentials(fullConfig.TokensDir()),
+					"production", test.provider.Endpoint, test.credential.Value())
 			}
 
 			runner, err := newProductionStructuredRunner(fullConfig, st)
@@ -268,4 +266,47 @@ func TestPeopleSweepSchedulerRecoversJournalGap(t *testing.T) {
 		  AND catalog_fingerprint = ?`), personID, profile.AllowedSources[0],
 		peoplesweep.ProgramFingerprint(), catalog.Fingerprint).Scan(&cursorHighWater))
 	assert.Equal(t, journalHighWater, cursorHighWater)
+}
+
+// TestPersonBriefManualRunResultReportsThePersonsAttempt pins the mapping the
+// daemon's brief route returns: the run ID from the run and the attempt ID,
+// stored version, and failure class from that person's own result.
+func TestPersonBriefManualRunResultReportsThePersonsAttempt(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		result peoplesweep.RunResult
+		want   api.PersonBriefRun
+	}{
+		{
+			name: "stored version",
+			result: peoplesweep.RunResult{RunID: "run-1", People: []peoplesweep.PersonRunResult{
+				{PersonID: 7, AttemptID: "attempt-1", BriefVersion: 3},
+			}},
+			want: api.PersonBriefRun{RunID: "run-1", AttemptID: "attempt-1", BriefVersion: 3},
+		},
+		{
+			name: "deferred brief",
+			result: peoplesweep.RunResult{RunID: "run-2", People: []peoplesweep.PersonRunResult{
+				{PersonID: 7, AttemptID: "attempt-2", BriefFailureClass: peoplesweep.FailureBudget},
+			}},
+			want: api.PersonBriefRun{RunID: "run-2", AttemptID: "attempt-2",
+				BriefFailureClass: string(peoplesweep.FailureBudget)},
+		},
+		{
+			name: "another person's attempt is never reported",
+			result: peoplesweep.RunResult{RunID: "run-3", People: []peoplesweep.PersonRunResult{
+				{PersonID: 9, AttemptID: "attempt-9", BriefVersion: 1},
+			}},
+			want: api.PersonBriefRun{RunID: "run-3"},
+		},
+		{
+			name:   "no attempt claimed",
+			result: peoplesweep.RunResult{RunID: "run-4"},
+			want:   api.PersonBriefRun{RunID: "run-4"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, personBriefRunResult(7, test.result))
+		})
+	}
 }

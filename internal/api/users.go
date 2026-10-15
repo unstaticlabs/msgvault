@@ -1,7 +1,8 @@
 package api
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"strconv"
@@ -104,9 +105,8 @@ func (s *Server) userFromPath(w http.ResponseWriter, r *http.Request) (*store.Us
 }
 
 func decodeUserBody(w http.ResponseWriter, r *http.Request, target any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
+	decoder := jsontext.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err := json.UnmarshalDecode(decoder, target, json.RejectUnknownMembers(true)); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid request body")
 		return false
 	}

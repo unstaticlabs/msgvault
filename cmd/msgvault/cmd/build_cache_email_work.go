@@ -24,10 +24,10 @@ func emailWorkSnapshotTables(snapshot *cacheSourceSnapshot) []cacheSnapshotTable
 		targets = "SELECT action_uid,seed_uid FROM email_work_action_targets"
 	}
 	return []cacheSnapshotTable{
-		{"email_linkage_facts", facts, "types={'message_id':'BIGINT','extraction_version':'INTEGER','outcome':'VARCHAR','facts':'VARCHAR'}"},
-		{"email_work_actions", actions, "types={'uid':'VARCHAR','kind':'VARCHAR','revision':'BIGINT','active':'BOOLEAN','actor_kind':'VARCHAR','actor_user_id':'BIGINT','created_at':'TIMESTAMP'}"},
-		{"email_work_action_targets", targets, "types={'action_uid':'VARCHAR','seed_uid':'VARCHAR'}"},
-		{"email_work_seeds", seeds, "types={'ordinal':'BIGINT','uid':'VARCHAR','anchor_message_id':'BIGINT','live_message_id':'BIGINT'}"},
+		{"email_linkage_facts", facts, "types={'message_id':'BIGINT','extraction_version':'INTEGER','outcome':'VARCHAR','facts':'VARCHAR'}", nil},
+		{"email_work_actions", actions, "types={'uid':'VARCHAR','kind':'VARCHAR','revision':'BIGINT','active':'BOOLEAN','actor_kind':'VARCHAR','actor_user_id':'BIGINT','created_at':'TIMESTAMP'}", nil},
+		{"email_work_action_targets", targets, "types={'action_uid':'VARCHAR','seed_uid':'VARCHAR'}", nil},
+		{"email_work_seeds", seeds, "types={'ordinal':'BIGINT','uid':'VARCHAR','anchor_message_id':'BIGINT','live_message_id':'BIGINT'}", nil},
 	}
 }
 
@@ -59,7 +59,7 @@ func exportEmailWorkDatasets(snapshot *cacheSourceSnapshot, runExport func(strin
 		complete = "lower(s.source_type)='gmail'"
 		if snapshot.hasLabelRole && snapshot.hasIMAPMembership {
 			sentIMAP := `EXISTS (SELECT 1 FROM sqlite_db.imap_message_memberships mm JOIN sqlite_db.labels l ON l.source_id=mm.source_id AND l.source_label_id=mm.mailbox WHERE mm.source_id=m.source_id AND mm.message_id=m.id AND l.system_role='sent')`
-			draftIMAP := carries("l.system_role='draft'")
+			draftIMAP := carries("l.system_role IN ('draft','drafts')")
 			flagItems := `json_extract(TRY_CAST(mm.flags AS JSON),'$[*]')`
 			valid := `json_type(TRY_CAST(mm.flags AS JSON))='ARRAY' AND list_has_all(['VARCHAR'],list_transform(` + flagItems + `,flag->COALESCE(json_type(flag),'NULL')))`
 			hasDraft := `list_contains(list_transform(` + flagItems + `,flag->LOWER(json_extract_string(flag,'$'))),'\draft')`

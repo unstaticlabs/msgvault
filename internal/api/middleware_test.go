@@ -18,6 +18,7 @@ import (
 )
 
 func TestCORSMiddleware(t *testing.T) {
+	t.Parallel()
 	cfg := DefaultCORSConfig()
 	middleware := CORSMiddleware(cfg)
 
@@ -78,6 +79,7 @@ func TestCORSMiddleware(t *testing.T) {
 }
 
 func TestCORSMiddlewareCredentialsMatrix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		allowedOrigins   []string
@@ -170,6 +172,7 @@ func TestCORSMiddlewareCredentialsMatrix(t *testing.T) {
 }
 
 func TestCORSPreflightHeaders(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	cfg := DefaultCORSConfig()
 	middleware := CORSMiddleware(cfg)
@@ -201,6 +204,7 @@ func TestCORSPreflightHeaders(t *testing.T) {
 }
 
 func TestCORSExposeHeaders(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name           string
 		allowedOrigins []string
@@ -251,6 +255,7 @@ func TestCORSExposeHeaders(t *testing.T) {
 }
 
 func TestRateLimiter(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	rl := NewRateLimiter(2, 2) // 2 req/sec with burst of 2
 
@@ -266,6 +271,7 @@ func TestRateLimiter(t *testing.T) {
 }
 
 func TestRateLimiterCloseConcurrent(t *testing.T) {
+	t.Parallel()
 	rl := NewRateLimiter(10, 10)
 
 	// Spawn many goroutines calling Close() concurrently — must not panic.
@@ -295,6 +301,7 @@ func exemptNever(*http.Request) bool { return false }
 func exemptLoopback(r *http.Request) bool { return isLoopbackRequest(r) }
 
 func TestRateLimitMiddleware(t *testing.T) {
+	t.Parallel()
 	rl := NewRateLimiter(1, 1) // Very restrictive for testing
 	middleware := RateLimitMiddleware(rl, exemptNever)
 
@@ -323,6 +330,7 @@ func TestRateLimitMiddleware(t *testing.T) {
 }
 
 func TestRateLimitMiddlewareExemptsLoopback(t *testing.T) {
+	t.Parallel()
 	rl := NewRateLimiter(1, 1) // would reject the second request if applied
 	middleware := RateLimitMiddleware(rl, exemptLoopback)
 
@@ -345,6 +353,7 @@ func TestRateLimitMiddlewareExemptsLoopback(t *testing.T) {
 }
 
 func TestLoopbackRateLimitExempt(t *testing.T) {
+	t.Parallel()
 	const key = "secret-key"
 
 	newReq := func(remoteAddr, apiKey string) *http.Request {
@@ -365,6 +374,7 @@ func TestLoopbackRateLimitExempt(t *testing.T) {
 	}{
 		{"keyless loopback exempt", "", "127.0.0.1:1234", "", true},
 		{"key configured valid key loopback exempt", key, "127.0.0.1:1234", key, true},
+		{"reader key loopback exempt", key, "127.0.0.1:1234", remoteClientTestReaderKey, true},
 		{"key configured missing key loopback limited", key, "127.0.0.1:1234", "", false},
 		{"key configured bad key loopback limited", key, "127.0.0.1:1234", "wrong", false},
 		{"key configured valid key non-loopback limited", key, "203.0.113.7:1234", key, false},
@@ -374,7 +384,7 @@ func TestLoopbackRateLimitExempt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := NewServer(
-				&config.Config{Server: config.ServerConfig{APIKey: tt.apiKey}},
+				&config.Config{Server: config.ServerConfig{APIKey: tt.apiKey, RemoteClients: []config.RemoteClientConfig{{ClientID: "reader", APIKey: remoteClientTestReaderKey}}}},
 				nil, nil, testLogger(),
 			)
 			got := srv.loopbackRateLimitExempt(newReq(tt.remoteAddr, tt.reqKey))
@@ -384,6 +394,7 @@ func TestLoopbackRateLimitExempt(t *testing.T) {
 }
 
 func TestRateLimitMiddlewareLimitsUntrustedLoopback(t *testing.T) {
+	t.Parallel()
 	rl := NewRateLimiter(1, 1) // rejects the second request within a second
 	// Untrusted loopback: an API key is configured but the request has none, so
 	// the predicate refuses the exemption (models brute-force through a local
@@ -409,6 +420,7 @@ func TestRateLimitMiddlewareLimitsUntrustedLoopback(t *testing.T) {
 }
 
 func TestExistingAPIKeyAuthenticationCompatibility(t *testing.T) {
+	t.Parallel()
 	const apiKey = "compatibility-test-key"
 	tests := []struct {
 		name    string
@@ -449,6 +461,7 @@ func TestExistingAPIKeyAuthenticationCompatibility(t *testing.T) {
 }
 
 func TestExistingAPIKeyAuthenticationKeepsKeylessLoopbackTrusted(t *testing.T) {
+	t.Parallel()
 	srv := NewServer(&config.Config{}, nil, nil, testLogger())
 	t.Cleanup(func() {
 		require.NoError(t, srv.Shutdown(context.Background()))
@@ -463,6 +476,7 @@ func TestExistingAPIKeyAuthenticationKeepsKeylessLoopbackTrusted(t *testing.T) {
 }
 
 func TestInvalidCLIAuthenticationCannotOptIntoTimeoutPolicy(t *testing.T) {
+	t.Parallel()
 	srv := NewServer(
 		&config.Config{Server: config.ServerConfig{APIKey: cliTimeoutTestAPIKey}},
 		nil, nil, testLogger(),
@@ -482,6 +496,7 @@ func TestInvalidCLIAuthenticationCannotOptIntoTimeoutPolicy(t *testing.T) {
 }
 
 func TestProxiedCLIMarkerCannotOptIntoTimeoutPolicy(t *testing.T) {
+	t.Parallel()
 	srv := NewServer(
 		&config.Config{Server: config.ServerConfig{
 			APIKey:         cliTimeoutTestAPIKey,
@@ -510,6 +525,7 @@ func TestProxiedCLIMarkerCannotOptIntoTimeoutPolicy(t *testing.T) {
 // payload under its predictable URL and replays it to an unauthenticated
 // requester. Web routes outside /api/ keep their own caching policy.
 func TestAPICacheControlDefaultsToNoStore(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	hash := strings.Repeat("ab", 32)

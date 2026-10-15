@@ -65,8 +65,8 @@ type DocumentVectorStatusStore interface {
 type DocumentVectorOperationsResponse struct {
 	Enabled                              bool                                  `json:"enabled"`
 	Configured                           bool                                  `json:"configured"`
-	ScheduledRegistrationRequiresRestart bool                                  `json:"scheduled_registration_requires_restart,omitempty"`
-	Status                               *store.DocumentVectorOperationsStatus `json:"status,omitempty"`
+	ScheduledRegistrationRequiresRestart bool                                  `json:"scheduled_registration_requires_restart,omitzero"`
+	Status                               *store.DocumentVectorOperationsStatus `json:"status,omitzero" nullable:"false"`
 }
 
 type documentOccurrenceStatusReconciler interface {
@@ -196,7 +196,7 @@ func (s *Server) documentSearchGuard(label string, next http.HandlerFunc) http.H
 		if s.operationGate != nil {
 			done, ok := beginGateWorkBounded(r.Context(), s.operationGate, label)
 			if !ok {
-				writeOperationGateBusy(w, s.operationGate)
+				writeOperationGateBusy(w, r, s.operationGate)
 				return
 			}
 			defer done()

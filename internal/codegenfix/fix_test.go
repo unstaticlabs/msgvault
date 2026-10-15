@@ -17,6 +17,7 @@ func TestRewriteGeneratedValidatorsRepairsKnownGeneratorGaps(t *testing.T) {
 	assertions.NotContains(string(got), "if p.Filename != nil")
 	assertions.NotContains(string(got), "if p.MimeType != nil")
 	assertions.NotContains(string(got), "if p.SourceRef != nil")
+	assertions.NotContains(string(got), "if m.Filename != nil")
 	assertions.NotContains(string(got), "if p.SourceURL != nil")
 	assertions.NotContains(string(got), "if p.ContentSha256 != nil")
 	assertions.NotContains(string(got), "if p.SourceVersion != nil")
@@ -25,10 +26,33 @@ func TestRewriteGeneratedValidatorsRepairsKnownGeneratorGaps(t *testing.T) {
 	assertions.Contains(string(got), `typesValidator.Var(e.Grouping, "required,min=1,max=1")`)
 	assertions.Contains(string(got), `typesValidator.Var(f.Grouping, "required,min=1,max=1")`)
 	assertions.NotContains(string(got), exploreCacheRecoveryActionRequiredValidatorBlock())
-	assertions.Contains(string(got), "JSON json.RawMessage")
+	assertions.NotContains(string(got), "typesValidator.Var(e.Excerpt")
+	assertions.Contains(string(got), "JSON jsontext.Value")
 	assertions.Contains(string(got), dailyNoteDecoyValidatorBlock())
 	assertions.Contains(string(got), dailyNotePersonIDsValidatorBlock("gte=1"))
 	assertions.NotContains(string(got), dailyNotePersonIDsValidatorBlock("omitempty,gte=1"))
+}
+
+func TestRewriteRunQueryClientPreservesSynchronousResultType(t *testing.T) {
+	assert := assert.New(t)
+	methods := `type RunQueryClientInterface interface {
+	RunQuery(ctx context.Context, options *RunQueryRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RunQueryResponseJSON, error)
+}
+func (c *Client) RunQuery(ctx context.Context, options *RunQueryRequestOptions, reqEditors ...runtime.RequestEditorFn) (*RunQueryResponseJSON, error) {
+	responseParser := func(ctx context.Context, resp *runtime.Response) (*RunQueryResponseJSON, error) {
+		if resp.StatusCode != 202 { return nil, nil }
+		target := new(RunQueryResponseJSON)
+		return target, nil
+	}
+	return responseParser(ctx, nil)
+}
+`
+	fixture := "package generated\ntype Client struct{}\n" + methods + strings.ReplaceAll(methods, "RunQuery", "RunArchiveQuery")
+	got, err := RewriteRunQueryClient([]byte(fixture))
+	require.NoError(t, err)
+	assert.Equal(2, strings.Count(string(got), "resp.StatusCode != 200"))
+	assert.NotContains(string(got), "RunQueryResponseJSON")
+	assert.NotContains(string(got), "RunArchiveQueryResponseJSON")
 }
 
 func TestRewriteGeneratedValidatorsRejectsMissingGroupingValidator(t *testing.T) {
@@ -99,6 +123,13 @@ func (e ExploreCacheUnavailableResponse) Validate() error {
 	var errors runtime.ValidationErrors
 ` + exploreCacheRecoveryActionRequiredValidatorBlock() + `
 }
+func (e Evidence) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(e.Excerpt, "required"); err != nil {
+		errors = errors.Append("Excerpt", err)
+	}
+	return errors
+}
 func (e ExploreGroupsHTTPRequest) Validate() error {
 	var errors runtime.ValidationErrors
 }
@@ -107,6 +138,9 @@ func (f FileGroupsHTTPRequest) Validate() error {
 }
 ` + pointerValidatorFixture("FileMetadataResponse", "f") + pointerValidatorFixture("FileSearchRow", "f") +
 		pointerValidatorFixture("PersonFileSearchRow", "p") +
+		requiredStringPointerValidatorFixture("FileSuggestionRow", "f", "MimeType") +
+		requiredStringPointerValidatorFixture("PersonFileSuggestionRow", "p", "MimeType") +
+		requiredStringPointerValidatorFixture("MessageRecording", "m", "Filename") +
 		requiredStringPointerValidatorFixture("PersonFactEvidence", "p",
 			"SourceRef", "SourceURL", "ContentSha256", "SourceVersion", "SubjectRef", "Excerpt") + `
 func (c CreateDailyNoteEntryRequest) Validate() error {

@@ -2,7 +2,6 @@ package query
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"go.kenn.io/msgvault/internal/store"
 	"strings"
@@ -10,7 +9,7 @@ import (
 
 // fetchProviderStateForMessageList hydrates a bounded result page, never the
 // entire archive. It reads the same authority as message detail and labels.
-func fetchProviderStateForMessageList(ctx context.Context, db *sql.DB, rebind rebindFunc, prefix, driver string, messages []MessageSummary) error {
+func fetchProviderStateForMessageList(ctx context.Context, db store.SQLReader, rebind rebindFunc, prefix, driver string, messages []MessageSummary) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -60,5 +59,5 @@ func (e *SQLiteEngine) fetchProviderState(ctx context.Context, messages []Messag
 	if e.dialect.messageBodyContextBackend() == messageBodyContextPostgreSQL {
 		driver = "pgx"
 	}
-	return fetchProviderStateForMessageList(ctx, e.db, e.dialect.Rebind, "", driver, messages)
+	return fetchProviderStateForMessageList(ctx, store.ReadDBContext(ctx, e.db), e.dialect.Rebind, "", driver, messages)
 }

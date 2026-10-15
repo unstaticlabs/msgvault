@@ -8,6 +8,7 @@ import (
 	"maps"
 	"time"
 
+	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -25,10 +26,14 @@ type AggregateRow struct {
 // MessageSummary represents a message in list views.
 // Contains enough information for display without fetching the full body.
 type MessageSummary struct {
-	InboxState                   string     `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
-	ReadState                    string     `json:"read_state,omitempty" enum:"read,unread,unknown"`
+	InboxState      string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState       string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
+	AttachmentNames []string `json:"attachment_names,omitzero"`
+	MatchSnippet    string   `json:"match_snippet,omitempty"`
+	// WebURL is derived by the daemon client for browser navigation.
+	WebURL                       string     `json:"web_url,omitempty"`
 	ID                           int64      `json:"id"`
-	SourceID                     int64      `json:"source_id,omitempty"`
+	SourceID                     int64      `json:"source_id,omitzero"`
 	SourceMessageID              string     `json:"source_message_id"`
 	ConversationID               int64      `json:"conversation_id"`
 	SourceConversationID         string     `json:"source_conversation_id"` // Gmail Thread ID
@@ -65,23 +70,27 @@ type DeletionTarget struct {
 
 // MessageDetail represents a full message with body and attachments.
 type MessageDetail struct {
-	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
-	InboxState           string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
-	ReadState            string                    `json:"read_state,omitempty" enum:"read,unread,unknown"`
-	ID                   int64                     `json:"id"`
-	SourceID             int64                     `json:"source_id,omitempty"`
-	SourceMessageID      string                    `json:"source_message_id"`
-	ConversationID       int64                     `json:"conversation_id"`
-	SourceConversationID string                    `json:"source_conversation_id"` // Gmail Thread ID
-	Subject              string                    `json:"subject"`
-	MessageType          string                    `json:"message_type,omitempty"`
-	Snippet              string                    `json:"snippet"`
-	SentAt               time.Time                 `json:"sent_at"`
-	ReceivedAt           *time.Time                `json:"received_at,omitempty"`
-	DeletedAt            *time.Time                `json:"deleted_at,omitempty"` // When message was deleted from source (nil if not deleted)
-	SizeEstimate         int64                     `json:"size_estimate"`
-	HasAttachments       bool                      `json:"has_attachments"`
-	IsFromMe             bool                      `json:"is_from_me"`
+	CalendarState     *store.CalendarEventState `json:"calendar_state,omitempty"`
+	InboxState        string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState         string                    `json:"read_state,omitempty" enum:"read,unread,unknown"`
+	ConversationTitle string                    `json:"conversation_title,omitempty"`
+	// WebURL is derived by the daemon client for browser navigation.
+	WebURL               string     `json:"web_url,omitempty"`
+	ID                   int64      `json:"id"`
+	SourceID             int64      `json:"source_id,omitzero"`
+	SourceMessageID      string     `json:"source_message_id"`
+	RFC822MessageID      string     `json:"rfc822_message_id"`
+	ConversationID       int64      `json:"conversation_id"`
+	SourceConversationID string     `json:"source_conversation_id"` // Gmail Thread ID
+	Subject              string     `json:"subject"`
+	MessageType          string     `json:"message_type,omitempty"`
+	Snippet              string     `json:"snippet"`
+	SentAt               time.Time  `json:"sent_at"`
+	ReceivedAt           *time.Time `json:"received_at,omitempty"`
+	DeletedAt            *time.Time `json:"deleted_at,omitempty"` // When message was deleted from source (nil if not deleted)
+	SizeEstimate         int64      `json:"size_estimate"`
+	HasAttachments       bool       `json:"has_attachments"`
+	IsFromMe             bool       `json:"is_from_me"`
 
 	// Participants
 	From []Address `json:"from"`
@@ -107,6 +116,7 @@ type Address struct {
 // AttachmentInfo represents attachment metadata.
 type AttachmentInfo struct {
 	ID          int64
+	SourceID    int64 `json:"-"`
 	Filename    string
 	MimeType    string
 	Size        int64
@@ -224,6 +234,8 @@ const (
 
 // MessageFilter specifies which messages to retrieve.
 type MessageFilter struct {
+	AccountScopes []search.AccountScope // picker account selections; intersect with source filters
+
 	// Filter by aggregate key
 	Sender        string // filter by sender email
 	SenderName    string // filter by sender display name (COALESCE(display_name, email))
@@ -313,6 +325,7 @@ func (f *MessageFilter) HasEmptyTargets() bool {
 // copy would share the underlying map between the original and copy.
 func (f *MessageFilter) Clone() MessageFilter {
 	clone := *f
+	clone.AccountScopes = search.CloneAccountScopes(f.AccountScopes)
 	if f.EmptyValueTargets != nil {
 		clone.EmptyValueTargets = make(map[ViewType]bool, len(f.EmptyValueTargets))
 		maps.Copy(clone.EmptyValueTargets, f.EmptyValueTargets)
@@ -326,6 +339,8 @@ func (f *MessageFilter) Clone() MessageFilter {
 
 // AggregateOptions configures an aggregate query.
 type AggregateOptions struct {
+	AccountScopes []search.AccountScope
+
 	// Account filter
 	SourceID  *int64  // nil means all accounts
 	SourceIDs []int64 // multi-source filter (collections)
@@ -365,10 +380,18 @@ func DefaultAggregateOptions() AggregateOptions {
 // AccountInfo represents a source account.
 type AccountInfo struct {
 	CalendarCoverage *store.CalendarCoverage `json:"calendar_coverage,omitempty"`
-	ID               int64
-	SourceType       string
-	Identifier       string // email address
-	DisplayName      string
+	// VirtualAccounts lists the source's identity and unattributed children,
+	// filled only by callers that load the catalog.
+	VirtualAccounts []store.VirtualAccount `json:"virtual_accounts,omitempty"`
+
+	ID          int64
+	SourceType  string
+	Identifier  string // email address
+	DisplayName string
+	// LastSyncAt is the source's most recent sync activity. Provider
+	// messages newer than this may not be archived yet. Nil when the
+	// source has never synced.
+	LastSyncAt *time.Time `json:",omitzero"`
 }
 
 // StatsOptions configures a stats query.

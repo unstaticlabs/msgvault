@@ -3,39 +3,57 @@
     saveCardDAVAccount as generatedSaveCardDAVAccount,
     testCardDAVAccount as generatedTestCardDAVAccount,
   } from '../../api/generated/api/api';
-  import { Button, SettingsSection, TextInput, Toggle } from '@kenn-io/kit-ui';
+  import { Button, SettingsSection, TextInput, Toggle, SelectDropdown } from '@kenn-io/kit-ui';
+  import ZapIcon from '@lucide/svelte/icons/zap';
   import { onDestroy, untrack } from 'svelte';
   import type { APIClient } from '../../api/client';
   import type { CardDAVAccountRequest as GeneratedCardDAVAccountRequest } from '../../api/generated/models';
-  import type { SettingState } from '../../settings/catalog';
+  import { authorizeGoogleContacts } from '../../settings/google-authorization';
+  import { shellQuote } from '../../settings/shell-quote';
+  import type { CardDAVAccountValues } from '../../carddav/account-settings';
+  import CronField from './CronField.svelte';
   type CardDAVAccountRequest = GeneratedCardDAVAccountRequest;
-  type Action = 'test' | 'save';
-  interface AccountSettingsSnapshot {
-    baseURL: string;
-    username: string;
-    passwordConfigured: boolean;
-    enabled: boolean;
-    schedule: string;
-  }
+  type Action = 'test' | 'save' | 'authorize';
   let {
     client,
-    settings,
+    values,
+    connection = undefined,
     onSaved = () => undefined,
   }: {
     client: APIClient;
-    settings: SettingState[];
+    values: CardDAVAccountValues;
+    connection?: string;
     onSaved?: () => void | Promise<void>;
   } = $props();
-  let baseURL = $state(settingString('carddav.base_url'));
-  let username = $state(settingString('carddav.username'));
+  const initialValues = untrack(() => values);
+  let provider = $state(initialValues.provider);
+  let oauthApp = $state(initialValues.oauthApp);
+  let persistedProvider = $state(initialValues.provider);
+  let persistedOAuthApp = $state(initialValues.oauthApp);
+  const googleURL = 'https://www.googleapis.com/.well-known/carddav';
+  const graphURL = 'https://graph.microsoft.com/v1.0';
+  const google = $derived(provider === 'google');
+  const microsoft = $derived(provider === 'microsoft');
+  const oauth = $derived(google || microsoft);
+  function selectProvider(value: string) {
+    provider = value;
+    password = '';
+    if (value !== 'google') oauthApp = '';
+  }
+  let baseURL = $state(initialValues.baseURL);
+  let username = $state(initialValues.username);
+  function authorizationCommand(shell: 'posix' | 'cmd'): string {
+    return `msgvault carddav authorize-${provider} ${shellQuote(username || 'you@example.com', shell)}${google && oauthApp ? ` --oauth-app ${shellQuote(oauthApp, shell)}` : ''}`;
+  }
   let password = $state('');
-  let persistedBaseURL = $state(settingString('carddav.base_url'));
-  let persistedUsername = $state(settingString('carddav.username'));
-  let persistedPasswordConfigured = $state(settingSecretConfigured('carddav.password'));
-  let enabled = $state(settingBoolean('carddav.enabled'));
-  let schedule = $state(settingString('carddav.schedule'));
-  let persistedEnabled = $state(settingBoolean('carddav.enabled'));
-  let persistedSchedule = $state(settingString('carddav.schedule'));
+  let persistedBaseURL = $state(initialValues.baseURL);
+  let persistedUsername = $state(initialValues.username);
+  let persistedPasswordConfigured = $state(initialValues.passwordConfigured);
+  let enabled = $state(initialValues.enabled);
+  let schedule = $state(initialValues.schedule);
+  let persistedEnabled = $state(initialValues.enabled);
+  let persistedSchedule = $state(initialValues.schedule);
+  const uid = $props.id();
   let activeAction = $state<Action | undefined>();
   let error = $state('');
   let status = $state('');
@@ -44,7 +62,7 @@
   let actionGeneration = 0;
   let disposed = false;
   $effect(() => {
-    const snapshot = settingsSnapshot(settings);
+    const snapshot = values;
     untrack(() => reconcileSettings(snapshot));
   });
   $effect(() => {
@@ -61,27 +79,11 @@
     requestController?.abort();
     requestController = undefined;
   });
-  function settingString(key: string, source: SettingState[] = settings): string {
-    const value = source.find((setting) => setting.key === key)?.value;
-    return value && 'string' in value ? value.string : '';
-  }
-  function settingBoolean(key: string, source: SettingState[] = settings): boolean {
-    const value = source.find((setting) => setting.key === key)?.value;
-    return Boolean(value && 'boolean' in value && value.boolean);
-  }
-  function settingSecretConfigured(key: string, source: SettingState[] = settings): boolean {
-    return source.find((setting) => setting.key === key)?.secret?.configured === true;
-  }
-  function settingsSnapshot(source: SettingState[]): AccountSettingsSnapshot {
-    return {
-      baseURL: settingString('carddav.base_url', source),
-      username: settingString('carddav.username', source),
-      passwordConfigured: settingSecretConfigured('carddav.password', source),
-      enabled: settingBoolean('carddav.enabled', source),
-      schedule: settingString('carddav.schedule', source),
-    };
-  }
-  function reconcileSettings(next: AccountSettingsSnapshot) {
+  function reconcileSettings(next: CardDAVAccountValues) {
+    if (provider === persistedProvider) provider = next.provider;
+    if (oauthApp === persistedOAuthApp) oauthApp = next.oauthApp;
+    persistedProvider = next.provider;
+    persistedOAuthApp = next.oauthApp;
     if (baseURL === persistedBaseURL) baseURL = next.baseURL;
     if (username === persistedUsername) username = next.username;
     if (enabled === persistedEnabled) enabled = next.enabled;
@@ -94,32 +96,55 @@
   }
   function requestBody(): CardDAVAccountRequest {
     const body: CardDAVAccountRequest = {
+      connection,
       base_url: baseURL,
       username,
       enabled,
       schedule,
     };
-    if (password !== '') body.password = password;
+    if (google) { body.provider = 'google'; body.oauth_app = oauthApp; body.base_url = googleURL; }
+    else if (microsoft) { body.provider = 'microsoft'; body.base_url = graphURL; }
+    else if (password !== '') body.password = password;
     return body;
   }
   function identityTuple(): string {
-    return `${baseURL}\u0000${username}`;
+    return `${provider}\u0000${oauthApp}\u0000${baseURL}\u0000${username}`;
   }
   function canReusePersistedPassword(): boolean {
-    return persistedPasswordConfigured && baseURL === persistedBaseURL && username === persistedUsername;
+    return provider === persistedProvider && oauthApp === persistedOAuthApp && persistedPasswordConfigured && baseURL === persistedBaseURL && username === persistedUsername;
   }
+  // Only a stored account can be switched off without its password; a blank
+  // form has nothing to disable.
   function canDisableWithoutPassword(): boolean {
-    return !enabled && baseURL === persistedBaseURL && username === persistedUsername;
+    return provider === persistedProvider && oauthApp === persistedOAuthApp && !enabled && persistedBaseURL !== '' && baseURL === persistedBaseURL && username === persistedUsername;
   }
   function passwordRequiredForSave(): boolean {
-    return !canReusePersistedPassword() && !canDisableWithoutPassword();
+    return !oauth && !canReusePersistedPassword() && !canDisableWithoutPassword();
   }
   function validatePassword(allowCredentialFreeDisable: boolean): boolean {
-    if (canReusePersistedPassword() || password !== '' || (allowCredentialFreeDisable && canDisableWithoutPassword()))
+    if (oauth || canReusePersistedPassword() || password !== '' || (allowCredentialFreeDisable && canDisableWithoutPassword()))
       return true;
     status = '';
     error = 'Password is required for a new or changed CardDAV account.';
     return false;
+  }
+  async function connectGoogle() {
+    if (activeAction !== undefined) return;
+    if (!username.trim()) { error = 'Enter your Google account email first.'; return; }
+    const controller = new AbortController();
+    requestController = controller;
+    const generation = ++actionGeneration;
+    activeAction = 'authorize';
+    error = '';
+    status = '';
+    try {
+      await authorizeGoogleContacts(client, username, oauthApp, controller.signal, connection);
+      if (current(generation)) status = 'Google Contacts authorized. Test and save the connection to use it.';
+    } catch (cause) {
+      if (current(generation)) error = cause instanceof Error ? cause.message : 'Google sign-in failed.';
+    } finally {
+      if (current(generation)) { activeAction = undefined; requestController = undefined; }
+    }
   }
   async function testConnection() {
     if (activeAction !== undefined || !validatePassword(false)) return;
@@ -170,6 +195,8 @@
       username = data.username;
       enabled = data.enabled;
       schedule = data.schedule ?? '';
+      persistedProvider = provider;
+      persistedOAuthApp = oauthApp;
       persistedBaseURL = data.base_url;
       persistedUsername = data.username;
       persistedPasswordConfigured = passwordConfigured;
@@ -205,17 +232,22 @@
   }
 </script>
 
-<SettingsSection
-  title="CardDAV account"
-  description={passwordRequiredForSave()
-    ? 'Connect an address-book account. A password is required for a new or changed account.'
-    : canReusePersistedPassword()
-      ? 'Connect an address-book account. Leave the password blank to keep the stored credential.'
-      : 'Disable an existing address-book account without re-entering its password.'}
->
+{#snippet terminalCommands()}
+  <p>POSIX shell</p>
+  <code class="authorization-command">{authorizationCommand('posix')}</code>
+  <p>Command Prompt</p>
+  <p>Start Command Prompt with <code>cmd /d /v:off</code>, then paste:</p>
+  <code class="authorization-command">{authorizationCommand('cmd')}</code>
+{/snippet}
+
+<SettingsSection title="CardDAV account" description="Address-book server this archive syncs contacts with.">
   {#if error}<p class="error" role="alert">{error}</p>{/if}
   {#if status}<p class="status" role="status">{status}</p>{/if}
 
+  <p class="posture">
+    <ZapIcon size={12} aria-hidden="true" />
+    Saving the account applies right away. No daemon restart is needed.
+  </p>
   <form
     onsubmit={(event) => {
       event.preventDefault();
@@ -223,34 +255,76 @@
     }}
   >
     <label>
-      Base URL
-      <TextInput type="url" bind:value={baseURL} disabled={activeAction !== undefined} required block />
+      Provider
+      <SelectDropdown title="CardDAV provider" value={provider} options={[{ value: '', label: 'Other CardDAV server' }, { value: 'google', label: 'Google Contacts' }, { value: 'microsoft', label: 'Microsoft 365 or Outlook.com' }]} onchange={selectProvider} disabled={activeAction !== undefined} />
     </label>
-    <label>
-      Username
-      <TextInput autocomplete="username" bind:value={username} disabled={activeAction !== undefined} required block />
-    </label>
-    <label>
-      Password
-      <TextInput
-        type="password"
-        autocomplete="current-password"
-        bind:value={password}
-        disabled={activeAction !== undefined}
-        required={passwordRequiredForSave()}
-        placeholder={canReusePersistedPassword()
-          ? 'Leave blank to keep current password'
-          : canDisableWithoutPassword()
-            ? 'Not required while disabled'
-            : ''}
-        block
-      />
-    </label>
-    <Toggle bind:checked={enabled} disabled={activeAction !== undefined} label="Enabled" />
-    <label>
-      Schedule
-      <TextInput bind:value={schedule} disabled={activeAction !== undefined} placeholder="0 2 * * *" block />
-    </label>
+    <div class="fields">
+      {#if !oauth}
+      <div class="field">
+        <label class="field__label" for={`${uid}-url`}>Base URL</label>
+        <TextInput id={`${uid}-url`} type="url" bind:value={baseURL} disabled={activeAction !== undefined} required block />
+      </div>
+      {/if}
+      <div class="field">
+        <label class="field__label" for={`${uid}-username`}>{google ? 'Google account email' : microsoft ? 'Microsoft account email' : 'Username'}</label>
+        <TextInput
+          id={`${uid}-username`}
+          autocomplete="username"
+          bind:value={username}
+          disabled={activeAction !== undefined}
+          required
+          block
+        />
+      </div>
+    {#if google}
+      <label>
+        OAuth app
+        <TextInput bind:value={oauthApp} disabled={activeAction !== undefined} placeholder="Default Google OAuth app" block />
+      </label>
+      <div class="actions">
+        <Button label={activeAction === 'authorize' ? 'Waiting for Google…' : 'Connect Google'} disabled={activeAction !== undefined} onclick={() => void connectGoogle()} />
+        {#if activeAction === 'authorize'}<Button label="Cancel sign-in" onclick={() => requestController?.abort()} />{/if}
+      </div>
+      <p>Register <code>{window.location.origin}/</code> as an authorized redirect URI in your Google OAuth app. Keep existing permissions checked when granting contacts access.</p>
+      <p>Your contacts account and OAuth app can differ from your mail accounts. A matching Google authorization is reused; otherwise, CardDAV stores separate credentials.</p>
+      <details><summary>Authorize from the terminal instead</summary>
+        {@render terminalCommands()}
+        <p>For a remote daemon, copy the authorized token to that host before testing. <a href="https://msgvault.io/docs/usage/people-carddav/#google-contacts" target="_blank" rel="noreferrer">Google Contacts setup</a></p>
+      </details>
+    {:else if microsoft}
+      <p>Sign in from the terminal before you save.</p>
+      {@render terminalCommands()}
+      <p>Your Microsoft app registration needs the delegated <code>Contacts.ReadWrite</code> permission. <a href="https://msgvault.io/docs/usage/people-carddav/#microsoft-contacts" target="_blank" rel="noreferrer">Microsoft contacts setup</a></p>
+    {:else}
+      <div class="field">
+        <label class="field__label" for={`${uid}-password`}>Password</label>
+        <TextInput
+          id={`${uid}-password`}
+          type="password"
+          autocomplete="current-password"
+          bind:value={password}
+          disabled={activeAction !== undefined}
+          required={passwordRequiredForSave()}
+          ariaDescribedby={`${uid}-password-hint`}
+          block
+        />
+        <span class="field__hint" id={`${uid}-password-hint`}>
+          {passwordRequiredForSave()
+            ? 'Required for a new or changed account.'
+            : canReusePersistedPassword()
+              ? 'Leave blank to keep the stored password.'
+              : 'Not needed to disable the account.'}
+        </span>
+      </div>
+      {/if}
+    </div>
+    <div class="field">
+      <div class="field__head">
+        <span class="field__label">Automatic sync</span>
+        <Toggle bind:checked={enabled} disabled={activeAction !== undefined} label="Enabled" />
+      </div>
+      <CronField label="Schedule" bind:value={schedule} disabled={activeAction !== undefined} />
+    </div>
 
     <div class="actions">
       <Button
@@ -261,7 +335,7 @@
       <Button
         type="submit"
         disabled={activeAction !== undefined}
-        tone="success"
+        tone="info"
         surface="solid"
         label={activeAction === 'save' ? 'Saving…' : 'Save CardDAV account'}
       />
@@ -270,16 +344,51 @@
 </SettingsSection>
 
 <style>
+  .authorization-command { overflow-wrap: anywhere; user-select: all; }
+  p { margin: 0; color: var(--text-secondary); }
   form {
     display: grid;
     gap: var(--space-5);
   }
-  label {
+  .posture {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 var(--space-5);
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+  .posture :global(svg) {
+    flex-shrink: 0;
+    color: var(--accent-green);
+  }
+  .fields {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .fields,
+  .field {
+    max-width: 26rem;
+  }
+  .field {
     display: grid;
     gap: var(--space-2);
+  }
+  .field__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+  .field__label {
     color: var(--text-secondary);
     font-size: var(--font-size-sm);
     font-weight: 500;
+  }
+  .field__hint {
+    color: var(--text-muted);
+    font-size: var(--font-size-2xs);
+    line-height: 1.4;
   }
   .actions {
     display: flex;

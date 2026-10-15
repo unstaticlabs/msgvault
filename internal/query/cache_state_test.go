@@ -153,7 +153,32 @@ func TestInspectCacheReadiness(t *testing.T) {
 }
 
 func TestCacheSchemaVersionIncludesProviderMailboxStateAndEmailWorkFacts(t *testing.T) {
-	assert.Equal(t, 29, CacheSchemaVersion)
+	assert.Equal(t, 32, CacheSchemaVersion)
+}
+
+func TestInspectCacheMarkerReadinessSkipsDatasetFingerprint(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	dir := completeReadinessCache(t)
+	original := inspectDatasetFingerprint
+	inspectDatasetFingerprint = func(string) (string, error) {
+		requirements.FailNow("serving marker inspection walked the dataset")
+		return "", nil
+	}
+	t.Cleanup(func() { inspectDatasetFingerprint = original })
+
+	readiness, err := InspectCacheMarkerReadiness(dir)
+	requirements.NoError(err)
+	assertions.Equal(CacheReady, readiness)
+
+	requirements.NoError(os.Remove(CacheStatePath(dir)))
+	readiness, err = InspectCacheMarkerReadiness(dir)
+	requirements.NoError(err)
+	assertions.Equal(CacheInterrupted, readiness)
+}
+
+func TestCacheSchemaVersionIncludesRelationshipContributions(t *testing.T) {
+	assert.Equal(t, 32, CacheSchemaVersion)
 }
 
 func TestInspectCacheReadinessNamesStaleSchemaAndDrift(t *testing.T) {
@@ -214,6 +239,9 @@ func TestCacheRevisionUsesOnlyCommittedStateWatermarks(t *testing.T) {
 	assert.NotEqual(revision, changed.Revision())
 	changed = state
 	changed.LastFailedSyncRunIDSum++
+	assert.NotEqual(revision, changed.Revision())
+	changed = state
+	changed.LastRelatedChangeSeq++
 	assert.NotEqual(revision, changed.Revision())
 	changed = state
 	changed.IdentityRevision++

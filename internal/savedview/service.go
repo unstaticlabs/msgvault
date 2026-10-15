@@ -1,19 +1,19 @@
-// Package savedview defines the Saved View service contract shared by MCP and
-// the daemon client, plus the version-1 executable-state vocabulary that the
-// Web UI, the daemon client, and the MCP input schema all agree on.
+// Package savedview defines the Saved View service contract MCP consumes and
+// the daemon client implements. The version-1 vocabulary itself belongs to
+// the store, which validates every definition against it before persisting.
 package savedview
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
 )
 
-// Reader exposes durable Saved View definitions and executes them through the
-// archive's canonical Explore machinery.
+// Reader exposes durable Saved View definitions and runs them through the
+// daemon's canonical Explore execution.
 type Reader interface {
 	ListSavedViews(ctx context.Context) ([]store.SavedView, error)
 	GetSavedView(ctx context.Context, id int64) (*store.SavedView, error)
@@ -55,51 +55,33 @@ const (
 // RunPage is one typed page from the Explore surface selected by a Saved
 // View's grouping and presentation definition.
 type RunPage struct {
-	View                   store.SavedView         `json:"view"`
-	ResultKind             ResultKind              `json:"result_kind"`
-	Rows                   []query.EntryRow        `json:"rows,omitempty"`
-	Groups                 []query.ExploreGroupRow `json:"groups,omitempty"`
-	Files                  []query.ExploreFileFact `json:"files,omitempty"`
-	TotalCount             *int64                  `json:"total_count,omitempty"`
-	Returned               int                     `json:"returned"`
-	HasMore                bool                    `json:"has_more"`
-	NextCursor             string                  `json:"next_cursor,omitempty"`
-	CacheRevision          string                  `json:"cache_revision"`
-	SearchProvenance       query.SearchProvenance  `json:"search_provenance"`
-	CandidateSnapshotID    string                  `json:"candidate_snapshot_id,omitempty"`
-	CandidatePoolSaturated bool                    `json:"candidate_pool_saturated,omitempty"`
-	SearchDeletionScope    string                  `json:"search_deletion_scope,omitempty"`
+	View                   store.SavedView
+	ResultKind             ResultKind
+	Rows                   []query.EntryRow
+	Groups                 []query.ExploreGroupRow
+	Files                  []query.ExploreFileFact
+	TotalCount             *int64
+	NextCursor             string
+	CacheRevision          string
+	SearchProvenance       query.SearchProvenance
+	CandidateSnapshotID    string
+	CandidatePoolSaturated bool
+	SearchDeletionScope    string
 }
 
-// Version-1 executable vocabulary. The Web UI's Saved Views workspace applies
-// the same rules before opening a view, so a definition the Web UI can open is
-// one the daemon client can execute, and vice versa.
-var (
-	FilterFields    = store.SavedViewFilterFields
-	FilterAliases   = store.SavedViewFilterAliases
-	FilterOperators = store.SavedViewFilterOperators
-	SearchModes     = store.SavedViewSearchModes
-	Presentations   = store.SavedViewPresentations
-	SortFields      = store.SavedViewSortFields
-	SortDirections  = store.SavedViewSortDirections
-	Columns         = store.SavedViewColumns
-)
-
-// DefaultSearchMode applies when a definition carries a query without a mode.
-const DefaultSearchMode = "full_text"
-
-// FilterDimension maps a v1 filter field, including legacy aliases, onto the
-// Explore dimension it executes against.
-func FilterDimension(field string) string {
-	if dimension, ok := FilterAliases[field]; ok {
-		return dimension
-	}
-	return field
+// Returned reports how many typed results the page carries.
+func (p *RunPage) Returned() int {
+	return len(p.Rows) + len(p.Groups) + len(p.Files)
 }
 
 // ExecutableState decodes a Saved View's canonical state and checks it against
-// the v1 executable contract. Errors wrap store.ErrSavedViewUnsupportedSchemaVersion
-// or store.ErrSavedViewInvalidState so callers can map them uniformly.
+// the store's version-1 vocabulary, so a row written by an older binary cannot
+// reach Explore with a definition the daemon would not accept today. The raw
+// JSON is checked before decoding because a typed decoder drops unknown
+// fields and explicit nulls: a stale {"selection":[1]} would otherwise decode
+// to an empty definition and run an unfiltered query. Errors wrap
+// store.ErrSavedViewUnsupportedSchemaVersion or store.ErrSavedViewInvalidState
+// so callers can map them uniformly.
 func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error) {
 	if view.SchemaVersion != store.CurrentSavedViewSchemaVersion {
 		return store.SavedViewStateEnvelope{}, fmt.Errorf(
@@ -107,23 +89,24 @@ func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error)
 			store.ErrSavedViewUnsupportedSchemaVersion, view.ID, view.SchemaVersion,
 		)
 	}
+	if err := store.ValidateSavedViewStateJSON(view.CanonicalState); err != nil {
+		return store.SavedViewStateEnvelope{}, fmt.Errorf("saved view %d: %w", view.ID, err)
+	}
 	var state store.SavedViewStateEnvelope
 	if err := json.Unmarshal(view.CanonicalState, &state); err != nil {
 		return store.SavedViewStateEnvelope{}, fmt.Errorf(
 			"%w: decode Saved View %d: %w", store.ErrSavedViewInvalidState, view.ID, err,
 		)
 	}
-	if err := validateExecutable(state); err != nil {
-		return store.SavedViewStateEnvelope{}, fmt.Errorf(
-			"%w: Saved View %d: %w", store.ErrSavedViewInvalidState, view.ID, err,
-		)
+	if err := store.ValidateSavedViewState(state); err != nil {
+		return store.SavedViewStateEnvelope{}, fmt.Errorf("saved view %d: %w", view.ID, err)
 	}
 	return state, nil
 }
 
-func validateExecutable(state store.SavedViewStateEnvelope) error {
-	return store.ValidateSavedViewState(state)
-}
+const DefaultSearchMode = "full_text"
+
+func FilterDimension(field string) string { return store.SavedViewFilterDimension(field) }
 
 // EmailWorkReader keeps a work-item read on the exact Saved View and archive
 // revisions that produced its row, rather than silently broadening account scope.

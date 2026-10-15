@@ -728,7 +728,7 @@ func (m Model) buildDetailLines() []string {
 
 	// Labels
 	if len(msg.Labels) > 0 {
-		lines = append(lines, "Labels: "+strings.Join(msg.Labels, ", "))
+		lines = append(lines, "Labels: "+textutil.SanitizeTerminal(strings.Join(msg.Labels, ", ")))
 	}
 
 	// Attachments
@@ -1097,6 +1097,11 @@ func (m Model) footerView() string {
 			"↑/↓ scroll",
 			"/ find",
 		}
+		if m.savingMessage {
+			keys = append(keys, "saving .eml")
+		} else {
+			keys = append(keys, "s save .eml")
+		}
 		if m.detailSearchQuery != "" {
 			keys = append(keys, "n/N next/prev")
 		}
@@ -1224,6 +1229,7 @@ var rawHelpLines = []string{
 	"  A           Select account",
 	"  f           Filter (attachments, deleted)",
 	"  e           Browse attachments (in message view)",
+	"  s           Save email to current directory (in message view)",
 	"  m           Cycle Email/Texts/Meetings/People",
 	"  ,           Open Settings",
 	"  q           Quit",
@@ -1294,6 +1300,8 @@ func (m Model) activeHelpLines() []string {
 					addition := []string{
 						"  [           Previous relationship year",
 						"  ]           Next relationship year",
+						"  b           Brief structured view (Esc returns)",
+						"  :           Brief commands: enroll, generate, reject",
 					}
 					lines = append(lines[:i], append(addition, lines[i:]...)...)
 					break

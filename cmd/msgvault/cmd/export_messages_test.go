@@ -3,10 +3,16 @@ package cmd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,7 +38,7 @@ func TestExportMessagesCommandWritesContractOrderAndCounts(t *testing.T) {
 	)
 
 	cmd := newExportMessagesLocalCmd(exportMessagesDeps{
-		openStore: func() (*store.Store, func(), error) {
+		openStore: func(context.Context) (*store.Store, func(), error) {
 			return st, func() {}, nil
 		},
 	})
@@ -92,7 +98,7 @@ func TestExportMessagesCommandNormalizesFilters(t *testing.T) {
 	require.NoError(err)
 
 	cmd := newExportMessagesLocalCmd(exportMessagesDeps{
-		openStore: func() (*store.Store, func(), error) {
+		openStore: func(context.Context) (*store.Store, func(), error) {
 			return st, func() {}, nil
 		},
 	})
@@ -173,7 +179,7 @@ func TestExportMessagesCommandRejectsPreflightErrorsWithoutOutput(t *testing.T) 
 			require := require.New(t)
 			st := testutil.NewTestStore(t)
 			cmd := newExportMessagesLocalCmd(exportMessagesDeps{
-				openStore: func() (*store.Store, func(), error) {
+				openStore: func(context.Context) (*store.Store, func(), error) {
 					return st, func() {}, nil
 				},
 			})
@@ -215,7 +221,7 @@ func TestExportMessagesCommandOmitsCompletionAfterStreamFailure(t *testing.T) {
 	)
 
 	cmd := newExportMessagesLocalCmd(exportMessagesDeps{
-		openStore: func() (*store.Store, func(), error) {
+		openStore: func(context.Context) (*store.Store, func(), error) {
 			return st, func() {}, nil
 		},
 	})
@@ -248,10 +254,12 @@ func TestExportMessagesCommandRoutesThroughDaemon(t *testing.T) {
 		"{\"type\":\"stdout\",\"data\":\"{\\\"record_type\\\":\\\"complete\\\"}\\n\"}\n"+
 			"{\"type\":\"complete\"}\n",
 	)
-	configureRemoteDaemonForTest(t, server.URL)
+	testCtx := configureRemoteDaemonForTest(t, server.URL)
+	_ = testCtx
 	t.Setenv(daemonCLISubprocessEnv, "")
 
 	cmd := newExportMessagesCmd(exportMessagesDeps{})
+	cmd.SetContext(testCtx)
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(io.Discard)
@@ -369,7 +377,7 @@ func TestExportMessagesCommandPersonScopeUsesBoundParticipants(t *testing.T) {
 		t.Run(selector, func(t *testing.T) {
 			assertions := assert.New(t)
 			requirements := require.New(t)
-			cmd := newExportMessagesLocalCmd(exportMessagesDeps{openStore: func() (*store.Store, func(), error) { return st, func() {}, nil }})
+			cmd := newExportMessagesLocalCmd(exportMessagesDeps{openStore: func(context.Context) (*store.Store, func(), error) { return st, func() {}, nil }})
 			var output bytes.Buffer
 			cmd.SetOut(&output)
 			cmd.SetErr(io.Discard)
@@ -390,6 +398,58 @@ func TestExportMessagesCommandPersonScopeUsesBoundParticipants(t *testing.T) {
 			requirements.True(ok)
 			assertions.InDelta(float64(person.ID), filters["person_id"], 0)
 			t.Logf("bound=%v linked sibling=%d exported message=%v", live.ParticipantIDs, bob, rows[3]["id"])
+		})
+	}
+}
+
+func TestExportMessagesRequiredBoundsBeforeDaemonAccess(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		missing string
+	}{
+		{"none", nil, `required flag(s) "end", "start" not set`},
+		{"start only", []string{"--start", "2026-09-01T00:00:00Z"}, `required flag(s) "end" not set`},
+		{"end only", []string{"--end", "2026-10-01T00:00:00Z"}, `required flag(s) "start" not set`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			t.Cleanup(server.Close)
+			home := t.TempDir()
+			configPath := filepath.Join(home, "config.toml")
+			require.NoError(os.WriteFile(configPath, []byte("[remote]\nurl = \""+server.URL+"\"\nallow_insecure = true\n"), 0o600))
+			root := newRootCommand()
+			root.AddCommand(newExportMessagesCmd(defaultExportMessagesDeps()))
+			var output bytes.Buffer
+			root.SetOut(&output)
+			root.SetErr(&output)
+			args := append([]string{"--home", home, "--config", configPath, "export-messages"}, test.args...)
+			root.SetArgs(args)
+			require.ErrorContains(executeRootContext(t.Context(), root), test.missing)
+			assert.Contains(output.String(), "Usage:")
+			assert.NotContains(output.String(), "Starting local msgvault daemon")
+			assert.Zero(requests.Load(), "missing bounds must not contact the daemon")
+			for _, name := range []string{"daemon.json", "msgvault.db", "serve.log"} {
+				_, err := os.Stat(filepath.Join(home, name))
+				require.ErrorIs(err, os.ErrNotExist)
+			}
+			opened := false
+			local := newExportMessagesLocalCmd(exportMessagesDeps{openStore: func(context.Context) (*store.Store, func(), error) {
+				opened = true
+				return nil, nil, errors.New("unexpected store access")
+			}})
+			local.SetOut(io.Discard)
+			local.SetErr(io.Discard)
+			local.SetArgs(append([]string{}, test.args...))
+			require.ErrorContains(local.Execute(), test.missing)
+			assert.False(opened)
 		})
 	}
 }

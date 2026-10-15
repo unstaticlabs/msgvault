@@ -524,6 +524,8 @@ source_since = "2025-01-01"
 answer = 42
 `
 	requirements.NoError(os.WriteFile(path, []byte(before), 0o640))
+	// Set the mode being preserved explicitly; creation honors the caller's umask.
+	requirements.NoError(os.Chmod(path, 0o640))
 	snapshot, err := ReadConfigFile(path)
 	requirements.NoError(err)
 
@@ -1999,6 +2001,23 @@ func TestEditConfigRejectsInvalidSlackSchedule(t *testing.T) {
 	assert.Equal(before, string(got))
 }
 
+func TestEditConfigRejectsInvalidMatrixSchedule(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before := "[matrix]\nenabled = true\nschedule = \"0 * * * *\"\n"
+	require.NoError(os.WriteFile(path, []byte(before), 0o600))
+	snapshot, err := ReadConfigFile(path)
+	require.NoError(err)
+
+	_, err = EditConfigFile(path, snapshot.ETag, []Edit{{Key: "matrix.schedule", Value: "not a cron"}})
+	require.ErrorIs(err, ErrInvalidConfigCandidate)
+	assert.Contains(err.Error(), "invalid matrix.schedule")
+	got, readErr := os.ReadFile(path)
+	require.NoError(readErr)
+	assert.Equal(before, string(got))
+}
+
 func TestEditConfigRejectsInvalidNotionMeetingsSchedule(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -2019,6 +2038,66 @@ func TestEditConfigRejectsInvalidNotionMeetingsSchedule(t *testing.T) {
 	got, readErr := os.ReadFile(path)
 	require.NoError(readErr)
 	assert.Equal(before, string(got))
+}
+
+func TestEditAllowsAutoMintForSecureNonLoopbackWithoutMintingKey(t *testing.T) { //nolint:paralleltest // process environment
+	require := require.New(t)
+	unsetServerKeyEnvironmentForTest(t)
+	t.Setenv("MSGVAULT_BIND_ADDR", "0.0.0.0")
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(os.WriteFile(path, []byte("[web]\ntheme = \"system\"\n"), 0o600))
+	cfg, err := Load(path, "")
+	require.NoError(err)
+	keyPath := cfg.ServerKeyFilePath()
+	snapshot, err := ReadConfigFile(path)
+	require.NoError(err)
+
+	_, err = EditConfigFile(path, snapshot.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
+	require.NoError(err, "config editing must allow the daemon's startup key mint policy")
+	_, err = os.Stat(keyPath)
+	require.ErrorIs(err, os.ErrNotExist, "editing config must not mint a server key")
+	contents, err := os.ReadFile(path)
+	require.NoError(err)
+	assert.Contains(t, string(contents), `theme = "dark"`)
+}
+
+func TestEditDoesNotRequireLiveServerResources(t *testing.T) { //nolint:paralleltest // process environment
+	t.Setenv("MSGVAULT_TEST_UNAVAILABLE_KEY", "")
+	t.Setenv("MSGVAULT_API_PORT", "invalid-runtime-port")
+	for _, server := range []string{
+		"bind_addr = 'iface:msgvault-nonexistent-test-interface'",
+		"api_key_env = 'MSGVAULT_TEST_UNAVAILABLE_KEY'",
+		"api_key_file = 'missing-key'",
+	} {
+		t.Run(server, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(os.WriteFile(path, []byte("[server]\n"+server+"\n[web]\ntheme = 'system'\n"), 0o600))
+			before, err := ReadConfigFile(path)
+			require.NoError(err)
+			after, err := EditConfigFile(path, before.ETag, []Edit{{Key: "web.theme", Value: "dark"}})
+			require.NoError(err)
+			cfg, err := LoadConfigFile(after, "")
+			require.NoError(err)
+			assert.Equal("dark", cfg.Web.Theme)
+			_, err = cfg.ResolveServerBindAddress()
+			if err == nil {
+				err = cfg.PrepareServerKey()
+			}
+			assert.Error(err, "startup must still reject unavailable resources")
+		})
+	}
+}
+
+func unsetServerKeyEnvironmentForTest(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"MSGVAULT_API_KEY", "MSGVAULT_API_KEY_FILE", "MSGVAULT_API_KEY_ENV"} {
+		envName := name
+		original, _ := os.LookupEnv(envName)
+		t.Setenv(envName, original)
+		require.NoError(t, os.Unsetenv(envName))
+	}
 }
 
 func TestEditConfigPreservesModeAndExistingSymlink(t *testing.T) {
@@ -2121,4 +2200,47 @@ func TestLoadConfigFileUsesLogicalSymlinkPathForRelativeDefaults(t *testing.T) {
 	require.NoError(err)
 	assert.Equal(fromDaemon.HomeDir, fromSnapshot.HomeDir)
 	assert.Equal(logicalDir, fromSnapshot.HomeDir)
+}
+
+func TestEditConfigRejectsInvalidMuesliSchedule(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	before := "[[muesli]]\n" +
+		"identifier = \"mac\"\n" +
+		"account_email = \"you@example.com\"\n" +
+		"schedule = \"*/30 * * * *\"\n" +
+		"enabled = true\n"
+	require.NoError(os.WriteFile(path, []byte(before), 0o600))
+	snapshot, err := ReadConfigFile(path)
+	require.NoError(err)
+
+	_, err = EditConfigFile(path, snapshot.ETag, []Edit{{Key: "muesli.schedule", Value: "not a cron"}})
+	require.ErrorIs(err, ErrInvalidConfigCandidate)
+	assert.Contains(err.Error(), "invalid muesli[0].schedule")
+	got, readErr := os.ReadFile(path)
+	require.NoError(readErr)
+	assert.Equal(before, string(got))
+}
+
+func TestEditConfigRejectsInvalidPlaudSchedule(t *testing.T) {
+	for kind, before := range map[string]string{
+		"plaud":  "[[plaud]]\nidentifier = \"work\"\naccount_email = \"owner@example.com\"\nschedule = \"15 */6 * * *\"\nenabled = true\n",
+		"twilio": "[[twilio]]\naccount_email='user@example.com'\naccount_sid='AC00000000000000000000000000000001'\nauth_token='synthetic'\nschedule='15 */6 * * *'\n",
+	} {
+		t.Run(kind, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(os.WriteFile(path, []byte(before), 0600))
+			snapshot, err := ReadConfigFile(path)
+			require.NoError(err)
+			_, err = EditConfigFile(path, snapshot.ETag, []Edit{{Key: kind + ".schedule", Value: "not a cron"}})
+			require.ErrorIs(err, ErrInvalidConfigCandidate)
+			assert.Contains(err.Error(), "invalid "+kind+"[0].schedule")
+			got, err := os.ReadFile(path)
+			require.NoError(err)
+			assert.Equal(before, string(got))
+		})
+	}
 }

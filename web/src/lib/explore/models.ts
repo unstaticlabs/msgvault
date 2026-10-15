@@ -36,12 +36,13 @@ import type {
   SourceIdentitiesResponse as GeneratedSourceIdentitiesResponse,
   SourceIdentityResponse as GeneratedSourceIdentityResponse,
 } from '../api/generated/models';
-import { ExploreFilterDimension } from '../api/generated/models';
+import { ExploreFilterDimension as GeneratedExploreFilterDimensionValues } from '../api/generated/models';
 import type { SettingsNavigationAuthority } from '../carddav/navigation';
 
 export type EntryRow = GeneratedEntryRow;
 export type ExploreCacheUnavailable = GeneratedExploreCacheUnavailableResponse;
 export type ExploreFilter = GeneratedExploreFilter;
+export type ExploreFilterDimension = ExploreFilter['dimension'];
 export type ExploreFileFact = GeneratedExploreFileFact;
 export type ExploreFilesResponse = GeneratedExploreFilesHTTPResponse;
 export type FileMetadata = GeneratedFileMetadataResponse;
@@ -170,6 +171,7 @@ export interface ExploreURLState {
   operationRunID: string | null;
   operationStatus: '' | OperationStatusAuthority;
   settingsAuthority: '' | SettingsNavigationAuthority;
+  settingsCategory: string;
   columns: ExploreColumn[];
   columnWidths: Partial<Record<ExploreColumn, number>>;
   activeRow: string | null;
@@ -212,7 +214,7 @@ export function isEmailMessageType(messageType: string): boolean {
  * server contract or from each other.
  */
 export const FILTER_DIMENSIONS: ReadonlySet<ExploreFilterDimension> = new Set(
-  Object.values(ExploreFilterDimension)
+  Object.values(GeneratedExploreFilterDimensionValues)
 );
 
 export function isFilterDimension(value: string): value is ExploreFilterDimension {
@@ -264,6 +266,7 @@ export interface ExploreFilesResult {
   cacheRevision: string;
   searchProvenance: SearchProvenance;
   candidateSnapshotId?: string;
+  searchDeletionScope?: string;
   nextCursor?: string;
 }
 

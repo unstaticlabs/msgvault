@@ -68,6 +68,14 @@ func TestGeneratedEmploymentSourceConstantsRemainAssignable(t *testing.T) {
 	assert.Equal(t, generated.EmploymentBodySource("user"), source)
 }
 
+func TestGeneratedCalendarEnumsRetainExistingExportedConstants(t *testing.T) {
+	assertions := assert.New(t)
+	assertions.Equal(generated.Single, generated.CreateAttributeDefinitionRequestCardinality("single"))
+	assertions.Equal(generated.None, generated.SecretSettingStateSource("none"))
+	assertions.Equal(generated.Accepted, generated.ListPersonRelationshipReviewsQueryStatus("accepted"))
+	assertions.Equal(generated.CalendarRequestScopeSingle, generated.CalendarRequestScope("single"))
+}
+
 func generatedSettingGroupForCompatibility(group generated.SettingGroup0) generated.SettingGroup0 {
 	return group
 }
@@ -573,8 +581,12 @@ func TestGeneratedEnumNamesPreserveSavedViewCompatibilityAndQualifyExploration(t
 	assertions := assert.New(t)
 	assertions.Equal(generated.Pending, generated.ListPersonRelationshipReviewsQueryStatus("pending"))
 	assertions.Equal(generated.ImportJobResponseStatusPending, generated.ImportJobResponseStatus("pending"))
-	assertions.Equal(generated.Asc, generated.SavedViewSortDirection("asc"))
 	assertions.Equal(generated.Desc, generated.SavedViewSortDirection("desc"))
+	require.Error(t, generated.SavedViewSortDirection("asc").Validate(),
+		"Saved Views publish only the executable entry sort")
+	assertions.Equal(generated.SavedViewSortFieldOccurredAt, generated.SavedViewSortField("occurred_at"))
+	assertions.Equal(generated.SavedViewFilterFieldSourceID, generated.SavedViewFilterField("source_id"))
+	assertions.Equal(generated.SavedViewFilterOperatorIn, generated.SavedViewFilterOperator("in"))
 	assertions.Equal(generated.IdentitySearchSortDirectionAsc, generated.IdentitySearchSortDirection("asc"))
 	assertions.Equal(generated.IdentitySearchSortDirectionDesc, generated.IdentitySearchSortDirection("desc"))
 	assertions.Equal(generated.Files, generated.SavedViewStateEnvelopePresentation("files"))
@@ -607,6 +619,24 @@ func TestGeneratedExploreGroupingValidatesExactlyOneDimension(t *testing.T) {
 	requirements.Error((generated.FileGroupsHTTPRequest{Grouping: []generated.ExploreGroupDimension{
 		generated.ExploreGroupDimensionSource, generated.ExploreGroupDimensionMonth,
 	}}).Validate(), "multiple file grouping dimensions")
+}
+
+func TestGeneratedMessageRecordingsAcceptUnnamedAudio(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	var response generated.MessageRecordingsResponse
+	requirements.NoError(json.Unmarshal([]byte(
+		`{"message_id":9,"recordings":[{"attachment_id":1,"filename":"","size_bytes":44,"state":"media_missing"}]}`,
+	), &response))
+	requirements.Len(response.Recordings, 1)
+	requirements.NotNil(response.Recordings[0].Filename)
+	assertions.Empty(*response.Recordings[0].Filename)
+	requirements.NoError(response.Validate(), "audio without a filename is a legitimate recording")
+
+	missing := response
+	missing.Recordings = []generated.MessageRecording{response.Recordings[0]}
+	missing.Recordings[0].Filename = nil
+	requirements.Error(missing.Validate(), "missing required filename")
 }
 
 func TestGeneratedFileMetadataRequiresPresenceButAcceptsEmptyLegacyStrings(t *testing.T) {
@@ -1155,6 +1185,58 @@ func TestRunQueryDecodesScalarCells(t *testing.T) {
 	assert.InDelta(1.0, numberCell, 0, "number cell")
 	assert.Equal("x", got.Rows[0][1], "string cell")
 	assert.Equal(true, got.Rows[0][2], "bool cell")
+
+	outcome, err := c.RunQueryWithAccepted(t.Context(), &generated.RunQueryRequestOptions{
+		Body: &generated.RunQueryBody{SQL: "SELECT 1"},
+	})
+	require.NoError(err, "RunQueryWithAccepted")
+	require.NotNil(outcome)
+	assert.Nil(outcome.Accepted)
+	require.NotNil(outcome.Result)
+	assert.Equal([]string{"n", "s", "b"}, outcome.Result.Columns)
+	assert.Equal(int64(1), outcome.Result.RowCount)
+}
+
+func TestRunQueryWithAcceptedReturnsCacheBuildJob(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assertions.Equal(http.MethodPost, r.Method)
+		assertions.Equal("/api/v1/query", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, err := w.Write([]byte(`{"status":"queued","job_id":"job-123"}`))
+		assertions.NoError(err)
+	}))
+	t.Cleanup(server.Close)
+
+	c, err := New(server.URL)
+	requirements.NoError(err)
+	outcome, err := c.RunQueryWithAccepted(t.Context(), &generated.RunQueryRequestOptions{
+		Body: &generated.RunQueryBody{SQL: "SELECT count(*) FROM messages"},
+	})
+	requirements.NoError(err)
+	requirements.NotNil(outcome)
+	assertions.Nil(outcome.Result)
+	requirements.NotNil(outcome.Accepted)
+	assertions.Equal("queued", outcome.Accepted.Status)
+	assertions.Equal("job-123", outcome.Accepted.JobID)
+}
+
+func TestRunQueryWithAcceptedRejectsMissingJob(t *testing.T) {
+	requirements := require.New(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	t.Cleanup(server.Close)
+	c, err := New(server.URL)
+	requirements.NoError(err)
+	outcome, err := c.RunQueryWithAccepted(t.Context(), &generated.RunQueryRequestOptions{
+		Body: &generated.RunQueryBody{SQL: "SELECT 1"},
+	})
+	requirements.ErrorContains(err, "job_id")
+	requirements.Nil(outcome)
 }
 
 func TestGetMessageRendersLargeIDInPath(t *testing.T) {
@@ -1330,4 +1412,69 @@ func TestStageDeletionAcceptsDryRunOK(t *testing.T) {
 	assert.True(got.DryRun, "dry_run")
 	assert.Equal(int64(3), got.MessageCount, "message_count")
 	assert.Len(got.SampleGmailIds, 3, "sample ids")
+}
+
+func TestCaptureTelemetryEventSendsPropertyValues(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"queued"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	c, err := New(server.URL)
+	require.NoError(err, "New")
+	_, err = c.CaptureTelemetryEvent(context.Background(), &generated.CaptureTelemetryEventRequestOptions{
+		Body: &generated.CaptureTelemetryEventBody{
+			Event:      "app_opened",
+			Properties: map[string]any{"surface": "web"},
+		},
+	})
+	require.NoError(err, "CaptureTelemetryEvent")
+	assert.Equal(t, map[string]any{"event": "app_opened", "properties": map[string]any{"surface": "web"}}, got)
+}
+
+func TestImportMuesliSuccessStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		code  int
+		body  string
+		valid bool
+	}{
+		{"registration", 200, `{"status":"registered","source_id":3,"changed":false}`, true},
+		{"unchanged", 200, `{"status":"unchanged","source_id":3,"message_id":42,"changed":false}`, true},
+		{"updated", 200, `{"status":"updated","source_id":3,"message_id":42,"changed":true}`, true},
+		{"created", 201, `{"status":"created","source_id":3,"message_id":42,"changed":true}`, true},
+		{"empty", 200, ``, false},
+		{"unauthorized", 401, `{"error":"unauthorized"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(http.MethodPost, r.Method)
+				assert.Equal("/api/v1/import/muesli", r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.code)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+			c, err := New(server.URL)
+			require.NoError(err)
+			got, err := c.ImportMuesli(t.Context(), &generated.ImportMuesliRequestOptions{Body: &generated.ImportMuesliBody{}})
+			if !tc.valid {
+				require.Error(err)
+				return
+			}
+			require.NoError(err)
+			assert.Equal(int64(3), got.SourceID)
+		})
+	}
 }

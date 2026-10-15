@@ -1,7 +1,8 @@
 package cmd
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"strconv"
@@ -16,19 +17,16 @@ var listAccountsJSON bool
 
 var listAccountsCmd = &cobra.Command{
 	Use:   "list-accounts",
-	Short: "List synced accounts",
-	Long: `List all accounts that have been added to msgvault, across email,
-chat, and meeting sources.
+	Short: "List archive accounts with type, message count, last sync",
+	Long: `List every account in the archive: email, chat, meeting, and file-import
+sources. JSON rows have id, email, type (gmail, imap, mbox, slack, ...),
+display_name, and last_sync. message_count and source_deleted_count are
+included when ready; counts_pending: true replaces them while refreshing.
 
-Uses configured remote server or the local daemon by default.
-Use --local to use the local daemon even when a remote is configured.
-
-Shows the account identifier, source type, message count, and last sync time.
-
-Examples:
-	msgvault list-accounts
-	msgvault list-accounts --json`,
-	Args: cobra.NoArgs,
+Pass email to --account or id to --source-id on other commands;
+export-messages takes --source <type>:<email>.`,
+	Example: `  msgvault list-accounts --json`,
+	Args:    cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return listHTTPAccounts(cmd)
 	},
@@ -41,11 +39,11 @@ func listHTTPAccounts(cmd *cobra.Command) error {
 	}
 	defer func() { _ = s.Close() }()
 
-	accounts, err := s.GetCLIAccounts(cmd.Context())
+	accounts, countsPending, err := s.GetCLIAccounts(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("list accounts: %w", err)
 	}
-	return outputAccountStats(daemonAccountsToStats(accounts))
+	return outputAccountStats(daemonAccountsToStats(accounts, countsPending))
 }
 
 func outputAccountStats(stats []accountStats) error {
@@ -62,7 +60,7 @@ func outputAccountStats(stats []accountStats) error {
 	return nil
 }
 
-func daemonAccountsToStats(accounts []daemonclient.CLIAccount) []accountStats {
+func daemonAccountsToStats(accounts []daemonclient.CLIAccount, countsPending bool) []accountStats {
 	stats := make([]accountStats, len(accounts))
 	for i, account := range accounts {
 		stats[i] = accountStats{
@@ -71,6 +69,7 @@ func daemonAccountsToStats(accounts []daemonclient.CLIAccount) []accountStats {
 			Type:               account.Type,
 			DisplayName:        account.DisplayName,
 			MessageCount:       account.MessageCount,
+			CountsPending:      countsPending,
 			SourceDeletedCount: account.SourceDeletedCount,
 			LastSync:           account.LastSync,
 		}
@@ -102,6 +101,9 @@ func outputAccountsTable(stats []accountStats) {
 // deleted count so the primary column keeps its active-only meaning while
 // still surfacing the retained-but-source-deleted population.
 func formatMessagesCell(s accountStats) string {
+	if s.CountsPending {
+		return "pending"
+	}
 	if s.SourceDeletedCount > 0 {
 		return fmt.Sprintf("%s (+%s deleted from source)",
 			formatCount(s.MessageCount), formatCount(s.SourceDeletedCount))
@@ -113,12 +115,16 @@ func outputAccountsJSON(stats []accountStats) error {
 	output := make([]map[string]any, len(stats))
 	for i, s := range stats {
 		entry := map[string]any{
-			"id":                   s.ID,
-			keyEmail:               s.Email,
-			"type":                 s.Type,
-			"display_name":         s.DisplayName,
-			"message_count":        s.MessageCount,
-			"source_deleted_count": s.SourceDeletedCount,
+			"id":           s.ID,
+			keyEmail:       s.Email,
+			"type":         s.Type,
+			"display_name": s.DisplayName,
+		}
+		if s.CountsPending {
+			entry["counts_pending"] = true
+		} else {
+			entry["message_count"] = s.MessageCount
+			entry["source_deleted_count"] = s.SourceDeletedCount
 		}
 		if s.LastSync != nil && !s.LastSync.IsZero() {
 			entry["last_sync"] = s.LastSync.Format(time.RFC3339)
@@ -128,9 +134,9 @@ func outputAccountsJSON(stats []accountStats) error {
 		output[i] = entry
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(output)
+	enc := jsontext.NewEncoder(os.Stdout, jsontext.WithIndentPrefix(""), jsontext.WithIndent("  "))
+
+	return json.MarshalEncode(enc, output, json.Deterministic(true))
 }
 
 // formatCount formats a number with thousand separators.
@@ -152,6 +158,7 @@ func formatCount(n int64) string {
 }
 
 type accountStats struct {
+	CountsPending      bool
 	ID                 int64
 	Email              string
 	Type               string

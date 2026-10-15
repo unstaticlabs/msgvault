@@ -1,8 +1,10 @@
 package cmd
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -137,7 +139,10 @@ func formatSize(bytes int64) string {
 }
 
 func printJSON(v any) error {
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	return printJSONTo(os.Stdout, v)
+}
+
+func printJSONTo(w io.Writer, value any) error {
+	encoder := jsontext.NewEncoder(w, jsontext.WithIndentPrefix(""), jsontext.WithIndent("  "))
+	return json.MarshalEncode(encoder, value, json.Deterministic(true))
 }

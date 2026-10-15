@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/api"
@@ -156,9 +155,10 @@ func TestDaemonRefusalOfTheActingUserTellsThePersonToSignIn(t *testing.T) {
 	response, status = rawAuthorizedCall(t, handler, "Bearer admin-secret-value", "tools/call",
 		map[string]any{"name": ToolListMessages, "arguments": map[string]any{}})
 	require.Equal(http.StatusOK, status)
-	require.NotEmpty(response.Error, "without an acting user the daemon's refusal stays an internal error")
-	assert.InDelta(float64(jsonrpc.CodeInternalError), response.Error["code"], 0)
-	assert.Equal("internal server error", response.Error["message"])
+	require.Empty(response.Error, "native daemon authentication refusals use a safe tool error")
+	isError, text = toolResultText(t, response.Result)
+	assert.True(isError)
+	assert.Equal("unauthorized: Archive authentication failed", text)
 
 	response, status = rawAuthorizedCall(t, handler, "Bearer alice-secret-value", "resources/read",
 		map[string]any{"uri": "msgvault://attachment/7"})

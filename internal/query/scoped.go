@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // ErrScopeRequiresSource is returned by the text views when a caller who may
@@ -195,8 +197,8 @@ func (s *scopedEngine) GetMessage(ctx context.Context, id int64) (*MessageDetail
 	return message, nil
 }
 
-func (s *scopedEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID string) (*MessageDetail, error) {
-	message, err := s.inner.GetMessageBySourceID(ctx, sourceMessageID)
+func (s *scopedEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID string, sourceIDs []int64) (*MessageDetail, error) {
+	message, err := s.inner.GetMessageBySourceID(ctx, sourceMessageID, s.restrict(sourceIDs))
 	if err != nil || message == nil || !s.sees(message.SourceID) {
 		return nil, err
 	}
@@ -261,8 +263,8 @@ func (s *scopedEngine) GetDeletionTargetsByFilter(ctx context.Context, filter Me
 	return s.inner.GetDeletionTargetsByFilter(ctx, s.restrictFilter(filter))
 }
 
-func (s *scopedEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int) ([]MessageSummary, error) {
-	rows, err := s.inner.SearchByDomains(ctx, domains, after, before, limit, offset)
+func (s *scopedEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) ([]MessageSummary, error) {
+	rows, err := s.inner.SearchByDomains(ctx, domains, after, before, limit, offset, s.restrict(sourceIDs))
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +427,7 @@ func (s *scopedTextEngine) GetDeletionTargetsByAggregateSearch(ctx context.Conte
 	return resolver.GetDeletionTargetsByAggregateSearch(ctx, searchQuery, s.restrictFilter(filter), groupBy, key)
 }
 
-func (s *scopedTextEngine) SearchMessageBodies(ctx context.Context, query *search.Query, limit, offset int) ([]MessageSummary, error) {
+func (s *scopedTextEngine) SearchMessageBodies(ctx context.Context, query *search.Query, limit, offset int) (*SearchFastResult, error) {
 	searcher, ok := s.inner.(MessageBodySearcher)
 	if !ok {
 		return nil, ErrNotImplemented
@@ -598,4 +600,93 @@ func (s *scopedEmailWorkEngine) EmailWorkMembers(ctx context.Context, request Em
 		return nil, &CacheUnavailableError{Readiness: CacheAbsent}
 	}
 	return reader.EmailWorkMembers(ctx, request)
+}
+
+// ReadOriginalMessage preserves the native export contract within this user's
+// source authority, including ambiguity resolution before MIME is retrieved.
+func (s *scopedEngine) ReadOriginalMessage(ctx context.Context, ref MessageRef, maxBytes int64) (*OriginalMessage, error) {
+	return s.ReadOriginalMessageForSources(ctx, ref, maxBytes, nil)
+}
+
+func (s *scopedEngine) ReadOriginalMessageForSources(ctx context.Context, ref MessageRef, maxBytes int64, sourceIDs []int64) (*OriginalMessage, error) {
+	reader, ok := s.inner.(SourceOriginalMessageReader)
+	if !ok {
+		return nil, ErrOriginalExportUnsupported
+	}
+	original, err := reader.ReadOriginalMessageForSources(ctx, ref, maxBytes, s.restrict(sourceIDs))
+	if err != nil {
+		return nil, err
+	}
+	if original == nil || !s.sees(original.SourceID) {
+		return nil, store.ErrMessageNotFound
+	}
+	return original, nil
+}
+
+func (s *scopedEngine) ListThread(ctx context.Context, q ThreadQuery) (*ThreadPage, error) {
+	reader, ok := s.inner.(OriginalMessageReader)
+	if !ok {
+		return nil, ErrOriginalExportUnsupported
+	}
+	q.SourceIDs = s.restrict(q.SourceIDs)
+	return reader.ListThread(ctx, q)
+}
+
+func (s *scopedEngine) ListVirtualAccounts(ctx context.Context) (map[int64][]store.VirtualAccount, error) {
+	lister, ok := s.inner.(VirtualAccountLister)
+	if !ok {
+		return map[int64][]store.VirtualAccount{}, nil
+	}
+	accounts, err := lister.ListVirtualAccounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	visible := make(map[int64][]store.VirtualAccount)
+	for sourceID, entries := range accounts {
+		if s.sees(sourceID) {
+			visible[sourceID] = entries
+		}
+	}
+	return visible, nil
+}
+
+func (s *scopedEngine) ResolveMessageID(ctx context.Context, ref string) (int64, string, error) {
+	if id, err := strconv.ParseInt(ref, 10, 64); err == nil && id > 0 {
+		message, err := s.GetMessage(ctx, id)
+		if err != nil {
+			return 0, "", err
+		}
+		if message != nil {
+			return message.ID, message.SourceMessageID, nil
+		}
+	}
+	message, err := s.GetMessageBySourceID(ctx, ref, nil)
+	if err != nil {
+		return 0, "", err
+	}
+	if message == nil {
+		return 0, "", store.ErrMessageNotFound
+	}
+	return message.ID, message.SourceMessageID, nil
+}
+
+// Identity cluster expansion matches the shared directory; it is never itself
+// message authority. Every subsequent query still intersects the source scope.
+func (s *scopedAnalyticalEngine) ExpandParticipantClusterMembers(ctx context.Context, ids []int64) ([]int64, error) {
+	expander, ok := s.inner.(interface {
+		ExpandParticipantClusterMembers(context.Context, []int64) ([]int64, error)
+	})
+	if !ok {
+		return slices.Clone(ids), nil
+	}
+	return expander.ExpandParticipantClusterMembers(ctx, ids)
+}
+
+func (s *scopedAnalyticalEngine) ResolveExploreMeetings(ctx context.Context, request ExploreSelectionRequest, limit int) (*ExploreMeetingSelection, error) {
+	resolver, ok := s.inner.(ExploreMeetingResolver)
+	if !ok {
+		return nil, fmt.Errorf("%w: meeting selection", errors.ErrUnsupported)
+	}
+	request.Explore = s.restrictExplore(request.Explore)
+	return resolver.ResolveExploreMeetings(ctx, request, limit)
 }

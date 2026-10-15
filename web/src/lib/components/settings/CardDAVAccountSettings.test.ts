@@ -1,41 +1,30 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { describe, expect, it, vi } from 'vitest';
 
+import { chooseSelectOption } from '../../../test/kit-ui';
 import { createAPIClient } from '../../api/client';
-import type { SettingState } from '../../settings/catalog';
+import type { CardDAVAccountValues } from '../../carddav/account-settings';
 import CardDAVAccountSettings from './CardDAVAccountSettings.svelte';
 
-const settings: SettingState[] = [
-  accountSetting('carddav.base_url', 'string', { value: { string: 'https://old.example.test/' } }),
-  accountSetting('carddav.username', 'string', { value: { string: 'alice' } }),
-  accountSetting('carddav.password', 'secret', { secret: { configured: true } }),
-  accountSetting('carddav.enabled', 'boolean', { value: { boolean: false } }),
-  accountSetting('carddav.schedule', 'string', { value: { string: '0 2 * * *' } })
-];
+const values: CardDAVAccountValues = {
+  provider: '',
+  oauthApp: '',
+  baseURL: 'https://old.example.test/',
+  username: 'alice',
+  passwordConfigured: true,
+  enabled: false,
+  schedule: '0 2 * * *'
+};
 
-const refreshedSettings: SettingState[] = [
-  accountSetting('carddav.base_url', 'string', { value: { string: 'https://fresh.example.test/' } }),
-  accountSetting('carddav.username', 'string', { value: { string: 'bob' } }),
-  accountSetting('carddav.password', 'secret', { secret: { configured: false } }),
-  accountSetting('carddav.enabled', 'boolean', { value: { boolean: true } }),
-  accountSetting('carddav.schedule', 'string', { value: { string: '0 4 * * *' } })
-];
-
-function accountSetting(
-  key: string,
-  kind: SettingState['kind'],
-  fields: Partial<Pick<SettingState, 'value' | 'secret'>>
-): SettingState {
-  return {
-    key,
-    kind,
-    group: 'sources',
-    label: key,
-    description: `Test fixture for ${key}.`,
-    restart_required: false,
-    ...fields
-  };
-}
+const refreshedValues: CardDAVAccountValues = {
+  provider: '',
+  oauthApp: '',
+  baseURL: 'https://fresh.example.test/',
+  username: 'bob',
+  passwordConfigured: false,
+  enabled: true,
+  schedule: '0 4 * * *'
+};
 
 function deferredResponse() {
   let resolve!: (response: Response) => void;
@@ -44,27 +33,70 @@ function deferredResponse() {
 }
 
 describe('CardDAVAccountSettings', () => {
+  it.each(['https://old.example.test/', 'https://draft.example.test/'])('preserves the CardDAV URL %s when switching providers without saving', async (baseURL) => {
+    render(CardDAVAccountSettings, { client: createAPIClient(async () => Response.json({})), values });
+    await fireEvent.input(screen.getByLabelText('Base URL'), { target: { value: baseURL } });
+
+    await chooseSelectOption(screen.getByRole('combobox', { name: /^CardDAV provider/ }), 'Google Contacts');
+    await chooseSelectOption(screen.getByRole('combobox', { name: /^CardDAV provider/ }), 'Other CardDAV server');
+
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe(baseURL);
+    expect((screen.getByLabelText('Password') as HTMLInputElement).required).toBe(baseURL !== 'https://old.example.test/');
+  });
+
+  it('shows a sign-in command that does not save connection', async () => {
+    render(CardDAVAccountSettings, { client: createAPIClient(async () => Response.json({})), values, connection: 'work' });
+
+    await chooseSelectOption(screen.getByRole('combobox', { name: /^CardDAV provider/ }), 'Microsoft 365 or Outlook.com');
+
+    expect(screen.queryByLabelText('Base URL')).toBeNull();
+    expect(screen.queryByLabelText('Password')).toBeNull();
+  });
+
+  it.each([
+    ['google', `msgvault carddav authorize-google 'bob@example.com' --oauth-app 'Work App'`, 'msgvault carddav authorize-google "bob@example.com" --oauth-app "Work App"'],
+    ['microsoft', `msgvault carddav authorize-microsoft 'bob@example.com'`, 'msgvault carddav authorize-microsoft "bob@example.com"'],
+  ])('shows labeled commands for both shells for %s', (provider, posixCommand, cmdCommand) => {
+    const oauthValues = { ...values, provider, oauthApp: 'Work App', username: 'bob@example.com' };
+    render(CardDAVAccountSettings, { client: createAPIClient(async () => Response.json({})), values: oauthValues });
+
+    expect(screen.getByText('POSIX shell')).toBeDefined();
+    expect(screen.getByText('Command Prompt')).toBeDefined();
+    expect(screen.getByText(posixCommand)).toBeDefined();
+    expect(screen.getByText(cmdCommand)).toBeDefined();
+    expect(screen.getByText(/Start Command Prompt with/).textContent).toBe('Start Command Prompt with cmd /d /v:off, then paste:');
+  });
+
+  it('shows Save CardDAV account as the solid blue primary action', () => {
+    render(CardDAVAccountSettings, { client: createAPIClient(async () => Response.json({})), values });
+
+    const save = screen.getByRole('button', { name: 'Save CardDAV account' });
+    expect(save.className).toContain('kit-button--info');
+    expect(save.className).toContain('kit-button--solid');
+  });
+
   it('refreshes a clean account form when settings props change', async () => {
     const client = createAPIClient(async () => Response.json({}));
-    const rendered = render(CardDAVAccountSettings, { client, settings });
+    const rendered = render(CardDAVAccountSettings, { client, values });
 
-    await rendered.rerender({ client, settings: refreshedSettings });
+    await rendered.rerender({ client, values: refreshedValues });
 
     await waitFor(() => expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe('https://fresh.example.test/'));
     expect((screen.getByLabelText('Username') as HTMLInputElement).value).toBe('bob');
     expect((screen.getByRole('switch', { name: 'Enabled' }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText('Schedule') as HTMLInputElement).value).toBe('0 4 * * *');
     expect((screen.getByLabelText('Password') as HTMLInputElement).required).toBe(true);
+    expect(screen.getByText('Saving the account applies right away. No daemon restart is needed.')).toBeDefined();
   });
 
   it('preserves an intentional local edit while refreshing untouched fields', async () => {
     const client = createAPIClient(async () => Response.json({}));
-    const rendered = render(CardDAVAccountSettings, { client, settings });
+    const rendered = render(CardDAVAccountSettings, { client, values });
     await fireEvent.input(screen.getByLabelText('Base URL'), {
       target: { value: 'https://draft.example.test/' }
     });
 
-    await rendered.rerender({ client, settings: refreshedSettings });
+    await rendered.rerender({ client, values: refreshedValues });
 
     await waitFor(() => expect((screen.getByLabelText('Username') as HTMLInputElement).value).toBe('bob'));
     expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe('https://draft.example.test/');
@@ -80,7 +112,7 @@ describe('CardDAVAccountSettings', () => {
         schedule: '0 4 * * *', books: 0
       });
     });
-    render(CardDAVAccountSettings, { client, settings: refreshedSettings });
+    render(CardDAVAccountSettings, { client, values: refreshedValues });
     const passwordInput = screen.getByLabelText('Password') as HTMLInputElement;
     expect(passwordInput.required).toBe(true);
 
@@ -115,7 +147,7 @@ describe('CardDAVAccountSettings', () => {
       };
       return deferred.promise;
     };
-    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), settings });
+    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), values });
     await fireEvent.input(screen.getByLabelText('Base URL'), { target: { value: 'https://test.example.test/' } });
     await fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'test-user' } });
     await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'test-password' } });
@@ -164,7 +196,7 @@ describe('CardDAVAccountSettings', () => {
       };
       return deferred.promise;
     };
-    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), settings, onSaved });
+    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), values, onSaved });
     await fireEvent.input(screen.getByLabelText('Base URL'), { target: { value: 'https://save.example.test/' } });
     await fireEvent.input(screen.getByLabelText('Username'), { target: { value: 'save-user' } });
     await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'save-password' } });
@@ -206,7 +238,7 @@ describe('CardDAVAccountSettings', () => {
       requestFacts.push({ method: request.method, path: new URL(request.url).pathname, passwordMatched: body.password === 'synthetic-password' });
       return Response.json({ base_url: body.base_url, username: body.username, enabled: body.enabled, schedule: body.schedule, books: 2 });
     };
-    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), settings, onSaved });
+    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), values, onSaved });
     await fireEvent.input(screen.getByLabelText('Base URL'), { target: { value: 'https://dav.example.test/' } });
     await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'synthetic-password' } });
 
@@ -240,7 +272,7 @@ describe('CardDAVAccountSettings', () => {
       if (requests === 1) return Response.json({ base_url: 'https://old.example.test/', username: 'alice', enabled: false, books: 1 });
       return Response.json({ error: 'carddav_unavailable', message: 'CardDAV server refused the account (synthetic reason).' }, { status: 503 });
     };
-    const rendered = render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), settings });
+    const rendered = render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), values });
     await fireEvent.input(screen.getByLabelText('Password'), { target: { value: 'synthetic-password' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Test CardDAV connection' }));
     expect((await screen.findByRole('status')).textContent).toContain('Connection successful');
@@ -267,7 +299,7 @@ describe('CardDAVAccountSettings', () => {
       }
       throw new TypeError('network down');
     };
-    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), settings });
+    render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), values });
 
     await fireEvent.click(screen.getByRole('button', { name: 'Test CardDAV connection' }));
     expect((await screen.findByRole('alert')).textContent).toBe('CardDAV host did not answer (synthetic reason).');
@@ -289,7 +321,7 @@ describe('CardDAVAccountSettings', () => {
       signal = request.signal;
       return deferred.promise;
     };
-    const rendered = render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), settings, onSaved });
+    const rendered = render(CardDAVAccountSettings, { client: createAPIClient(fetchFn), values, onSaved });
     await fireEvent.click(screen.getByRole('button', { name: 'Save CardDAV account' }));
     await waitFor(() => expect(signal).toBeDefined());
 

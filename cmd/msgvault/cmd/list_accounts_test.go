@@ -11,9 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/kit/daemon"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/daemonclient"
 )
 
 func TestListAccountsUsesLocalDaemonHTTPAndPreservesOutput(t *testing.T) {
+	cfg := testConfigValue()
+	useLocal := false
+
 	require := require.New(t)
 	assert := assert.New(t)
 	dataDir := t.TempDir()
@@ -33,11 +37,15 @@ func TestListAccountsUsesLocalDaemonHTTPAndPreservesOutput(t *testing.T) {
 		HomeDir: dataDir,
 		Data:    config.DataConfig{DataDir: dataDir},
 	}
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	_ = testCtx
 	useLocal = true
+	invocationFromContext(testCtx).options.useLocal = true
 	listAccountsJSON = false
 
 	done := captureStdout(t)
 	cmd := &cobra.Command{Use: "list-accounts", RunE: listAccountsCmd.RunE}
+	cmd.SetContext(testCtx)
 
 	err := cmd.Execute()
 	out := done()
@@ -90,4 +98,18 @@ func accountsHTTPDaemon(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	return server, requests
+}
+
+func TestListAccountsPendingCountsRemainExplicit(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	stats := daemonAccountsToStats([]daemonclient.CLIAccount{{ID: 7, Email: "counts@example.test", Type: "gmail"}}, true)
+	require.Len(stats, 1)
+	assert.Equal("pending", formatMessagesCell(stats[0]))
+	done := captureStdout(t)
+	require.NoError(outputAccountsJSON(stats))
+	output := done()
+	assert.Contains(output, `"counts_pending": true`)
+	assert.NotContains(output, "message_count", "unknown counts are omitted rather than zero")
+	assert.Equal("0", formatMessagesCell(accountStats{}), "known empty accounts still show zero")
 }

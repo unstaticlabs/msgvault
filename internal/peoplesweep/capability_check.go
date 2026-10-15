@@ -1,12 +1,11 @@
 package peoplesweep
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -325,6 +324,7 @@ func capabilityProfile(
 		credentialSource = CredentialNone
 	}
 	provider := ProviderConfig{
+		PresetID: candidate.PresetID,
 		Protocol: candidate.Protocol, Endpoint: candidate.Endpoint, Model: candidate.Model,
 		Auth: candidate.Auth, Credential: credentialSource,
 		OutputMode: mode, TokenLimitParameter: tokenParameter,
@@ -396,47 +396,17 @@ func validateCapabilityResponse(driverResponse DriverResponse) (StructuredRespon
 	if err := validateExtractionOutput(response.Output); err != nil {
 		return StructuredResponse{}, errors.New("provider capability response is invalid")
 	}
-	output, valid := decodeUniqueCapabilityObject(response.Output)
+	output, valid := decodeUniqueJSONObject(response.Output)
 	if !valid || len(output) != 1 {
 		return StructuredResponse{}, errors.New("provider capability response is invalid")
 	}
-	var claims []json.RawMessage
+	var claims []jsontext.Value
 	if _, present := output["claims"]; !present ||
 		json.Unmarshal(output["claims"], &claims) != nil || len(claims) != 0 {
 		return StructuredResponse{}, errors.New("provider capability response is invalid")
 	}
-	response.Output = append(json.RawMessage(nil), response.Output...)
+	response.Output = append(jsontext.Value(nil), response.Output...)
 	return response, nil
-}
-
-func decodeUniqueCapabilityObject(raw []byte) (map[string]json.RawMessage, bool) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	start, err := decoder.Token()
-	if err != nil || start != json.Delim('{') {
-		return nil, false
-	}
-	result := make(map[string]json.RawMessage)
-	for decoder.More() {
-		token, tokenErr := decoder.Token()
-		key, valid := token.(string)
-		if tokenErr != nil || !valid {
-			return nil, false
-		}
-		if _, duplicate := result[key]; duplicate {
-			return nil, false
-		}
-		var value json.RawMessage
-		if decoder.Decode(&value) != nil {
-			return nil, false
-		}
-		result[key] = value
-	}
-	end, err := decoder.Token()
-	if err != nil || end != json.Delim('}') {
-		return nil, false
-	}
-	var trailing any
-	return result, errors.Is(decoder.Decode(&trailing), io.EOF)
 }
 
 func capabilityMiss(err error) bool {

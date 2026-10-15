@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
@@ -18,7 +19,101 @@ import (
 	testemail "go.kenn.io/msgvault/internal/testutil/email"
 )
 
+func TestAuditGmailMessagesOmitsCoherentInlineBinarySnapshot(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+	id := seedRepairRow(t, env.Store, source.ID, "gmail-a", "thread-a", "coherent inline")
+	payload := []byte("inline bytes")
+	hash := fmt.Sprintf("%x", sha256.Sum256(payload))
+	raw := testemail.NewMessage().Subject("coherent inline").
+		Header("Message-ID", "<gmail-a@example.com>").Body("coherent inline body").
+		WithAttachment("inline.bin", "application/octet-stream", payload).Bytes()
+	raw = []byte(strings.ReplaceAll(string(raw), "Content-Disposition: attachment", "Content-Disposition: inline"))
+	require.NoError(env.Store.UpsertMessageRaw(id, raw))
+	require.NoError(env.Store.UpsertMessageBody(id, sql.NullString{String: "coherent inline body", Valid: true}, sql.NullString{}))
+	// Seed the physical keyed row independently of Parse, as an older ingest
+	// would after upserting the overlapping listings of this one MIME part.
+	require.NoError(env.Store.UpsertAttachmentRecord(t.Context(), id, store.AttachmentWrite{
+		Filename: "inline.bin", MIMEType: "application/octet-stream", Size: int64(len(payload)),
+		ContentHash: hash, StoragePath: hash[:2] + "/" + hash, SourcePartKey: "mime:2",
+		Role: store.AttachmentRoleInline, RoleSource: store.AttachmentRoleSourceMIMEDisposition,
+	}))
+	require.NoError(env.Store.RecomputeMessageAttachmentStats(id))
+	before := readRepairSnapshot(t, env.Store, id)
+	assert.Empty(collectAudit(t, env.Syncer, source.ID))
+	assert.Equal(before, readRepairSnapshot(t, env.Store, id), "audit must not modify coherent legacy rows")
+}
+
+func TestRepairMessageInlineBinaryAttachmentsConverge(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	env := newTestEnv(t)
+	source := env.CreateSource(t)
+	payload := []byte{0, 1, 254, 255}
+	raw := testemail.NewMessage().Subject("inline duplicates").Body("body").
+		Header("Message-ID", "<gmail-a@example.com>").
+		WithAttachment("first.bin", "application/octet-stream", payload).
+		WithAttachment("second.bin", "application/octet-stream", payload).Bytes()
+	raw = []byte(strings.ReplaceAll(string(raw), "Content-Disposition: attachment", "Content-Disposition: inline"))
+	env.Mock.AddMessage("gmail-a", raw, []string{"INBOX"})
+	env.Mock.Profile.MessagesTotal = 1
+	env.Mock.Profile.HistoryID = 10
+	attachmentsDir := filepath.Join(env.TmpDir, "attachments")
+	env.SetOptions(t, func(options *Options) { options.AttachmentsDir = attachmentsDir })
+	runFullSync(t, env)
+	var id int64
+	require.NoError(env.Store.DB().QueryRow(`SELECT id FROM messages WHERE source_id = ? AND source_message_id = 'gmail-a'`, source.ID).Scan(&id))
+	assertInlineBinaryOccurrences(t, env.Store, id, attachmentsDir, payload)
+	assert.Empty(collectAudit(t, env.Syncer, source.ID), "fresh ingest is coherent")
+
+	_, err := env.Store.DB().Exec(`DELETE FROM attachments WHERE message_id = ? AND source_part_key = 'mime:3'`, id)
+	require.NoError(err)
+	results := collectAudit(t, env.Syncer, source.ID)
+	require.Len(results, 1)
+	assert.Equal(AuditMismatch, results[0].Fields[AuditFieldAttachmentHashes])
+	assert.Equal(AuditMismatch, results[0].Fields[AuditFieldAttachmentPartKeys])
+	for range 2 {
+		result, err := env.Syncer.RepairMessage(t.Context(), RepairRequest{Reference: "gmail-a", SourceID: source.ID})
+		require.NoError(err)
+		assert.Equal(id, result.InternalID)
+		assertInlineBinaryOccurrences(t, env.Store, id, attachmentsDir, payload)
+		assert.Empty(collectAudit(t, env.Syncer, source.ID), "repair and repeated repair must converge")
+	}
+}
+
+func assertInlineBinaryOccurrences(t *testing.T, st *store.Store, id int64, dir string, payload []byte) {
+	t.Helper()
+	assert := assert.New(t)
+	require := require.New(t)
+	var count int
+	require.NoError(st.DB().QueryRow(`SELECT attachment_count FROM messages WHERE id = ?`, id).Scan(&count))
+	assert.Equal(2, count)
+	rows, err := st.DB().Query(`SELECT source_part_key, content_hash, attachment_role, storage_path, size FROM attachments WHERE message_id = ? ORDER BY source_part_key`, id)
+	require.NoError(err)
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	for rows.Next() {
+		var key, hash, role, path string
+		var size int64
+		require.NoError(rows.Scan(&key, &hash, &role, &path, &size))
+		keys = append(keys, key)
+		assert.Equal(fmt.Sprintf("%x", sha256.Sum256(payload)), hash)
+		assert.Equal("inline", role)
+		assert.Equal(int64(len(payload)), size)
+		stored, err := os.ReadFile(filepath.Join(dir, path))
+		require.NoError(err)
+		assert.Equal(payload, stored)
+	}
+	require.NoError(rows.Err())
+	assert.Equal([]string{"mime:2", "mime:3"}, keys)
+}
+
 func TestAuditGmailMessagesReportsCrossedFieldsAndInconclusiveRaw(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	env := newTestEnv(t)
@@ -49,6 +144,7 @@ func TestAuditGmailMessagesReportsCrossedFieldsAndInconclusiveRaw(t *testing.T) 
 }
 
 func TestAuditGmailMessagesTreatsParsedEmptyFieldsAsAuthoritative(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	env := newTestEnv(t)
@@ -65,6 +161,7 @@ func TestAuditGmailMessagesTreatsParsedEmptyFieldsAsAuthoritative(t *testing.T) 
 }
 
 func TestAuditGmailMessagesMarksNonMIMEStoredRawInconclusive(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	env := newTestEnv(t)
@@ -82,6 +179,7 @@ func TestAuditGmailMessagesMarksNonMIMEStoredRawInconclusive(t *testing.T) {
 }
 
 func TestAuditGmailMessagesOmitsCoherentLegacyEvidence(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	env := newTestEnv(t)
 	source := env.CreateSource(t)
@@ -105,6 +203,7 @@ func TestAuditGmailMessagesOmitsCoherentLegacyEvidence(t *testing.T) {
 }
 
 func TestAuditGmailMessagesComparesAttachmentHashesWithoutOccurrenceKeys(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	env := newTestEnv(t)
@@ -127,6 +226,7 @@ func TestAuditGmailMessagesComparesAttachmentHashesWithoutOccurrenceKeys(t *test
 }
 
 func TestAuditGmailMessagesAttachmentHashMultisetPreservesDuplicateCounts(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	env := newTestEnv(t)
 	source := env.CreateSource(t)
@@ -152,6 +252,7 @@ func TestAuditGmailMessagesAttachmentHashMultisetPreservesDuplicateCounts(t *tes
 }
 
 func TestAuditGmailMessagesAcceptsRepeatedPartStoredOnceWithoutOccurrenceKeys(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	env := newTestEnv(t)
 	source := env.CreateSource(t)
@@ -179,6 +280,7 @@ func TestAuditGmailMessagesAcceptsRepeatedPartStoredOnceWithoutOccurrenceKeys(t 
 }
 
 func TestAuditGmailMessagesTreatsLegacyOnlyAttachmentAsInconclusive(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	env := newTestEnv(t)
 	source := env.CreateSource(t)
@@ -204,6 +306,7 @@ func TestAuditGmailMessagesTreatsLegacyOnlyAttachmentAsInconclusive(t *testing.T
 }
 
 func TestAuditGmailMessagesFlagsSwappedAttachmentHashes(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	env := newTestEnv(t)
@@ -251,6 +354,7 @@ func TestAuditGmailMessagesFlagsSwappedAttachmentHashes(t *testing.T) {
 }
 
 func TestAuditGmailMessagesIsReadOnlyAndKeysetPaged(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	testutil.SkipIfPostgres(t, "filesystem and SQLite query-only proof")
@@ -295,6 +399,7 @@ func TestAuditGmailMessagesIsReadOnlyAndKeysetPaged(t *testing.T) {
 }
 
 func TestAuditGmailMessagesStopsLoadedPageOnCancellation(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	env := newTestEnv(t)
 	source := env.CreateSource(t)
@@ -335,6 +440,7 @@ func (c *cancelAfterArmedChecks) arm() {
 }
 
 func TestAuditGmailMessagesReturnsCancellationAfterCoherentFinalRow(t *testing.T) {
+	t.Parallel()
 	env := newTestEnv(t)
 	source := env.CreateSource(t)
 	firstID := seedRepairRow(t, env.Store, source.ID, "gmail-a", "thread", "stored")
@@ -355,6 +461,7 @@ func TestAuditGmailMessagesReturnsCancellationAfterCoherentFinalRow(t *testing.T
 }
 
 func TestRepairedMessageWithProviderAttachmentIsNotAuditedAgain(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	env := newTestEnv(t)
@@ -377,6 +484,7 @@ func TestRepairedMessageWithProviderAttachmentIsNotAuditedAgain(t *testing.T) {
 }
 
 func TestAuditGmailMessagesScopesPositiveSourceAndRejectsNonGmail(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	env := newTestEnv(t)
 	gmailSource := env.CreateSource(t)
@@ -402,6 +510,7 @@ func TestAuditGmailMessagesScopesPositiveSourceAndRejectsNonGmail(t *testing.T) 
 // raw storage has no size limit and unbounded decompression could exhaust
 // memory on a corrupt or hostile archive.
 func TestAuditGmailMessagesMarksOversizedRawInconclusive(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	// The cap under test is the named production constant (64 MiB).

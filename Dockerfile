@@ -26,6 +26,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 
 WORKDIR /src
 
+# Fall back to the module's source repo on any proxy error, not just 404/410.
+ENV GOPROXY=https://proxy.golang.org|direct
+
 # Download dependencies first (layer caching)
 COPY go.mod go.sum ./
 RUN go mod download
@@ -42,13 +45,17 @@ ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
 
 # Note: Module path must match go.mod (go.kenn.io/msgvault)
-RUN CGO_ENABLED=1 go build \
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+        -o /msgvault-codex-bridge ./cmd/msgvault-codex-bridge \
+    && bridge_digest=$(sha256sum /msgvault-codex-bridge | cut -d' ' -f1) \
+    && CGO_ENABLED=1 go build \
     -tags "fts5 sqlite_vec" \
     -trimpath \
     -ldflags="-s -w \
         -X go.kenn.io/msgvault/cmd/msgvault/cmd.Version=${VERSION} \
         -X go.kenn.io/msgvault/cmd/msgvault/cmd.Commit=${COMMIT} \
-        -X go.kenn.io/msgvault/cmd/msgvault/cmd.BuildDate=${BUILD_DATE}" \
+        -X go.kenn.io/msgvault/cmd/msgvault/cmd.BuildDate=${BUILD_DATE} \
+        -X go.kenn.io/msgvault/internal/peoplesweep.codexBridgeSHA256=${bridge_digest}" \
     -o /msgvault \
     ./cmd/msgvault
 
@@ -61,6 +68,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     tzdata \
     wget \
     libstdc++6 \
+    bubblewrap \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -69,6 +77,7 @@ RUN groupadd --gid 1000 msgvault \
 
 # Copy binary from builder
 COPY --from=builder /msgvault /usr/local/bin/msgvault
+COPY --from=builder --chown=msgvault:msgvault /msgvault-codex-bridge /usr/local/bin/msgvault-codex-bridge
 
 # Set up data directory with correct ownership
 ENV MSGVAULT_HOME=/data
@@ -78,6 +87,10 @@ VOLUME /data
 # Switch to non-root user
 USER msgvault
 WORKDIR /data
+
+# Exercise this runtime before exporting it, without shipping smoke data/scripts.
+RUN --network=none --mount=type=bind,source=scripts/smoke-image.sh,target=/tmp/smoke-image.sh \
+    sh /tmp/smoke-image.sh
 
 # Health check using wget (curl not included to keep image small)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

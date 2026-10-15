@@ -2,16 +2,18 @@ package notionmeetings
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"go.kenn.io/msgvault/internal/meetingarchive"
+	"go.kenn.io/msgvault/internal/meetingidentity"
 )
 
 const (
+	UserLookupTimeout    = time.Minute
 	maxHydrationDepth    = 32
 	maxHydrationRequests = 256
 	maxHydrationBytes    = 32 << 20
@@ -28,10 +30,13 @@ type hydrationSource interface {
 type blockTree struct {
 	Root   *Block
 	Blocks []Block
-	Pages  []json.RawMessage
+	Pages  []jsontext.Value
 }
 
 type HydratedMeeting struct {
+	// With a users token, archived emails are recovered only for failed lookups.
+	failedAttendeeIDs map[string]bool
+
 	Discovery                  MeetingNote
 	MeetingBlock               *Block
 	SummaryTree                blockTree
@@ -55,12 +60,18 @@ type resolvedUser struct {
 	Name          string   `json:"name,omitempty"`
 	Email         string   `json:"email,omitempty"`
 	EmailAliases  []string `json:"email_aliases,omitempty"`
-	EmailVerified bool     `json:"email_verified,omitempty"`
+	EmailVerified bool     `json:"email_verified,omitzero"`
+}
+
+// UserSource is used only for workspace members and guest identities.
+type UserSource interface {
+	RetrieveUser(ctx context.Context, id string) (*User, error)
 }
 
 type Hydrator struct {
+	userSource       UserSource
 	source           hydrationSource
-	users            map[string]User
+	users            map[string]*User
 	usersRead        bool
 	usersUnavailable bool
 	usersIncomplete  bool
@@ -71,7 +82,13 @@ type Hydrator struct {
 }
 
 func NewHydrator(source hydrationSource) *Hydrator {
-	return &Hydrator{source: source}
+	return &Hydrator{source: source, users: map[string]*User{}}
+}
+
+// WithUserSource routes user requests to a separate credential.
+func (h *Hydrator) WithUserSource(source UserSource) *Hydrator {
+	h.userSource = source
+	return h
 }
 
 func (h *Hydrator) Hydrate(ctx context.Context, meeting MeetingNote) (*HydratedMeeting, error) {
@@ -202,7 +219,7 @@ func (h *Hydrator) readChildren(ctx context.Context, blockID string, depth int, 
 		if err := h.reserveBytes(page.Raw); err != nil {
 			return err
 		}
-		tree.Pages = append(tree.Pages, append(json.RawMessage(nil), page.Raw...))
+		tree.Pages = append(tree.Pages, append(jsontext.Value(nil), page.Raw...))
 		for _, child := range page.Results {
 			h.blocks++
 			if h.blocks > maxHydrationBlocks {
@@ -231,8 +248,7 @@ func (h *Hydrator) readChildren(ctx context.Context, blockID string, depth int, 
 }
 
 func (h *Hydrator) resolveAttendees(ctx context.Context, result *HydratedMeeting) error {
-	if !h.usersRead {
-		h.users = map[string]User{}
+	if h.userSource == nil && !h.usersRead {
 		cursor := ""
 		seen := map[string]struct{}{}
 		for {
@@ -253,7 +269,8 @@ func (h *Hydrator) resolveAttendees(ctx context.Context, result *HydratedMeeting
 			if err := h.reserveBytes(page.Raw); err != nil {
 				return err
 			}
-			for _, user := range page.Results {
+			for i := range page.Results {
+				user := &page.Results[i]
 				h.users[user.ID] = user
 			}
 			if !page.HasMore {
@@ -279,7 +296,7 @@ func (h *Hydrator) resolveAttendees(ctx context.Context, result *HydratedMeeting
 			cursor = next
 		}
 	}
-	if h.usersUnavailable {
+	if h.userSource == nil && h.usersUnavailable {
 		result.AttendeeResolutionDegraded = true
 		if h.usersIncomplete {
 			result.Warnings = append(result.Warnings,
@@ -292,27 +309,75 @@ func (h *Hydrator) resolveAttendees(ctx context.Context, result *HydratedMeeting
 		}
 	}
 
+	if h.userSource != nil {
+		result.failedAttendeeIDs = map[string]bool{}
+	}
 	for _, id := range result.Discovery.MeetingNotes.CalendarEvent.Attendees {
-		user, ok := h.users[id]
+		user := h.users[id]
+		if h.userSource != nil {
+			var err error
+			user, err = h.lookupUser(ctx, id)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err != nil {
+				if len(result.failedAttendeeIDs) == 0 {
+					result.Warnings = append(result.Warnings, fmt.Sprintf("Notion attendee lookup failed: %v; preserved meeting content", err))
+				}
+				result.failedAttendeeIDs[id] = true
+				result.AttendeeResolutionDegraded = true
+			}
+		}
 		label := id
-		if ok && strings.TrimSpace(user.Name) != "" {
+		if user != nil && strings.TrimSpace(user.Name) != "" {
 			label = strings.TrimSpace(user.Name)
 		}
 		result.AttendeeLabels = append(result.AttendeeLabels, label)
-		if !ok || !user.Person.EmailVerified || strings.TrimSpace(user.Person.Email) == "" {
+		if user == nil || !user.Person.EmailVerified || strings.TrimSpace(user.Person.Email) == "" {
 			result.UnresolvedAttendeeIDs = append(result.UnresolvedAttendeeIDs, id)
 			continue
 		}
 		result.Attendees = append(result.Attendees, meetingarchive.Person{
-			Name:  strings.TrimSpace(user.Name),
-			Email: strings.ToLower(strings.TrimSpace(user.Person.Email)),
+			Name: strings.TrimSpace(user.Name), Email: meetingidentity.Normalize(user.Person.Email), Anchor: userAnchor(id),
 		})
 		result.ResolvedUsers = append(result.ResolvedUsers, resolvedUser{
-			ID: id, Name: strings.TrimSpace(user.Name),
-			Email: strings.ToLower(strings.TrimSpace(user.Person.Email)), EmailVerified: true,
+			ID: id, Name: strings.TrimSpace(user.Name), Email: meetingidentity.Normalize(user.Person.Email), EmailVerified: true,
 		})
 	}
 	return nil
+}
+
+// lookupUser shares successful responses and service failures across this import.
+func (h *Hydrator) lookupUser(ctx context.Context, id string) (*User, error) {
+	if user, cached := h.users[id]; cached {
+		if user == nil {
+			return nil, errors.New("notion attendee information is unavailable")
+		}
+		return user, nil
+	}
+	if h.usersUnavailable {
+		return nil, h.usersFailure
+	}
+	if err := h.reserveRequest(); err != nil {
+		return nil, err
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, UserLookupTimeout)
+	user, err := h.userSource.RetrieveUser(lookupCtx, id)
+	cancel()
+	if err != nil {
+		var apiErr *APIError
+		if errors.Is(err, ErrMalformedResponse) || errors.As(err, &apiErr) && apiErr.Status == 404 {
+			h.users[id] = nil
+		} else {
+			h.usersUnavailable, h.usersFailure = true, err
+		}
+		return nil, err
+	}
+	if err := h.reserveBytes(user.Raw); err != nil {
+		return nil, err
+	}
+	h.users[id] = user
+	return user, nil
 }
 
 func (h *Hydrator) reserveRequest() error {

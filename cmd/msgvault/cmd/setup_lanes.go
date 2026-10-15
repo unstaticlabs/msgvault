@@ -2,7 +2,8 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"io"
 	"maps"
@@ -14,8 +15,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"go.kenn.io/docbank/document/mistral"
 	"go.kenn.io/msgvault/internal/attachmentpolicy"
 	"go.kenn.io/msgvault/internal/config"
+	"go.kenn.io/msgvault/internal/documentindex"
 	"go.kenn.io/msgvault/internal/peoplesweep"
 	"go.kenn.io/msgvault/internal/providercredentials"
 	"go.kenn.io/msgvault/internal/store"
@@ -46,25 +49,22 @@ const (
 
 	// Recommended provider defaults. These are the values setup writes when
 	// nothing is configured; every one of them remains settable per lane.
-	setupVoyageKeyEnv       = "VOYAGE_API_KEY" // #nosec G101 -- environment variable name, not a credential.
-	setupOpenAIKeyEnv       = "OPENAI_API_KEY" // #nosec G101 -- environment variable name, not a credential.
-	setupVoyageEndpoint     = "https://api.voyageai.com/v1"
-	setupVoyageTextModel    = "voyage-context-4"
-	setupVoyageTextDim      = 1024
-	setupOpenAIEndpoint     = "https://api.openai.com/v1"
-	setupOpenAITextModel    = "text-embedding-3-small"
-	setupOpenAITextDim      = 1536
-	setupOllamaTextModel    = "nomic-embed-text"
-	setupOllamaTextDim      = 768
-	setupOllamaDocPrefix    = "search_document: "
-	setupOllamaQueryPrefix  = "search_query: "
-	setupOllamaMaxInput     = 2000
-	setupEmbedCron          = "*/15 * * * *"
-	setupInferenceModel     = "gpt-5.6-luna"
-	setupInferenceReasoning = "medium"
-	setupInferenceProfile   = "openai"
-	setupOllamaProfile      = "ollama"
-	setupPostureDeclared    = "provider-declared"
+	setupVoyageKeyEnv      = "VOYAGE_API_KEY" // #nosec G101 -- environment variable name, not a credential.
+	setupOpenAIKeyEnv      = "OPENAI_API_KEY" // #nosec G101 -- environment variable name, not a credential.
+	setupVoyageEndpoint    = "https://api.voyageai.com/v1"
+	setupVoyageTextModel   = "voyage-context-4"
+	setupVoyageTextDim     = 1024
+	setupOpenAIEndpoint    = "https://api.openai.com/v1"
+	setupOpenAITextModel   = "text-embedding-3-small"
+	setupOpenAITextDim     = 1536
+	setupOllamaTextModel   = "nomic-embed-text"
+	setupOllamaTextDim     = 768
+	setupOllamaDocPrefix   = "search_document: "
+	setupOllamaQueryPrefix = "search_query: "
+	setupOllamaMaxInput    = 2000
+	setupEmbedCron         = "*/15 * * * *"
+	setupOllamaProfile     = "ollama"
+	setupPostureDeclared   = "provider-declared"
 
 	setupVoyageManifestName  = "voyage-capabilities.json"
 	setupMistralManifestName = "mistral-capabilities.json"
@@ -269,9 +269,13 @@ func setupDocumentConsent(ctx context.Context, cfg *config.Config, st *store.Sto
 	if !cfg.Attachments.Documents.Enabled {
 		return false
 	}
-	manifest, err := loadDocumentCapabilityManifest(setupMistralManifestPath(cfg))
-	if err != nil {
-		return false
+	var manifest mistral.CapabilityManifest
+	if cfg.Attachments.Documents.Provider == documentindex.ProviderMistral {
+		var err error
+		manifest, err = loadDocumentCapabilityManifest(setupMistralManifestPath(cfg))
+		if err != nil {
+			return false
+		}
 	}
 	_, profile, err := documentProfileForConfig(&cfg.Attachments.Documents, manifest)
 	if err != nil {
@@ -499,6 +503,25 @@ func visualProbeCommand(cfg *config.Config) string {
 func documentsLane(cfg *config.Config, env setupEnvironment) laneStatus {
 	lane := laneStatus{Lane: laneDocuments, Label: "Document attachments (extraction and lexical search)"}
 	documents := cfg.Attachments.Documents
+	if documents.Provider == documentindex.ProviderDocling {
+		lane.Provider, lane.Model = documents.Provider, documents.Model
+		lane.Reason = fmt.Sprintf("operator-controlled endpoint %s; retention=%s, training=%s; uploads are manual-only", documents.Endpoint, documents.RetentionPosture, documents.TrainingPosture)
+		if !documents.Enabled {
+			lane.State = laneStateOff
+			lane.Reason += "; set [attachments.documents] enabled = true"
+			return lane
+		}
+		lane.State = laneStateOn
+		lane.Consent = env.consentState(func(s setupConsentState) bool { return s.Documents })
+		if lane.Consent != consentActive {
+			lane.State = laneStatePending
+			lane.Next = []string{"msgvault documents consent-docling --yes", "msgvault documents build --yes"}
+		}
+		if documents.APIKeyEnv != "" {
+			env.reportMissingCredential(&lane, documents.APIKeyEnv)
+		}
+		return lane
+	}
 	manifest := setupMistralManifestPath(cfg)
 	if documents.Enabled {
 		lane.State = laneStateOn
@@ -531,7 +554,7 @@ func documentsLane(cfg *config.Config, env setupEnvironment) laneStatus {
 		lane.Next = []string{"msgvault setup providers"}
 		return lane
 	}
-	lane.Reason = "needs " + documents.APIKeyEnv + " (Mistral is the only document provider)"
+	lane.Reason = "needs " + documents.APIKeyEnv + "; or configure a self-hosted Docling endpoint"
 	return lane
 }
 
@@ -602,7 +625,7 @@ func peopleInferenceLane(cfg *config.Config, env setupEnvironment) laneStatus {
 		if err == nil && provider.Credential == peoplesweep.CredentialStored {
 			profile, credentialErr := sweep.Profile()
 			if credentialErr == nil {
-				resolver := peoplesweep.NewCredentialResolver(peoplesweep.NewFileCredentialStore(cfg.TokensDir()), env.lookupEnv)
+				resolver := peoplesweep.NewCredentialResolver(peoplesweep.NewStoredCredentials(cfg.TokensDir()), env.lookupEnv)
 				_, credentialErr = resolver.Resolve(name, profile)
 			}
 			if credentialErr != nil {
@@ -619,12 +642,23 @@ func peopleInferenceLane(cfg *config.Config, env setupEnvironment) laneStatus {
 	lane.State = laneStateOff
 	if env.hasEnv(setupOpenAIKeyEnv) {
 		lane.State = laneStatePending
-		lane.Reason = setupOpenAIKeyEnv + " present; setup can onboard the " + setupInferenceModel + " profile"
-		lane.Next = []string{"msgvault setup providers"}
+		lane.Reason = setupOpenAIKeyEnv + " is available; select an HTTP people inference provider with --provider and --model, or enroll Codex through the daemon"
+		lane.Next = []string{peopleInferencePresetSetupCommand("openai", setupOpenAIKeyEnv), peopleInferenceCodexEnrollCommand()}
 		return lane
 	}
-	lane.Reason = "needs " + setupOpenAIKeyEnv + " or a reachable local Ollama server, then `msgvault setup providers`"
+	lane.Reason = "choose an HTTP people inference provider with --provider and --model, enroll Codex through the daemon, or use a reachable local Ollama server"
+	lane.Next = []string{peopleInferencePresetSetupCommand("<openai|openrouter|venice>", "<KEY_ENV>"), peopleInferenceCodexEnrollCommand()}
 	return lane
+}
+
+func peopleInferencePresetSetupCommand(provider, credentialEnv string) string {
+	return "msgvault setup providers --provider " + provider + " --model <model-id> --credential-env " + credentialEnv +
+		" --retention-posture <retention-posture> --training-posture <training-posture> --allow-sensitive=<true|false> --yes"
+}
+
+func peopleInferenceCodexEnrollCommand() string {
+	return "msgvault person provider enroll-codex <name> --source conversation_text --source-since <YYYY-MM-DD>" +
+		" --retention-posture <retention-posture> --training-posture <training-posture> --allow-sensitive=<true|false>"
 }
 
 func activityLane(cfg *config.Config) laneStatus {
@@ -683,9 +717,9 @@ func liveMCPTools(cfg *config.Config) []string {
 
 func writeLaneReport(w io.Writer, report laneReport, jsonOutput bool) error {
 	if jsonOutput {
-		encoder := json.NewEncoder(w)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(report)
+		encoder := jsontext.NewEncoder(w, jsontext.WithIndentPrefix(""), jsontext.WithIndent("  "))
+
+		return json.MarshalEncode(encoder, report, json.Deterministic(true))
 	}
 	table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(table, "LANE\tSTATE\tPROVIDER\tMODEL\tCONSENT\tSCHEDULE")

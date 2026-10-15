@@ -50,6 +50,49 @@ type statusErrorSession struct {
 	mailbox string
 }
 
+type receiptlessAppendSession struct {
+	imapserver.Session
+}
+
+type appendLimitSession struct {
+	imapserver.Session
+
+	limit uint32
+}
+
+func (s *appendLimitSession) AppendLimit() uint32 {
+	return s.limit
+}
+
+type statusAppendLimitSession struct {
+	imapserver.Session
+
+	mailbox string
+	limit   uint32
+}
+
+func (s *statusAppendLimitSession) Status(
+	mailbox string,
+	options *imap.StatusOptions,
+) (*imap.StatusData, error) {
+	data, err := s.Session.Status(mailbox, options)
+	if err != nil {
+		return nil, fmt.Errorf("status %q: %w", mailbox, err)
+	}
+	if mailbox == s.mailbox && options.AppendLimit {
+		data.AppendLimit = &s.limit
+	}
+	return data, nil
+}
+
+func (s *receiptlessAppendSession) Append(mailbox string, r imap.LiteralReader, options *imap.AppendOptions) (*imap.AppendData, error) {
+	_, err := s.Session.Append(mailbox, r, options)
+	if err != nil {
+		return nil, fmt.Errorf("append IMAP memory message: %w", err)
+	}
+	return nil, nil //nolint:nilnil // IMAP success without APPENDUID.
+}
+
 func (s *statusErrorSession) Status(
 	mailbox string,
 	options *imap.StatusOptions,
@@ -379,6 +422,23 @@ func AppendIMAPMessageWithMessageID(
 	require.NoError(t, err)
 }
 
+// AppendIMAPRawMessage appends caller-supplied RFC822 bytes to a mailbox of an
+// in-memory IMAP test user.
+func AppendIMAPRawMessage(
+	t *testing.T,
+	user *imapmemserver.User,
+	mailbox string,
+	raw []byte,
+) {
+	t.Helper()
+	_, err := user.Append(
+		mailbox,
+		imapLiteral{bytes.NewReader(raw)},
+		&imap.AppendOptions{},
+	)
+	require.NoError(t, err)
+}
+
 // StartIMAPMemServer runs an in-memory IMAP server with the given
 // mailboxes and per-mailbox message counts, returning its listen
 // address and the user handle for later mutation. The server is shut
@@ -386,6 +446,28 @@ func AppendIMAPMessageWithMessageID(
 func StartIMAPMemServer(t *testing.T, messagesPerMailbox map[string]int) (string, *imapmemserver.User) {
 	t.Helper()
 	return startIMAPMemServer(t, messagesPerMailbox, nil, "", 0, "", nil)
+}
+
+// IMAPDraftServerOptions controls the capabilities exposed by a draft test
+// server.
+type IMAPDraftServerOptions struct {
+	MessagesPerMailbox  map[string]int
+	Caps                imap.CapSet
+	ReceiptlessAppend   bool
+	AppendLimit         *uint32
+	StatusErrorMailbox  string
+	StatusAppendLimit   *uint32
+	StatusAppendMailbox string
+}
+
+// StartIMAPMemServerForDrafts starts the in-memory server with explicit
+// capabilities so APPEND and UIDPLUS paths can be tested together.
+func StartIMAPMemServerForDrafts(t *testing.T, opts IMAPDraftServerOptions) (string, *imapmemserver.User) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	user := serveIMAPMemServerWithCaps(t, ln, opts.MessagesPerMailbox, nil, "", 0, opts.StatusErrorMailbox, nil, nil, opts.Caps, opts.ReceiptlessAppend, opts.AppendLimit, opts.StatusAppendLimit, opts.StatusAppendMailbox)
+	return ln.Addr().String(), user
 }
 
 // ServeIMAPMemServer serves an in-memory IMAP server on the caller-supplied
@@ -480,6 +562,26 @@ func serveIMAPMemServer(
 	startTLSConfig *tls.Config,
 ) *imapmemserver.User {
 	t.Helper()
+	return serveIMAPMemServerWithCaps(t, ln, messagesPerMailbox, specialUse, selectErrorMailbox, selectErrorCount, statusErrorMailbox, missingUID, startTLSConfig, nil, false, nil, nil, "")
+}
+
+func serveIMAPMemServerWithCaps(
+	t *testing.T,
+	ln net.Listener,
+	messagesPerMailbox map[string]int,
+	specialUse map[string][]imap.MailboxAttr,
+	selectErrorMailbox string,
+	selectErrorCount int,
+	statusErrorMailbox string,
+	missingUID *missingUIDConfig,
+	startTLSConfig *tls.Config,
+	caps imap.CapSet,
+	receiptlessAppend bool,
+	appendLimit *uint32,
+	statusAppendLimit *uint32,
+	statusAppendMailbox string,
+) *imapmemserver.User {
+	t.Helper()
 	user := imapmemserver.NewUser(IMAPTestUsername, IMAPTestPassword)
 	mailboxes := make([]string, 0, len(messagesPerMailbox))
 	for mailbox, count := range messagesPerMailbox {
@@ -494,6 +596,7 @@ func serveIMAPMemServer(
 	memServer.AddUser(user)
 
 	server := imapserver.New(&imapserver.Options{
+		Caps: caps,
 		NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
 			var session imapserver.Session
 			session = memServer.NewSession()
@@ -517,8 +620,17 @@ func serveIMAPMemServer(
 					mailbox: statusErrorMailbox,
 				}
 			}
+			if statusAppendLimit != nil {
+				session = &statusAppendLimitSession{Session: session, mailbox: statusAppendMailbox, limit: *statusAppendLimit}
+			}
 			if missingUID != nil {
 				session = &missingUIDSession{Session: session, config: missingUID}
+			}
+			if receiptlessAppend {
+				session = &receiptlessAppendSession{Session: session}
+			}
+			if appendLimit != nil {
+				session = &appendLimitSession{Session: session, limit: *appendLimit}
 			}
 			return session, nil, nil
 		},

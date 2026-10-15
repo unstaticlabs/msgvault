@@ -36,6 +36,7 @@ const (
 	helpLabelBack      = "Esc back"
 	helpLabelEsc       = "Esc"
 	helpLabelEnter     = "Enter"
+	helpLabelMode      = "m mode"
 	sourceTypeWhatsApp = "whatsapp"
 )
 
@@ -1095,6 +1096,17 @@ func (m Model) handleMessageDetailKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd)
 			return m, m.loadThreadMessages(m.messageDetail.ConversationID)
 		}
 
+	// Save the current email to the TUI process's working directory.
+	case "s":
+		if m.loading || m.savingMessage {
+			return m, nil
+		}
+		if m.messageDetail == nil {
+			return m.showFlash("No message to save")
+		}
+		m.savingMessage = true
+		return m, m.actions.SaveMessage(m.messageDetail)
+
 	// Export attachments
 	case "e":
 		if m.messageDetail != nil && len(m.messageDetail.Attachments) > 0 {
@@ -1273,6 +1285,8 @@ func (m Model) handleAccountSelectorKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cm
 			switch selected.kind {
 			case scopeOptionAll:
 				m.sourceScope = allSourceScope()
+			case scopeOptionVirtual:
+				m.sourceScope = virtualSourceScope(*selected.virtualAccount)
 			case scopeOptionAccount:
 				m.sourceScope = accountSourceScope(selected.accountID)
 			case scopeOptionCollection:

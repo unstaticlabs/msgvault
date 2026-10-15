@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log"
@@ -130,12 +130,49 @@ type DuckDBOptions struct {
 	TempDirectory string
 	// OwnTempDirectory removes TempDirectory after DuckDB closes.
 	OwnTempDirectory bool
+	// MemoryLimit, Threads and MaxTempDirectorySize override the interactive
+	// DuckDB policy. Empty and zero values keep its defaults, which are sized
+	// for a laptop; a large archive must raise them or heavy queries fail with
+	// a DuckDB out-of-memory error once they spill past the cap.
+	MemoryLimit          string
+	Threads              int
+	MaxTempDirectorySize string
 	// DisableLegacyAnalyticalViews skips registration of the Parquet-backed
 	// SQL views. It is a test-only isolation option proving the unfiltered
 	// people/domain/relationship read paths need only the relationship
 	// rollup datasets; filtered predicates route through the explore
 	// logical-entry machinery and require the views.
 	DisableLegacyAnalyticalViews bool
+}
+
+// NewArchiveDuckDBEngine creates a separate SQL engine restricted to the
+// analytics directory. It never attaches SQLite or loads its scanner. Views,
+// resource limits, and publication locking work as on the owner query engine.
+func NewArchiveDuckDBEngine(ctx context.Context, analyticsDir string, opts ...DuckDBOptions) (*DuckDBEngine, error) {
+	if analyticsDir == "" {
+		return nil, errors.New("archive SQL requires an analytics directory")
+	}
+	analyticsDir, err := filepath.Abs(analyticsDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve analytics directory: %w", err)
+	}
+	engine, err := newDuckDBEngine(ctx, analyticsDir, "", nil, opts...)
+	if err != nil {
+		return nil, err
+	}
+	// The constructor registered trusted Parquet views. Lock this independent
+	// instance before any caller SQL runs; the owner engine stays unrestricted.
+	escapedDir := strings.ReplaceAll(filepath.ToSlash(analyticsDir), "'", "''")
+	_, err = engine.db.ExecContext(ctx, "SET allowed_directories = ['"+escapedDir+"']; "+
+		"SET autoinstall_known_extensions = false; "+
+		"SET autoload_known_extensions = false; "+
+		"SET allow_community_extensions = false; "+
+		"SET enable_external_access = false; "+
+		"SET lock_configuration = true")
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("restrict archive SQL access: %w", err), engine.Close())
+	}
+	return engine, nil
 }
 
 // NewDuckDBEngine creates a new DuckDB-backed query engine.
@@ -151,6 +188,10 @@ type DuckDBOptions struct {
 // If sqliteDB is nil, Search will fall back to LIKE queries and body extraction
 // from raw MIME may be slower.
 func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, opts ...DuckDBOptions) (*DuckDBEngine, error) {
+	return newDuckDBEngine(context.Background(), analyticsDir, sqlitePath, sqliteDB, opts...)
+}
+
+func newDuckDBEngine(ctx context.Context, analyticsDir string, sqlitePath string, sqliteDB *sql.DB, opts ...DuckDBOptions) (*DuckDBEngine, error) {
 	var opt DuckDBOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -166,7 +207,14 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 		ownTempDirectory = true
 	}
 
-	db, err := duckdbutil.Open(context.Background(), duckdbutil.InteractivePolicy(tempDirectory))
+	db, err := duckdbutil.Open(ctx, duckdbutil.InteractivePolicyWithOverrides(
+		tempDirectory,
+		duckdbutil.InteractiveOverrides{
+			MemoryLimit:          opt.MemoryLimit,
+			Threads:              opt.Threads,
+			MaxTempDirectorySize: opt.MaxTempDirectorySize,
+		},
+	))
 	if err != nil {
 		if ownTempDirectory {
 			_ = os.RemoveAll(tempDirectory)
@@ -181,13 +229,13 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 	// On other platforms, try to load but fall back gracefully (e.g. no internet).
 	var hasSQLiteScanner bool
 	if sqlitePath != "" && runtime.GOOS != "windows" && !opt.DisableSQLiteScanner {
-		if _, err := db.Exec("INSTALL sqlite; LOAD sqlite;"); err != nil {
+		if _, err := db.ExecContext(ctx, "INSTALL sqlite; LOAD sqlite;"); err != nil {
 			log.Printf("[warn] sqlite_scanner extension unavailable, falling back to direct SQLite: %v", err)
 		} else {
 			// Attach SQLite database as read-only
 			escapedPath := strings.ReplaceAll(sqlitePath, "'", "''")
 			attachSQL := fmt.Sprintf("ATTACH '%s' AS sqlite_db (TYPE sqlite, READ_ONLY)", escapedPath)
-			if _, err := db.Exec(attachSQL); err != nil {
+			if _, err := db.ExecContext(ctx, attachSQL); err != nil {
 				log.Printf("[warn] failed to attach SQLite via sqlite_scanner, falling back to direct SQLite: %v", err)
 			} else {
 				hasSQLiteScanner = true
@@ -216,7 +264,7 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 	}
 	var releaseInitialCacheRead func()
 	if analyticsDir != "" {
-		releaseInitialCacheRead, err = AcquireCacheReadLock(context.Background(), analyticsDir)
+		releaseInitialCacheRead, err = AcquireCacheReadLock(ctx, analyticsDir)
 		if err != nil {
 			_ = engine.Close()
 			return nil, err
@@ -233,9 +281,12 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 
 	// Probe Parquet schemas for optional columns added in PR #160 (WhatsApp import).
 	// Old cache files may lack these columns; we'll supply defaults in parquetCTEs().
-	engine.optionalCols, engine.cacheFP = stableOptionalColumns(engine.cacheFingerprint, func() map[string]map[string]bool {
-		return probeAllOptionalColumns(db, analyticsDir)
+	engine.optionalCols, engine.cacheFP, err = stableOptionalColumns(ctx, engine.cacheFingerprint, func() (map[string]map[string]bool, error) {
+		return probeAllOptionalColumns(ctx, db, analyticsDir)
 	})
+	if err != nil {
+		return nil, errors.Join(err, engine.Close())
+	}
 	var missing []string
 	for _, col := range []struct{ table, col string }{
 		{datasetParticipants, "phone_number"},
@@ -244,6 +295,8 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 		{datasetMessages, "owner_participant_id"},
 		{datasetMessages, messageTypeDimension},
 		{datasetMessages, "list_id"},
+		{datasetMessages, "account_address"},
+		{datasetMessages, "account_path"},
 		{datasetConversations, "title"},
 		{datasetConversations, "conversation_type"},
 		{"sources", "source_type"},
@@ -258,10 +311,18 @@ func NewDuckDBEngine(analyticsDir string, sqlitePath string, sqliteDB *sql.DB, o
 	// Register SQL views over Parquet files for raw SQL access.
 	// Pass the already-probed optionalCols to avoid a redundant schema probe.
 	if !engine.disableLegacyAnalyticalViews {
-		if err := RegisterViewsWithColumns(db, analyticsDir, engine.optionalCols); err != nil {
+		if err := RegisterViewsWithColumns(ctx, db, analyticsDir, engine.optionalCols); err != nil {
+			if ctx.Err() != nil {
+				return nil, errors.Join(ctx.Err(), engine.Close())
+			}
 			log.Printf("[warn] failed to register SQL views: %v", err)
 			// Non-fatal: existing CTE-based queries still work.
 		}
+	} else if err := createRelationshipActivityView(ctx, db, analyticsDir); err != nil {
+		if ctx.Err() != nil {
+			return nil, errors.Join(ctx.Err(), engine.Close())
+		}
+		log.Printf("[warn] failed to register relationship activity view: %v", err)
 	}
 
 	return engine, nil
@@ -311,9 +372,20 @@ func (e *DuckDBEngine) QuerySQL(
 		return nil, err
 	}
 	defer release()
+	var cache *CacheFreshness
+	if e.analyticsDir != "" {
+		state, err := ReadCacheSyncState(e.analyticsDir)
+		if err != nil {
+			return nil, fmt.Errorf("read analytics publication for query: %w", err)
+		}
+		cache = &CacheFreshness{
+			Generation:  state.DatasetFingerprint,
+			PublishedAt: state.PublishedAt,
+		}
+	}
 
-	// codeql[go/sql-injection] -- QuerySQL is an explicit trusted-user SQL
-	// interface over the user's local archive, not an injection boundary.
+	// codeql[go/sql-injection] -- This is an explicit SQL interface. MCP uses
+	// NewArchiveDuckDBEngine's native access restrictions; owner SQL is privileged.
 	rows, err := e.db.QueryContext(ctx, sqlStr)
 	if err != nil {
 		return nil, fmt.Errorf("execute query: %w", err)
@@ -325,7 +397,7 @@ func (e *DuckDBEngine) QuerySQL(
 		return nil, fmt.Errorf("get columns: %w", err)
 	}
 
-	result := &QueryResult{Columns: cols}
+	result := &QueryResult{Columns: cols, Cache: cache}
 	for rows.Next() {
 		vals := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -407,7 +479,10 @@ func (e *DuckDBEngine) acquireCacheRead(ctx context.Context) (func(), error) {
 		release()
 		return nil, err
 	}
-	e.ensureFreshOptionalCols(statSig)
+	if err := e.ensureFreshOptionalCols(ctx, statSig); err != nil {
+		release()
+		return nil, err
+	}
 	return release, nil
 }
 
@@ -485,6 +560,12 @@ func (e *DuckDBEngine) parquetPath(table string) string {
 	return filepath.Join(e.analyticsDir, table, "*.parquet")
 }
 
+// filenameCondition matches msg rows with an attachment name ILIKE the bound pattern.
+// It reads the cached Parquet because the daemon never attaches sqlite_db.
+func (e *DuckDBEngine) filenameCondition() string {
+	return fmt.Sprintf(`EXISTS (SELECT 1 FROM read_parquet('%s') fa WHERE CAST(fa.message_id AS BIGINT) = msg.id AND CAST(fa.filename AS VARCHAR) ILIKE ? ESCAPE '\')`, e.parquetPath("attachments"))
+}
+
 // hasCol returns true if the named column exists in the Parquet schema for the given table.
 func (e *DuckDBEngine) hasCol(table, col string) bool {
 	e.optColsMu.RLock()
@@ -538,15 +619,25 @@ func (e *DuckDBEngine) cacheFingerprintGlobs() []string {
 }
 
 func stableOptionalColumns(
+	ctx context.Context,
 	cacheFingerprint func() string,
-	probe func() map[string]map[string]bool,
-) (map[string]map[string]bool, string) {
+	probe func() (map[string]map[string]bool, error),
+) (map[string]map[string]bool, string, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		before := cacheFingerprint()
-		cols := probe()
+		cols, err := probe()
+		if err != nil {
+			return nil, "", err
+		}
 		after := cacheFingerprint()
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		if before == after {
-			return cols, after
+			return cols, after, nil
 		}
 		log.Printf("[info] analytics cache changed during Parquet schema probe — retrying")
 	}
@@ -564,31 +655,46 @@ func stableOptionalColumns(
 //
 // Runs centrally from acquireCacheRead, so every query path — slot-gated and
 // detail lookups alike — refreshes before touching Parquet or the views.
-func (e *DuckDBEngine) ensureFreshOptionalCols(fp string) {
+func (e *DuckDBEngine) ensureFreshOptionalCols(ctx context.Context, fp string) error {
 	e.optColsMu.RLock()
 	unchanged := fp == e.cacheFP
 	e.optColsMu.RUnlock()
 	if unchanged {
-		return
+		return ctx.Err()
 	}
 
 	e.optColsMu.Lock()
 	defer e.optColsMu.Unlock()
 	if fp == e.cacheFP { // another goroutine refreshed while we waited
-		return
+		return ctx.Err()
 	}
 
-	newCols, fp := stableOptionalColumns(e.cacheFingerprint, func() map[string]map[string]bool {
-		return probeAllOptionalColumns(e.db, e.analyticsDir)
+	newCols, fp, err := stableOptionalColumns(ctx, e.cacheFingerprint, func() (map[string]map[string]bool, error) {
+		return probeAllOptionalColumns(ctx, e.db, e.analyticsDir)
 	})
-	e.optionalCols = newCols
-	e.cacheFP = fp
+	if err != nil {
+		return err
+	}
 	if !e.disableLegacyAnalyticalViews {
-		if err := RegisterViewsWithColumns(e.db, e.analyticsDir, newCols); err != nil {
+		if err := RegisterViewsWithColumns(ctx, e.db, e.analyticsDir, newCols); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			log.Printf("[warn] re-register views after analytics cache change: %v", err)
 		}
+	} else if err := createRelationshipActivityView(ctx, e.db, e.analyticsDir); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		log.Printf("[warn] re-register relationship activity view after analytics cache change: %v", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.optionalCols = newCols
+	e.cacheFP = fp
 	log.Printf("[info] analytics cache changed — re-probed Parquet optional columns")
+	return nil
 }
 
 func (e *DuckDBEngine) currentCacheFingerprint() string {
@@ -649,6 +755,13 @@ func (e *DuckDBEngine) parquetCTEs() string {
 		msgReplace = append(msgReplace, "CAST(list_id AS VARCHAR) AS list_id")
 	} else {
 		msgExtra = append(msgExtra, "NULL::VARCHAR AS list_id")
+	}
+	for _, col := range []string{"account_address", "account_path"} {
+		if e.hasCol(datasetMessages, col) {
+			msgReplace = append(msgReplace, "CAST("+col+" AS VARCHAR) AS "+col)
+		} else {
+			msgExtra = append(msgExtra, "NULL::VARCHAR AS "+col)
+		}
 	}
 	if e.hasCol(datasetMessages, "deleted_at") {
 		msgReplace = append(msgReplace, "TRY_CAST(deleted_at AS TIMESTAMP) AS deleted_at")
@@ -942,6 +1055,16 @@ func (e *DuckDBEngine) buildNonTextSearchConditions(q *search.Query, keyColumns 
 		conditions = append(conditions, `msg.list_id ILIKE ? ESCAPE '\'`)
 		args = append(args, "%"+escapeILIKE(listID)+"%")
 	}
+	// account: and received: match the derived account projection.
+	if accountConditions, accountArgs := search.AccountConditions(q, "msg"); len(accountConditions) > 0 {
+		conditions = append(conditions, accountConditions...)
+		args = append(args, accountArgs...)
+	}
+	conditions, args = appendAccountScopeConditions(conditions, args, q.AccountScopes, "msg")
+	for _, filename := range q.Filenames {
+		conditions = append(conditions, e.filenameCondition())
+		args = append(args, "%"+escapeILIKE(filename)+"%")
+	}
 
 	// label: filter - case-insensitive substring match.
 	// In the Labels aggregate view (keyColumns includes the label column),
@@ -1113,11 +1236,12 @@ func (e *DuckDBEngine) buildWhereClause(opts AggregateOptions, keyColumns ...str
 	var conditions []string
 	var args []any
 
-	if !hasExplicitMessageTypeSearch(opts.SearchQuery) {
+	if !aggregateOverridesEmailDefault(MessageFilter{}, opts) {
 		conditions = append(conditions, emailOnlyFilterMsg)
 	}
 	conditions = append(conditions, store.LiveMessagesWhere("msg", opts.HideDeletedFromSource))
 	conditions, args = appendSourceFilter(conditions, args, "msg.", opts.SourceID, opts.SourceIDs)
+	conditions, args = appendAccountScopeConditions(conditions, args, opts.AccountScopes, "msg")
 
 	if opts.After != nil {
 		conditions = append(conditions, "msg.sent_at >= CAST(? AS TIMESTAMP)")
@@ -1346,6 +1470,7 @@ func (e *DuckDBEngine) buildFilterConditions(filter MessageFilter) (string, []an
 
 	conditions = append(conditions, store.LiveMessagesWhere("msg", filter.HideDeletedFromSource))
 	conditions, args = appendSourceFilter(conditions, args, "msg.", filter.SourceID, filter.SourceIDs)
+	conditions, args = appendAccountScopeConditions(conditions, args, filter.AccountScopes, "msg")
 
 	if filter.ConversationID != nil {
 		conditions = append(conditions, "msg.conversation_id = ?")
@@ -1600,12 +1725,13 @@ func (e *DuckDBEngine) SubAggregate(ctx context.Context, filter MessageFilter, g
 		filter.HideDeletedFromSource = true
 	}
 	where, args := e.buildFilterConditions(filter)
-	if strings.TrimSpace(filter.MessageType) == "" && !hasExplicitMessageTypeSearch(opts.SearchQuery) {
+	if strings.TrimSpace(filter.MessageType) == "" && !aggregateOverridesEmailDefault(filter, opts) {
 		where += " AND " + emailOnlyFilterMsg
 	}
 
 	// Add opts-based conditions (source IDs, date range, attachment filter).
 	whereParts, args := appendSourceFilter(nil, args, "msg.", opts.SourceID, opts.SourceIDs)
+	whereParts, args = appendAccountScopeConditions(whereParts, args, opts.AccountScopes, "msg")
 	if len(whereParts) > 0 {
 		where += " AND " + strings.Join(whereParts, " AND ")
 	}
@@ -1778,6 +1904,15 @@ func (e *DuckDBEngine) GetTotalStats(ctx context.Context, opts StatsOptions) (*T
 	return stats, nil
 }
 
+// ListVirtualAccounts reads the virtual account catalog through the live
+// SQLite engine, or returns none when only the Parquet cache is available.
+func (e *DuckDBEngine) ListVirtualAccounts(ctx context.Context) (map[int64][]store.VirtualAccount, error) {
+	if e.sqliteEngine != nil {
+		return e.sqliteEngine.ListVirtualAccounts(ctx)
+	}
+	return map[int64][]store.VirtualAccount{}, nil
+}
+
 // ListAccounts returns accounts from SQLite via DuckDB's sqlite_scan,
 // or via direct SQLite connection on platforms without sqlite_scanner.
 func (e *DuckDBEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
@@ -1789,7 +1924,7 @@ func (e *DuckDBEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) 
 	}
 
 	rows, err := e.db.QueryContext(ctx, `
-		SELECT id, source_type, identifier, COALESCE(display_name, ''), sync_config
+		SELECT id, source_type, identifier, COALESCE(display_name, ''), sync_config, last_sync_at
 		FROM sqlite_db.sources
 		ORDER BY identifier
 	`)
@@ -1802,11 +1937,16 @@ func (e *DuckDBEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) 
 	for rows.Next() {
 		var acc AccountInfo
 		var config sql.NullString
-		if err := rows.Scan(&acc.ID, &acc.SourceType, &acc.Identifier, &acc.DisplayName, &config); err != nil {
+		var lastSyncAt sql.NullTime
+		if err := rows.Scan(&acc.ID, &acc.SourceType, &acc.Identifier, &acc.DisplayName, &config, &lastSyncAt); err != nil {
 			return nil, fmt.Errorf("scan account: %w", err)
 		}
 		if acc.SourceType == "gcal" {
 			acc.CalendarCoverage = store.ParseCalendarCoverage(config)
+		}
+		if lastSyncAt.Valid {
+			syncedAt := lastSyncAt.Time.UTC()
+			acc.LastSyncAt = &syncedAt
 		}
 		accounts = append(accounts, acc)
 	}
@@ -2096,10 +2236,10 @@ func (e *DuckDBEngine) GetMessage(ctx context.Context, id int64) (*MessageDetail
 
 // GetMessageBySourceID retrieves a message by source ID from SQLite.
 // Uses direct SQLite connection when available for better BLOB handling.
-func (e *DuckDBEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID string) (*MessageDetail, error) {
+func (e *DuckDBEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID string, sourceIDs []int64) (*MessageDetail, error) {
 	// Prefer direct SQLite for body/BLOB retrieval
 	if e.sqliteEngine != nil {
-		return e.sqliteEngine.GetMessageBySourceID(ctx, sourceMessageID)
+		return e.sqliteEngine.GetMessageBySourceID(ctx, sourceMessageID, sourceIDs)
 	}
 
 	// Fall back to sqlite_scan
@@ -2107,7 +2247,8 @@ func (e *DuckDBEngine) GetMessageBySourceID(ctx context.Context, sourceMessageID
 		return nil, errors.New("GetMessageBySourceID requires SQLite: pass sqlitePath to NewDuckDBEngine")
 	}
 
-	return e.getMessageByQuery(ctx, "m.source_message_id = ?", sourceMessageID)
+	conditions, args := appendSourceFilter([]string{"m.source_message_id = ?"}, []any{sourceMessageID}, "m.", nil, sourceIDs)
+	return e.getMessageByQuery(ctx, strings.Join(conditions, " AND "), args...)
 }
 
 // GetAttachment retrieves attachment metadata by ID.
@@ -2234,6 +2375,16 @@ func (e *DuckDBEngine) Search(ctx context.Context, q *search.Query, limit, offse
 		}
 		conditions = append(conditions, "m.list_id ILIKE ? ESCAPE '\\'")
 		args = append(args, "%"+escapeSQLiteLike(listID)+"%")
+	}
+	// account: and received: match the derived account projection.
+	if accountConditions, accountArgs := search.AccountConditions(q, "m"); len(accountConditions) > 0 {
+		conditions = append(conditions, accountConditions...)
+		args = append(args, accountArgs...)
+	}
+	conditions, args = appendAccountScopeConditions(conditions, args, q.AccountScopes, "m")
+	for _, filename := range q.Filenames {
+		conditions = append(conditions, `EXISTS (SELECT 1 FROM sqlite_db.attachments fa WHERE fa.message_id = m.id AND fa.filename ILIKE ? ESCAPE '\')`)
+		args = append(args, "%"+escapeILIKE(filename)+"%")
 	}
 
 	if len(q.MessageTypes) > 0 {
@@ -2396,7 +2547,7 @@ func (e *DuckDBEngine) SearchDeepWithStats(
 // SearchMessageBodies delegates to the direct SQLite engine so FTS5 can scope
 // MATCH to the indexed body column. The sqlite_scanner fallback is
 // intentionally unsupported: exact body search must never scan message_bodies.
-func (e *DuckDBEngine) SearchMessageBodies(ctx context.Context, q *search.Query, limit, offset int) ([]MessageSummary, error) {
+func (e *DuckDBEngine) SearchMessageBodies(ctx context.Context, q *search.Query, limit, offset int) (*SearchFastResult, error) {
 	if e.sqliteEngine == nil {
 		return nil, fmt.Errorf("%w: a direct SQLite engine is required; reopen the query engine with a SQLite connection", ErrMessageBodySearchUnavailable)
 	}
@@ -2406,11 +2557,11 @@ func (e *DuckDBEngine) SearchMessageBodies(ctx context.Context, q *search.Query,
 // SearchByDomains returns message summaries for the given sender domains.
 // It delegates to SQLite because domain search needs JOINs across
 // participants and message_recipients that the Parquet cache doesn't carry.
-func (e *DuckDBEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int) ([]MessageSummary, error) {
+func (e *DuckDBEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) ([]MessageSummary, error) {
 	// Delegate to SQLite — domain search requires JOINs across participants
 	// and message_recipients which are not available in the Parquet cache.
 	if e.sqliteEngine != nil {
-		return e.sqliteEngine.SearchByDomains(ctx, domains, after, before, limit, offset)
+		return e.sqliteEngine.SearchByDomains(ctx, domains, after, before, limit, offset, sourceIDs)
 	}
 	return nil, errors.New("SearchByDomains requires SQLite engine (participant data not in Parquet cache)")
 }
@@ -2436,12 +2587,12 @@ func (e *DuckDBEngine) GetDeletionTargetsByFilter(ctx context.Context, filter Me
 	filter.HideDeletedFromSource = true
 	where, args := e.buildFilterConditions(filter)
 
-	// Build query — JOIN src to scope to Gmail sources authoritatively.
+	// Build query — JOIN src to scope to deletable sources authoritatively.
 	query := fmt.Sprintf(`
 		WITH %s
 		SELECT msg.id, msg.source_id, COALESCE(src.source_type, 'gmail'), src.account_email, msg.source_message_id
 		FROM msg
-		JOIN src ON src.id = msg.source_id AND COALESCE(src.source_type, 'gmail') = 'gmail'
+		JOIN src ON src.id = msg.source_id AND COALESCE(src.source_type, 'gmail') IN `+deletableSourceTypesSQL+`
 		WHERE %s
 		ORDER BY msg.sent_at DESC, msg.id DESC
 	`, e.parquetCTEs(), where)
@@ -2520,7 +2671,7 @@ func (e *DuckDBEngine) deletionTargetsForMessageIDChunk(ctx context.Context, ids
 		SELECT msg.id, msg.source_id, COALESCE(src.source_type, 'gmail'), src.account_email,
 		       msg.source_message_id, msg.sent_at
 		FROM msg
-		JOIN src ON src.id = msg.source_id AND COALESCE(src.source_type, 'gmail') = 'gmail'
+		JOIN src ON src.id = msg.source_id AND COALESCE(src.source_type, 'gmail') IN `+deletableSourceTypesSQL+`
 		       WHERE %s AND %s AND COALESCE(msg.source_message_id, '') <> '' AND msg.id IN (%s)
 	`, e.parquetCTEs(), store.LiveMessagesWhere("msg", true), emailOnlyFilterMsg, strings.Join(placeholders, ","))
 	rows, err := e.db.QueryContext(ctx, q, args...)
@@ -2552,6 +2703,8 @@ var RequiredParquetDirs = []string{
 	identityindex.DatasetPeople,
 	identityindex.DatasetDomains,
 	identityindex.DatasetRelationshipDaily,
+	identityindex.DatasetLogicalContributions,
+	identityindex.DatasetTemperatureContributions,
 }
 
 // SearchFast searches message metadata in Parquet files (no body text).
@@ -2743,7 +2896,7 @@ func searchCacheKeyFor(conditions []string, args []any, cacheFP string) string {
 		A  []any    `json:"a"`
 		FP string   `json:"fp"`
 	}{conditions, args, cacheFP}
-	b, err := json.Marshal(key)
+	b, err := json.Marshal(key, json.Deterministic(true))
 	if err != nil {
 		// Fallback: should never happen with the types buildSearchConditions produces.
 		return fmt.Sprintf("%v#%v#%s", conditions, args, cacheFP)
@@ -3124,6 +3277,16 @@ func (e *DuckDBEngine) buildSearchConditions(q *search.Query, filter MessageFilt
 		conditions = append(conditions, `msg.list_id ILIKE ? ESCAPE '\'`)
 		args = append(args, "%"+escapeILIKE(listID)+"%")
 	}
+	// account: and received: match the derived account projection.
+	if accountConditions, accountArgs := search.AccountConditions(q, "msg"); len(accountConditions) > 0 {
+		conditions = append(conditions, accountConditions...)
+		args = append(args, accountArgs...)
+	}
+	conditions, args = appendAccountScopeConditions(conditions, args, q.AccountScopes, "msg")
+	for _, filename := range q.Filenames {
+		conditions = append(conditions, e.filenameCondition())
+		args = append(args, "%"+escapeILIKE(filename)+"%")
+	}
 
 	// Label filter - case-insensitive substring match
 	if len(q.Labels) > 0 {
@@ -3215,4 +3378,37 @@ func appendDuckDBRecipientSearchCondition(
 	)`, strings.Join(addressParts, " OR ")))
 	args = append(args, recipientArgs...)
 	return conditions, args
+}
+
+var errOriginalMessageNeedsSQLite = fmt.Errorf("original message export requires the SQLite archive: %w", ErrOriginalExportUnsupported)
+
+// ReadOriginalMessage reads from SQLite; the Parquet cache holds no raw MIME.
+func (e *DuckDBEngine) ReadOriginalMessage(ctx context.Context, ref MessageRef, maxBytes int64) (*OriginalMessage, error) {
+	if e.sqliteEngine == nil {
+		return nil, errOriginalMessageNeedsSQLite
+	}
+	return e.sqliteEngine.ReadOriginalMessage(ctx, ref, maxBytes)
+}
+
+// ResolveMessageID reads from SQLite because the Parquet cache can lag recent syncs.
+func (e *DuckDBEngine) ResolveMessageID(ctx context.Context, ref string) (int64, string, error) {
+	if e.sqliteEngine == nil {
+		return 0, "", errOriginalMessageNeedsSQLite
+	}
+	return e.sqliteEngine.ResolveMessageID(ctx, ref)
+}
+
+// ListThread reads from SQLite because the Parquet cache can lag recent syncs.
+func (e *DuckDBEngine) ListThread(ctx context.Context, q ThreadQuery) (*ThreadPage, error) {
+	if e.sqliteEngine == nil {
+		return nil, errOriginalMessageNeedsSQLite
+	}
+	return e.sqliteEngine.ListThread(ctx, q)
+}
+
+func (e *DuckDBEngine) ReadOriginalMessageForSources(ctx context.Context, ref MessageRef, maxBytes int64, sourceIDs []int64) (*OriginalMessage, error) {
+	if e.sqliteEngine == nil {
+		return nil, errOriginalMessageNeedsSQLite
+	}
+	return e.sqliteEngine.ReadOriginalMessageForSources(ctx, ref, maxBytes, sourceIDs)
 }

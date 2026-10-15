@@ -633,7 +633,7 @@ func TestSearchByDomains_HidesDeleted(t *testing.T) {
 	env := newTestEnv(t)
 	ctx := context.Background()
 
-	all, err := env.Engine.SearchByDomains(ctx, []string{"example.com"}, nil, nil, 100, 0)
+	all, err := env.Engine.SearchByDomains(ctx, []string{"example.com"}, nil, nil, 100, 0, nil)
 	require.NoError(err, "SearchByDomains baseline")
 	require.Len(all, 5, "baseline result count")
 
@@ -642,13 +642,26 @@ func TestSearchByDomains_HidesDeleted(t *testing.T) {
 	// Source-delete another — also hidden by the full live-message predicate.
 	env.MarkDeletedByID(2)
 
-	results, err := env.Engine.SearchByDomains(ctx, []string{"example.com"}, nil, nil, 100, 0)
+	results, err := env.Engine.SearchByDomains(ctx, []string{"example.com"}, nil, nil, 100, 0, nil)
 	require.NoError(err, "SearchByDomains after deletes")
 	assert.Len(results, 3, "after deletes")
 	for _, r := range results {
 		assert.NotEqual(int64(1), r.ID, "dedup-loser message 1 leaked into results")
 		assert.NotEqual(int64(2), r.ID, "source-deleted message 2 leaked into results")
 	}
+}
+
+func TestSearchByDomains_SourceFilter(t *testing.T) {
+	require := require.New(t)
+	env := newTestEnv(t)
+	ctx := context.Background()
+
+	own, err := env.Engine.SearchByDomains(ctx, []string{"example.com"}, nil, nil, 100, 0, []int64{1})
+	require.NoError(err)
+	require.Len(own, 5, "the fixture's own source keeps every match")
+	other, err := env.Engine.SearchByDomains(ctx, []string{"example.com"}, nil, nil, 100, 0, []int64{999})
+	require.NoError(err)
+	require.Empty(other, "another source filters every match out")
 }
 
 func TestSearch_DeletionScope(t *testing.T) {
@@ -693,4 +706,16 @@ func TestSearch_DeletionScope(t *testing.T) {
 		"MergeFilterIntoQuery should set HideDeleted from HideDeletedFromSource")
 	results := env.MustSearch(merged, 100, 0)
 	require.Len(t, results, 3, "Search via merged query")
+}
+
+func TestSearchFilenameLiteralFilters(t *testing.T) {
+	env := newTestEnv(t)
+	id := env.AddMessage(dbtest.MessageOpts{Subject: "shared plan", SentAt: "2026-01-01 10:00:00"})
+	other := env.AddMessage(dbtest.MessageOpts{Subject: "shared plan", SentAt: "2026-02-01 10:00:00"})
+	_, err := env.DB.Exec(`INSERT INTO attachments(message_id,filename,mime_type,size,storage_path,content_hash) VALUES (?, 'Budget%_Plan.PDF','application/pdf',10,'synthetic',NULL),(?,'界.csv','text/csv',10,'synthetic',NULL),(?,'BudgetXXPlan.pdf','application/pdf',10,'synthetic',NULL),(?,'界.csv','text/csv',10,'synthetic',NULL)`, id, id, other, other)
+	require.NoError(t, err)
+	env.EnableFTS()
+	rows := env.MustSearch(search.Parse(`shared filename:budget%_ filename:界`), 1, 0)
+	require.Len(t, rows, 1)
+	assert.Equal(t, id, rows[0].ID)
 }

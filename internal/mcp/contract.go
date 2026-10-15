@@ -1,13 +1,23 @@
 package mcp
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
+
+	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type toolRequest struct {
-	arguments map[string]any
+	arguments                     map[string]any
+	session                       *sdkmcp.ServerSession
+	inputResponses                sdkmcp.InputResponseMap
+	toolName                      string
+	requestState                  string
+	confirmations                 *confirmationChallenges
+	confirmationSessionKey        string
+	requireConfirmationSessionKey bool
 }
 
 func (r toolRequest) GetArguments() map[string]any {
@@ -22,8 +32,10 @@ type embeddedResource struct {
 
 type toolResult struct {
 	text              string
-	structuredContent json.RawMessage
+	structuredContent jsontext.Value
 	embeddedResource  *embeddedResource
+	inputRequests     sdkmcp.InputRequestMap
+	requestState      string
 	isError           bool
 }
 
@@ -48,7 +60,7 @@ func newInternalError(operation string, err error) error {
 }
 
 func jsonResult(v any) (*toolResult, error) {
-	data, err := json.Marshal(v)
+	data, err := json.Marshal(v, json.Deterministic(true))
 	if err != nil {
 		return nil, &internalError{
 			operation: "marshal tool result",
@@ -56,7 +68,7 @@ func jsonResult(v any) (*toolResult, error) {
 		}
 	}
 
-	raw := json.RawMessage(data)
+	raw := jsontext.Value(data)
 	return &toolResult{
 		text:              string(raw),
 		structuredContent: raw,

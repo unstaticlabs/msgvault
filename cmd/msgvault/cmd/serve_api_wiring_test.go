@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,61 @@ func TestStoreAPIAdapterExposesFileMetadataCatalog(t *testing.T) {
 	files, err := adapter.GetFileMetadataBatch(t.Context(), nil)
 	requirements.NoError(err)
 	assertions.Empty(files)
+}
+
+func TestStoreAPIAdapterServesPersonMatchScoringRun(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	fixture := storetest.New(t)
+	st := fixture.Store
+	cfg := config.NewDefaultConfig()
+	cfg.People.IdentityScoring.Enabled = true
+	cfg.People.IdentityScoring.CredentialEnv = "MSGVAULT_JEV_DAEMON_WIRING_FIXTURE_KEY"
+	cfg.People.IdentityScoring.RetentionDeclaration = "fixture retention declaration"
+	t.Setenv(cfg.People.IdentityScoring.CredentialEnv, "fixture-key")
+
+	srv := api.NewServerWithOptions(api.ServerOptions{
+		Config: cfg,
+		Store:  &storeAPIAdapter{store: st},
+		Logger: slog.New(slog.DiscardHandler),
+	})
+	disclosure, err := cfg.People.IdentityScoring.Disclosure()
+	require.NoError(err)
+	fingerprint, err := disclosure.Fingerprint()
+	require.NoError(err)
+	consentRequest := httptest.NewRequest(http.MethodPost, "/api/v1/identity/scoring/consent",
+		strings.NewReader(fmt.Sprintf(`{"disclosure_fingerprint":%q}`, fingerprint)))
+	consentRequest.Header.Set("Content-Type", "application/json")
+	consentResponse := httptest.NewRecorder()
+	srv.Router().ServeHTTP(consentResponse, consentRequest)
+	require.Equal(http.StatusOK, consentResponse.Code, consentResponse.Body.String())
+
+	runRequest := httptest.NewRequest(http.MethodPost, "/api/v1/identity/scoring/run",
+		strings.NewReader(`{"limit":1}`))
+	runRequest.Header.Set("Content-Type", "application/json")
+	runResponse := httptest.NewRecorder()
+	srv.Router().ServeHTTP(runResponse, runRequest)
+	require.Equal(http.StatusOK, runResponse.Code, runResponse.Body.String())
+	var result api.PersonMatchScoringResponse
+	require.NoError(json.Unmarshal(runResponse.Body.Bytes(), &result))
+	assert.Nil(result.Error)
+	assert.Zero(result.Processed)
+	assert.Empty(result.Results)
+
+	providerDispatched := false
+	egressStore, ok := any(&storeAPIAdapter{store: st}).(interface {
+		PersonMatchConsentEgressContext(ctx context.Context, fingerprint string, dispatch func() error) (bool, error)
+	})
+	require.True(ok)
+	consented, err := egressStore.PersonMatchConsentEgressContext(
+		t.Context(), fingerprint, func() error {
+			providerDispatched = true
+			return nil
+		},
+	)
+	require.NoError(err)
+	assert.True(consented)
+	assert.True(providerDispatched)
 }
 
 func TestStoreAPIAdapterExposesCuratedPeopleCompletion(t *testing.T) {
@@ -290,5 +346,45 @@ func TestStoreAPIAdapterServesOrganizationAndEmploymentRoutes(t *testing.T) {
 
 			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
 		})
+	}
+}
+
+func TestServeFilenameDiscoveryWiring(t *testing.T) {
+	require := require.New(t)
+
+	f := storetest.New(t)
+	member, err := f.Store.EnsureParticipant("member@example.test", "Member Example", "example.test")
+	require.NoError(err)
+	person, _, err := f.Store.CreatePersonFromParticipant(member)
+	require.NoError(err)
+	message := f.CreateMessage("suggestion-wire")
+	require.NoError(f.Store.ReplaceMessageRecipients(message, "to", []int64{member}, []string{"Member Example"}))
+	var attachment int64
+	require.NoError(f.Store.DB().QueryRow(f.Store.Rebind(`INSERT INTO attachments(message_id,filename,storage_path) VALUES(?,'report.pdf','') RETURNING id`), message).Scan(&attachment))
+	for range 100 {
+		batch, err := f.Store.FilenameDiscoveryBatchContext(t.Context())
+		require.NoError(err)
+		if batch.Status.Phase == "ready" && !batch.More {
+			break
+		}
+	}
+	f.Store.DB().SetMaxOpenConns(1)
+	srv := api.NewServerWithOptions(api.ServerOptions{Config: &config.Config{}, Store: &storeAPIAdapter{store: f.Store}, Logger: slog.New(slog.DiscardHandler)})
+	for _, path := range []string{"/api/v1/files/suggest", fmt.Sprintf("/api/v1/people/%d/files/suggest", person.ID)} {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"filename_query":"report.pdf"}`))
+		r.Header.Set("Content-Type", "application/json")
+		srv.Router().ServeHTTP(w, r)
+		require.Equal(200, w.Code, w.Body.String())
+		var body map[string]any
+		decoder := json.NewDecoder(w.Body)
+		decoder.UseNumber()
+		require.NoError(decoder.Decode(&body))
+		rows, ok := body["suggestions"].([]any)
+		require.True(ok)
+		require.Len(rows, 1)
+		row, ok := rows[0].(map[string]any)
+		require.True(ok)
+		assert.Equal(t, json.Number(strconv.FormatInt(attachment, 10)), row["id"])
 	}
 }

@@ -49,7 +49,7 @@ for (const width of [320, 390, 1280]) {
         expect(await heading.evaluate((element) => element.scrollWidth <= element.clientWidth &&
           element.scrollHeight <= element.clientHeight)).toBe(true);
         for (const name of ['Files 1', 'Open in Directory', 'Same person…']) {
-          const action = header.getByRole('button', { name, exact: true });
+          const action = header.getByRole(name === 'Files 1' ? 'radio' : 'button', { name, exact: true });
           await expect.poll(() => fitsHeader(action, header, width)).toBe(true);
           expect(await action.evaluate((element) => {
             const box = element.getBoundingClientRect();
@@ -59,20 +59,20 @@ for (const width of [320, 390, 1280]) {
         }
         if (width === 1280) {
           const title = await heading.boundingBox();
-          const action = await header.getByRole('button', { name: 'Files 1', exact: true }).boundingBox();
+          const action = await header.getByRole('button', { name: 'Same person…', exact: true }).boundingBox();
           expect(title).not.toBeNull();
           expect(action).not.toBeNull();
           expect(Math.abs(title!.y + title!.height / 2 - action!.y - action!.height / 2)).toBeLessThan(2);
         }
-        const files = header.getByRole('button', { name: 'Files 1', exact: true });
+        const files = header.getByRole('radio', { name: 'Files 1', exact: true });
         const fileGrid = page.getByRole('grid', { name: 'Files results' });
         await files.click();
-        await expect(files).toHaveAttribute('aria-expanded', 'true');
+        await expect(files).toHaveAttribute('aria-checked', 'true');
         await expect(fileGrid).toBeVisible();
         if (nativeURL) await expect(fileGrid).toContainText('synthetic-review.txt');
         await expect.poll(() => fitsHeader(heading, header, width)).toBe(true);
-        await files.click();
-        await expect(files).toHaveAttribute('aria-expanded', 'false');
+        await header.getByRole('radio', { name: 'Messages', exact: true }).click();
+        await expect(files).toHaveAttribute('aria-checked', 'false');
         await expect(fileGrid).toBeHidden();
         await expect.poll(() => fitsHeader(heading, header, width)).toBe(true);
       });

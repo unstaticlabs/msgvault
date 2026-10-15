@@ -72,13 +72,14 @@ const (
 	StateRunning   State = "running"
 	StateSucceeded State = "succeeded"
 	StatePartial   State = "partial"
+	StatePaused    State = "paused"
 	StateFailed    State = "failed"
 	StateCancelled State = "cancelled"
 )
 
 func (s State) Validate() error {
 	switch s {
-	case StateQueued, StateRunning, StateSucceeded, StatePartial, StateFailed, StateCancelled:
+	case StateQueued, StateRunning, StateSucceeded, StatePartial, StatePaused, StateFailed, StateCancelled:
 		return nil
 	default:
 		return fmt.Errorf("invalid operation state %q", s)
@@ -477,6 +478,9 @@ const (
 	PublicErrorCancelled                      PublicErrorCode = "cancelled"
 	PublicErrorRetryAfter                     PublicErrorCode = "retry_after"
 	PublicErrorAuthenticationFailed           PublicErrorCode = "authentication_failed"
+	PublicErrorGoogleAuthorizationRequired    PublicErrorCode = "google_authorization_required"
+	PublicErrorMicrosoftAuthorizationRequired PublicErrorCode = "microsoft_authorization_required"
+	PublicErrorMicrosoftContactTooLarge       PublicErrorCode = "microsoft_contact_too_large"
 	PublicErrorUpstreamFailed                 PublicErrorCode = "upstream_failed"
 	PublicErrorSafetyLimit                    PublicErrorCode = "safety_limit"
 	PublicErrorSyncFailed                     PublicErrorCode = "sync_failed"
@@ -523,6 +527,9 @@ var fixedPublicErrorMessages = map[PublicErrorCode]string{
 	PublicErrorCancelled:                      "CardDAV sync was cancelled.",
 	PublicErrorRetryAfter:                     "CardDAV sync is temporarily paused.",
 	PublicErrorAuthenticationFailed:           "CardDAV authentication failed.",
+	PublicErrorGoogleAuthorizationRequired:    "Google Contacts authorization is required. Connect Google in CardDAV account settings.",
+	PublicErrorMicrosoftAuthorizationRequired: "Microsoft contacts authorization is required. Run msgvault carddav authorize-microsoft with your account email.",
+	PublicErrorMicrosoftContactTooLarge:       "A published contact is over Outlook's 4 MB limit, and each sync reports it until it fits. The daemon log names its person ID. " + contactTooLargeRemedy,
 	PublicErrorUpstreamFailed:                 "CardDAV server request failed.",
 	PublicErrorSafetyLimit:                    "CardDAV sync exceeded its safety limits.",
 	PublicErrorSyncFailed:                     "CardDAV sync failed.",
@@ -594,6 +601,14 @@ func (e PublicError) Validate() error {
 	return nil
 }
 
+const contactTooLargeRemedy = "Removing stored photos or other media currently needs the profile API; the CLI and Web UI have no control for it."
+
+// MicrosoftContactTooLargeMessage names the person whose card a publish,
+// approval or conflict resolution could not write to Outlook.
+func MicrosoftContactTooLargeMessage(personID int64) string {
+	return fmt.Sprintf("Person %d's contact is over Outlook's 4 MB limit. %s", personID, contactTooLargeRemedy)
+}
+
 func newPublicError(code PublicErrorCode) *PublicError {
 	return &PublicError{Code: code, Message: fixedPublicErrorMessages[code]}
 }
@@ -627,6 +642,8 @@ func ProjectSourceState(
 			return StatePartial, newPublicError(PublicErrorSourceSyncFailed), nil
 		}
 		return StateFailed, newPublicError(PublicErrorSourceSyncFailed), nil
+	case "paused":
+		return StatePaused, nil, nil
 	case "cancelled":
 		return StateCancelled, nil, nil
 	default:
@@ -670,6 +687,12 @@ func ProjectCardDAVFailure(durableCode string) *PublicError {
 		code = PublicErrorRetryAfter
 	case "authentication_failed":
 		code = PublicErrorAuthenticationFailed
+	case "google_authorization_required":
+		code = PublicErrorGoogleAuthorizationRequired
+	case "microsoft_authorization_required":
+		code = PublicErrorMicrosoftAuthorizationRequired
+	case "microsoft_contact_too_large":
+		code = PublicErrorMicrosoftContactTooLarge
 	case "upstream_failed":
 		code = PublicErrorUpstreamFailed
 	case "safety_limit":
@@ -687,6 +710,8 @@ func ProjectCardDAVFailure(durableCode string) *PublicError {
 }
 
 type Run struct {
+	AccountID  int64
+	Connection string
 	ID         StableID
 	Lane       Lane
 	State      State
@@ -820,12 +845,12 @@ func validateRunStateAndError(
 			if publicError != nil {
 				return fmt.Errorf("source sync state %q cannot carry a public error", state)
 			}
-		case StateSucceeded:
+		case StateSucceeded, StatePaused:
 			if publicError != nil {
 				return fmt.Errorf("source sync state %q cannot carry a public error", state)
 			}
 			if itemErrors != 0 {
-				return errors.New("succeeded source sync cannot have item errors")
+				return fmt.Errorf("source sync state %q cannot have item errors", state)
 			}
 		case StatePartial:
 			if publicError == nil {
@@ -961,7 +986,8 @@ func isPersonSweepError(code PublicErrorCode) bool {
 func isCardDAVError(code PublicErrorCode) bool {
 	switch code {
 	case PublicErrorCancelled, PublicErrorRetryAfter, PublicErrorAuthenticationFailed,
-		PublicErrorUpstreamFailed, PublicErrorSafetyLimit, PublicErrorSyncFailed,
+		PublicErrorGoogleAuthorizationRequired, PublicErrorMicrosoftAuthorizationRequired,
+		PublicErrorMicrosoftContactTooLarge, PublicErrorUpstreamFailed, PublicErrorSafetyLimit, PublicErrorSyncFailed,
 		PublicErrorUnsafeErrorRedacted, PublicErrorDaemonRestarted,
 		PublicErrorCardDAVSyncFailed:
 		return true

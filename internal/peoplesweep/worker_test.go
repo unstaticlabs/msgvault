@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -139,6 +141,11 @@ type workerFailureStore struct {
 	marked       []BudgetReservation
 	markedLeases []Lease
 	renewCalls   atomic.Int64
+
+	idleCompleted []Lease
+
+	renewFailure    error
+	failNextRenewal atomic.Bool
 }
 
 func (s *workerFailureStore) StartPersonSweepRun(context.Context, StartRun) (Run, error) {
@@ -173,6 +180,9 @@ func (s *workerFailureStore) ClaimPersonSweep(context.Context, ClaimRequest) (*L
 }
 func (s *workerFailureStore) RenewPersonSweep(_ context.Context, lease Lease, _ time.Duration) (*Lease, error) {
 	s.renewCalls.Add(1)
+	if s.failNextRenewal.CompareAndSwap(true, false) {
+		return nil, s.renewFailure
+	}
 	return &lease, nil
 }
 func (s *workerFailureStore) EnsurePersonSweepCursors(_ context.Context, keys []CursorKey) ([]Cursor, error) {
@@ -198,6 +208,10 @@ func (s *workerFailureStore) ReleasePersonSweepBudget(_ context.Context, reserva
 func (s *workerFailureStore) MarkPersonSweepBudgetStarted(_ context.Context, reservation BudgetReservation, lease Lease) error {
 	s.marked = append(s.marked, reservation)
 	s.markedLeases = append(s.markedLeases, lease)
+	return nil
+}
+func (s *workerFailureStore) CompleteIdlePersonSweep(_ context.Context, lease Lease, _, _ string) error {
+	s.idleCompleted = append(s.idleCompleted, lease)
 	return nil
 }
 func (s *workerFailureStore) FailPersonSweepWork(ctx context.Context, failure WorkFailure) error {
@@ -231,7 +245,7 @@ func (workerFailureSource) ListPersonSweepHistoricalCandidates(context.Context, 
 func (workerFailureSource) SearchPersonSweepMessages(context.Context, ContextRequest) ([]EvidenceItem, error) {
 	return nil, nil
 }
-func (workerFailureSource) HydratePersonSweepMessages(context.Context, int64, []int64) ([]EvidenceItem, error) {
+func (workerFailureSource) HydratePersonSweepMessages(context.Context, int64, []int64, int64) ([]EvidenceItem, error) {
 	return nil, nil
 }
 func (workerFailureSource) SearchPersonSweepDocuments(context.Context, DocumentContextRequest) ([]EvidenceItem, error) {
@@ -369,7 +383,7 @@ func (s *workerProductionSource) SearchPersonSweepMessages(_ context.Context, re
 	s.searches = append(s.searches, request)
 	return append([]EvidenceItem(nil), s.context...), nil
 }
-func (*workerProductionSource) HydratePersonSweepMessages(context.Context, int64, []int64) ([]EvidenceItem, error) {
+func (*workerProductionSource) HydratePersonSweepMessages(context.Context, int64, []int64, int64) ([]EvidenceItem, error) {
 	return nil, nil
 }
 func (*workerProductionSource) SearchPersonSweepDocuments(context.Context, DocumentContextRequest) ([]EvidenceItem, error) {
@@ -481,7 +495,7 @@ func (d *workerRepairDriver) GeneratePrepared(
 	return response, nil
 }
 
-func newWorkerRepairRunner(t *testing.T, config Config, driver *workerRepairDriver) *Runner {
+func newWorkerRepairRunner(t *testing.T, config Config, driver StructuredDriver) *Runner {
 	t.Helper()
 	return newWorkerRepairRunnerWithDependencies(t, config, driver, workerRepairAuthority{},
 		NewCredentialResolver(nil, func(string) (string, bool) { return "test-key", true }))
@@ -490,7 +504,7 @@ func newWorkerRepairRunner(t *testing.T, config Config, driver *workerRepairDriv
 func newWorkerRepairRunnerWithDependencies(
 	t *testing.T,
 	config Config,
-	driver *workerRepairDriver,
+	driver StructuredDriver,
 	authority ProviderAuthority,
 	resolver CredentialResolver,
 ) *Runner {
@@ -851,7 +865,10 @@ func (r *workerProductionRunner) RunStructured(context.Context, StructuredReques
 
 type workerProductionSink struct {
 	requests []ApplyRequest
-	err      error
+	// briefVersion is the version number a real store would report for a
+	// stored brief; zero leaves the applied result without one.
+	briefVersion int
+	err          error
 }
 
 func (s *workerProductionSink) ApplyPersonSweep(ctx context.Context, request ApplyRequest) (ApplyResult, error) {
@@ -859,44 +876,60 @@ func (s *workerProductionSink) ApplyPersonSweep(ctx context.Context, request App
 		return ApplyResult{}, err
 	}
 	s.requests = append(s.requests, request)
-	return ApplyResult{Mutations: ApplyMutationMetadata{ProjectionRowsWritten: 1}}, s.err
+	mutations := ApplyMutationMetadata{ProjectionRowsWritten: 1}
+	if request.Brief != nil {
+		mutations.BriefVersion = s.briefVersion
+	}
+	return ApplyResult{Mutations: mutations}, s.err
 }
 
 func TestPersonSweepWorkerHeartbeatsLeaseDuringProviderIO(t *testing.T) {
-	store := &workerFailureStore{}
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	runner := &workerProductionRunner{started: started, block: release}
-	worker := Worker{Config: Config{LeaseDuration: 30 * time.Millisecond}, Store: store, Runner: runner}
-	type result struct {
-		lease Lease
-		err   error
-	}
-	done := make(chan result, 1)
-	go func() {
-		primary := PreparedStructuredRequest{}
-		execution, beginErr := runner.BeginStructuredExecution(t.Context(), primary)
-		if beginErr != nil {
-			done <- result{err: beginErr}
-			return
+	synctest.Test(t, func(t *testing.T) {
+		store := &workerFailureStore{}
+		started := make(chan struct{}, 1)
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseWork := func() { releaseOnce.Do(func() { close(release) }) }
+		runner := &workerProductionRunner{started: started, block: release}
+		worker := Worker{Config: Config{LeaseDuration: 30 * time.Millisecond}, Store: store, Runner: runner}
+		type result struct {
+			lease Lease
+			err   error
 		}
-		call, prepareErr := execution.PrimaryCall(primary)
-		if prepareErr != nil {
-			done <- result{err: prepareErr}
-			return
-		}
-		lease, _, err := worker.runPreparedWithLeaseHeartbeat(t.Context(), Lease{
-			PersonID: 7, WorkerID: "worker-fixture", Fence: 1,
-		}, func(context.Context) error { return nil }, call)
-		done <- result{lease: lease, err: err}
-	}()
-	<-started
-	require.Eventually(t, func() bool { return store.renewCalls.Load() >= 2 },
-		500*time.Millisecond, 5*time.Millisecond)
-	close(release)
-	got := <-done
-	require.NoError(t, got.err)
-	assert.Equal(t, int64(1), got.lease.Fence)
+		done := make(chan result, 1)
+		joined := false
+		t.Cleanup(func() {
+			releaseWork()
+			if !joined {
+				<-done
+			}
+		})
+		go func() {
+			primary := PreparedStructuredRequest{}
+			execution, beginErr := runner.BeginStructuredExecution(t.Context(), primary)
+			if beginErr != nil {
+				done <- result{err: beginErr}
+				return
+			}
+			call, prepareErr := execution.PrimaryCall(primary)
+			if prepareErr != nil {
+				done <- result{err: prepareErr}
+				return
+			}
+			lease, _, err := worker.runPreparedWithLeaseHeartbeat(t.Context(), Lease{
+				PersonID: 7, WorkerID: "worker-fixture", Fence: 1,
+			}, func(context.Context) error { return nil }, call)
+			done <- result{lease: lease, err: err}
+		}()
+		<-started
+		synctest.Sleep(30 * time.Millisecond)
+		assert.GreaterOrEqual(t, store.renewCalls.Load(), int64(2), "lease heartbeat renewals")
+		releaseWork()
+		got := <-done
+		joined = true
+		require.NoError(t, got.err)
+		assert.Equal(t, int64(1), got.lease.Fence)
+	})
 }
 
 func TestPersonSweepWorkerCanceledProviderUsesDetachedCleanup(t *testing.T) {

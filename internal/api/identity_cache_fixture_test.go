@@ -21,29 +21,29 @@ import (
 // participant-grouping, and timeline read paths, so an empty stand-in would
 // make those queries return no rows.
 func ensureIdentityCacheFixtureDatasets(
-	t *testing.T,
+	tb testing.TB,
 	db *sql.DB,
 	analyticsDir string,
 ) {
-	t.Helper()
-	ensureEmailWorkCacheFixtureDatasets(t, db, analyticsDir)
+	tb.Helper()
+	ensureEmailWorkCacheFixtureDatasets(tb, db, analyticsDir)
 	personDisplayNamesDir := filepath.Join(analyticsDir, "person_display_names")
-	require.NoError(t, os.MkdirAll(personDisplayNamesDir, 0o755), "create person_display_names fixture directory")
+	require.NoError(tb, os.MkdirAll(personDisplayNamesDir, 0o755), "create person_display_names fixture directory")
 	personDisplayNamesPath := filepath.ToSlash(filepath.Join(personDisplayNamesDir, "person_display_names.parquet"))
 	_, err := db.Exec(fmt.Sprintf(
 		"COPY (SELECT 0::BIGINT AS participant_id, 0::BIGINT AS person_id, ''::VARCHAR AS display_name WHERE false) TO '%s' (FORMAT PARQUET)",
 		personDisplayNamesPath,
 	))
-	require.NoError(t, err, "write empty person_display_names fixture dataset")
+	require.NoError(tb, err, "write empty person_display_names fixture dataset")
 	_, err = identityindex.Build(context.Background(), db, identityindex.BuildOptions{
 		Mode:           identityindex.ModeFull,
 		StagedBaseRoot: analyticsDir,
 		OutputRoot:     analyticsDir,
 	})
-	require.NoError(t, err, "derive identity fixture datasets")
+	require.NoError(tb, err, "derive identity fixture datasets")
 }
 
-func ensureEmailWorkCacheFixtureDatasets(t *testing.T, db *sql.DB, analyticsDir string) {
+func ensureEmailWorkCacheFixtureDatasets(t testing.TB, db *sql.DB, analyticsDir string) {
 	t.Helper()
 	for _, spec := range []struct{ name, selectSQL string }{
 		{query.DatasetEmailWorkActions, "SELECT ''::VARCHAR AS action_uid,''::VARCHAR AS kind,0::BIGINT AS revision,false AS active,''::VARCHAR AS actor_kind,0::BIGINT AS actor_user_id,NULL::TIMESTAMP AS created_at,''::VARCHAR AS target_uid,0::BIGINT AS target_count WHERE false"},

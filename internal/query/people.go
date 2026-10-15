@@ -3,7 +3,7 @@ package query
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,20 +25,39 @@ const (
 // this is the only field that tells the caller which chip belongs to which
 // member (see PersonSummary.Cluster).
 type PersonIdentifier struct {
-	Type          string `json:"type"`
-	Value         string `json:"value"`
-	DisplayValue  string `json:"display_value,omitempty"`
-	IsPrimary     bool   `json:"is_primary"`
-	Provenance    string `json:"provenance"`
-	ParticipantID int64  `json:"participant_id"`
+	Type                   string `json:"type"`
+	Value                  string `json:"value"`
+	DisplayValue           string `json:"display_value,omitempty"`
+	IsPrimary              bool   `json:"is_primary"`
+	Provenance             string `json:"provenance"`
+	ParticipantID          int64  `json:"participant_id"`
+	ServiceSlug            string `json:"service_slug,omitempty"`
+	ServiceLabel           string `json:"service_label,omitempty"`
+	ScopeKind              string `json:"scope_kind,omitempty"`
+	ScopeValue             string `json:"scope_value,omitempty"`
+	ParticipantDisplayName string `json:"participant_display_name,omitempty"`
 }
 
 // PersonClusterEdge is one participant_links edge within a person's cluster,
 // as recorded by the store (the query layer has no edge data of its own —
 // see internal/store/participant_links.go's LinkEdge).
 type PersonClusterEdge struct {
-	ParticipantA int64 `json:"participant_a"`
-	ParticipantB int64 `json:"participant_b"`
+	ParticipantA int64                    `json:"participant_a"`
+	ParticipantB int64                    `json:"participant_b"`
+	LinkOrigin   *PersonClusterLinkOrigin `json:"link_origin,omitempty"`
+}
+
+type PersonClusterLinkOrigin struct {
+	Kind   string `json:"kind"`
+	Source string `json:"source,omitempty"`
+	Basis  string `json:"basis,omitempty"`
+}
+
+type PersonClusterMember struct {
+	ParticipantID int64  `json:"participant_id"`
+	DisplayName   string `json:"display_name,omitempty"`
+	Email         string `json:"email,omitempty"`
+	Phone         string `json:"phone,omitempty"`
 }
 
 // PersonCluster describes the identity-link cluster a person detail belongs
@@ -48,9 +67,10 @@ type PersonClusterEdge struct {
 // participant is linked to at least one other participant; a nil Cluster on
 // PersonSummary means the participant is unlinked.
 type PersonCluster struct {
-	CanonicalID int64               `json:"canonical_id"`
-	MemberIDs   []int64             `json:"member_ids"`
-	Edges       []PersonClusterEdge `json:"edges"`
+	CanonicalID int64                 `json:"canonical_id"`
+	MemberIDs   []int64               `json:"member_ids"`
+	Edges       []PersonClusterEdge   `json:"edges"`
+	Members     []PersonClusterMember `json:"members,omitempty"`
 }
 
 // PersonProfile references the durable curated person (see /api/v1/people)
@@ -61,7 +81,7 @@ type PersonCluster struct {
 // carries curated labels only, never profile revisions.
 type PersonProfile struct {
 	ID          int64   `json:"id"`
-	DisplayName *string `json:"display_name,omitempty"`
+	DisplayName *string `json:"display_name,omitzero" nullable:"false"`
 	Revision    int64   `json:"revision"`
 }
 
@@ -93,8 +113,8 @@ type PersonSummary struct {
 	FirstAt                        time.Time          `json:"first_at"`
 	LastAt                         time.Time          `json:"last_at"`
 	CacheRevision                  string             `json:"cache_revision"`
-	Cluster                        *PersonCluster     `json:"cluster,omitempty"`
-	Profile                        *PersonProfile     `json:"profile,omitempty"`
+	Cluster                        *PersonCluster     `json:"cluster,omitzero" nullable:"false"`
+	Profile                        *PersonProfile     `json:"profile,omitzero" nullable:"false"`
 }
 
 type PersonSearchResponse struct {
@@ -329,7 +349,7 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 	}
 	defer cleanup()
 	entriesCTE, entryArgs := personEntriesCTE(exactID, clusterMemberIDs, conditions, request.Explore.Context.RowUnit == RowUnitEmailWork,
-		e.parquetPath(datasetParticipantClusters), e.identityActivityPath())
+		e.parquetPath(datasetParticipantClusters), "")
 	args = append(args, entryArgs...)
 	// bestNameExpr is the shared cluster label policy (see person_label.go).
 	// Listing/search rows are canonical identities, so the label evaluates
@@ -550,7 +570,7 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work
 	SELECT p.id AS participant_id, COALESCE(c.canonical_id, p.id) AS canonical_id
 	FROM participants p LEFT JOIN clusters c ON c.participant_id = p.id
 ), person_entries AS (`, clustersGlob) +
-			sqlActivityEntryEdges(activityGlob,
+			sqlActivityEntryEdges(
 				"a.canonical_id AS person_id, le.occurred_at, le.message_type, le.attachment_count, le.source_type",
 				"a.is_direct", "(a.is_direct OR a.is_conversation_member)"), nil
 	}
@@ -580,7 +600,7 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work
 	FROM logical_entries
 	WHERE entry_key IN (
 		SELECT edge.entry_key FROM (` +
-			sqlActivityEntryEdges(activityGlob, "a.canonical_id AS person_id",
+			sqlActivityEntryEdges("a.canonical_id AS person_id",
 				"a.is_direct AND a.canonical_id IN "+memberList,
 				"(a.is_direct OR a.is_conversation_member) AND a.canonical_id IN "+memberList) + `
 		) AS edge
@@ -706,7 +726,7 @@ func (e *DuckDBEngine) searchDomainsLegacy(ctx context.Context, request DomainSe
 	// as the index's domain entries do.
 	queryText := logical + `
 ), domain_edges AS (` +
-		sqlActivityEntryEdges(e.identityActivityPath(),
+		sqlActivityEntryEdges(
 			"a.participant_domain AS domain, a.canonical_id AS person_id, "+
 				"a.is_direct AS is_direct, "+
 				"(le.entry_kind = 'conversation') AS is_chat_entry, "+

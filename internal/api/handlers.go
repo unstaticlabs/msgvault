@@ -2,11 +2,12 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
@@ -21,7 +22,7 @@ import (
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/deletion"
 	msgexport "go.kenn.io/msgvault/internal/export"
-	"go.kenn.io/msgvault/internal/fileutil"
+	"go.kenn.io/msgvault/internal/oauth"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
@@ -56,8 +57,8 @@ type StatsResponse struct {
 	TotalAccounts         int64             `json:"total_accounts"`
 	TotalLabels           int64             `json:"total_labels"`
 	TotalAttach           int64             `json:"total_attachments"`
-	DatabaseSize          int64             `json:"database_size_bytes"`
-	VectorSearch          *vector.StatsView `json:"vector_search,omitempty"`
+	DatabaseSize          *int64            `json:"database_size_bytes,omitempty" nullable:"false"`
+	VectorSearch          *vector.StatsView `json:"vector_search,omitzero" nullable:"false"`
 	VectorStatus          string            `json:"vector_status,omitempty"`
 	// VectorTextStatus reports the TEXT vector lane specifically. A
 	// multimodal-only daemon is vector-"ready" without serving semantic
@@ -73,7 +74,23 @@ type StatsResponse struct {
 	// "still initializing" from "not configured" instead of permanently
 	// omitting the visual tool after a transient 503.
 	VectorVisualStatus string `json:"vector_visual_status,omitempty"`
+	// Stale reports that the archive counts come from an earlier snapshot
+	// because a fresh count did not finish in time; AsOf says when that
+	// snapshot was taken.
+	Stale bool      `json:"stale,omitempty"`
+	AsOf  time.Time `json:"as_of,omitzero"`
+	// VectorStatsUnavailable reports that vector statistics did not answer
+	// within their deadline; vector_search is then partial or absent.
+	VectorStatsUnavailable bool `json:"vector_stats_unavailable,omitempty"`
 }
+
+// Stats latency bounds: how long a request waits for fresh archive counts
+// before serving the previous snapshot, and how long vector statistics may
+// take before the response omits them.
+const (
+	statsSnapshotWait  = 2 * time.Second
+	vectorStatsTimeout = 3 * time.Second
+)
 
 // APIMessage is an alias for store.APIMessage — single source of truth for
 // the message DTO shared between the store and API layers.
@@ -116,6 +133,12 @@ type SourceStatus struct {
 	Schedule              string                  `json:"schedule,omitempty"`
 	NextSyncAt            *string                 `json:"next_sync_at"`
 	SchedulerLastError    string                  `json:"scheduler_last_error,omitempty"`
+	// SchedulerQueued reports a scheduled run waiting for another job to
+	// finish; SchedulerPending a follow-up run requested while one executes;
+	// SchedulerStartedAt when the executing run began.
+	SchedulerQueued    bool    `json:"scheduler_queued,omitempty"`
+	SchedulerPending   bool    `json:"scheduler_pending,omitempty"`
+	SchedulerStartedAt *string `json:"scheduler_started_at,omitempty"`
 }
 
 // SyncRunStatus represents the API-visible details for a sync run.
@@ -130,9 +153,7 @@ type SyncRunStatus struct {
 	MessagesUpdated   int64               `json:"messages_updated"`
 	ErrorsCount       int64               `json:"errors_count"`
 	ErrorMessage      *string             `json:"error_message"`
-	CursorBefore      *string             `json:"cursor_before"`
-	CursorAfter       *string             `json:"cursor_after"`
-	SkippedCount      int64               `json:"skipped_count,omitempty"`
+	SkippedCount      int64               `json:"skipped_count,omitzero"`
 	ItemErrors        []SyncRunItemStatus `json:"item_errors,omitempty"`
 }
 
@@ -160,8 +181,10 @@ type ErrorResponse struct {
 // VectorHealth reports the vector subsystem state in health responses so
 // daemon status is visible while background init runs (or after it fails).
 type VectorHealth struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Status        string `json:"status"`
+	Error         string `json:"error,omitempty"`
+	TextEnabled   *bool  `json:"text_enabled,omitzero" nullable:"false"`
+	VisualEnabled *bool  `json:"visual_enabled,omitzero" nullable:"false"`
 }
 
 // OperationHealth reports the archive operation currently holding the
@@ -197,8 +220,8 @@ const (
 
 type HealthResponse struct {
 	Status    string           `json:"status"`
-	Vector    *VectorHealth    `json:"vector,omitempty"`
-	Operation *OperationHealth `json:"operation,omitempty"`
+	Vector    *VectorHealth    `json:"vector,omitzero" nullable:"false"`
+	Operation *OperationHealth `json:"operation,omitzero" nullable:"false"`
 	// AnalyticsEngine is the current analytics mode (one of the AnalyticsMode
 	// constants). It can change when background cache initialization installs a
 	// new engine. Empty when the server was built without one (tests, embedded
@@ -226,7 +249,21 @@ type StatusMessageResponse struct {
 	Message string `json:"message"`
 }
 
+// TriggerSyncResponse is the 202 body of the sync trigger route, published in
+// OpenAPI so generated clients expose Disposition. Disposition says what a
+// generic-source trigger did: "started", "pending" (one follow-up run recorded
+// behind the active run) or "coalesced" (merged into a run that is still
+// waiting to start or a follow-up already pending; no additional run). It is
+// optional by design: the account sync path keeps its {status, message} body
+// and omits it.
+type TriggerSyncResponse struct {
+	Status      string `json:"status"`
+	Message     string `json:"message"`
+	Disposition string `json:"disposition,omitempty"`
+}
+
 type FilteredMessagesResponse struct {
+	IndexState       string           `json:"index_state,omitempty"`
 	Count            int              `json:"count"`
 	HasMore          bool             `json:"has_more"`
 	Offset           int              `json:"offset"`
@@ -244,13 +281,14 @@ type GmailIDsResponse struct {
 }
 
 type DeepSearchResponse struct {
+	IndexState   string              `json:"index_state,omitempty"`
 	Query        string              `json:"query"`
 	Scope        string              `json:"scope,omitempty"`
 	Messages     []MessageSummary    `json:"messages"`
 	BodyContexts []BodySearchContext `json:"body_contexts,omitempty"`
 	Count        int                 `json:"count"`
 	TotalCount   int64               `json:"total_count"`
-	Stats        *TotalStatsResponse `json:"stats,omitempty"`
+	Stats        *TotalStatsResponse `json:"stats,omitzero" nullable:"false"`
 	HasMore      bool                `json:"has_more"`
 	Offset       int                 `json:"offset"`
 	Limit        int                 `json:"limit"`
@@ -262,7 +300,7 @@ type BodySearchContext struct {
 	MessageID       int64    `json:"message_id"`
 	ContextSnippets []string `json:"context_snippets,omitempty"`
 	// ContextSnippetsTruncated reports contexts omitted by response or work caps.
-	ContextSnippetsTruncated bool `json:"context_snippets_truncated,omitempty"`
+	ContextSnippetsTruncated bool `json:"context_snippets_truncated,omitzero"`
 }
 
 // MessageSummary represents a message in list responses.
@@ -270,9 +308,9 @@ type MessageSummary struct {
 	InboxState      string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
 	ReadState       string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
 	ID              int64    `json:"id"`
-	SourceID        int64    `json:"source_id,omitempty"`
+	SourceID        int64    `json:"source_id,omitzero"`
 	SourceMessageID string   `json:"source_message_id,omitempty"`
-	ConversationID  int64    `json:"conversation_id,omitempty"`
+	ConversationID  int64    `json:"conversation_id,omitzero"`
 	Subject         string   `json:"subject"`
 	MessageType     string   `json:"message_type,omitempty"`
 	From            string   `json:"from"`
@@ -294,16 +332,17 @@ type MessageSummary struct {
 type MessageDetail struct {
 	MessageSummary
 
-	CalendarState *store.CalendarEventState `json:"calendar_state,omitempty"`
+	CalendarState     *store.CalendarEventState `json:"calendar_state,omitempty"`
+	ConversationTitle string                    `json:"conversation_title,omitempty" doc:"Conversation title, when available."`
 
 	Body     string `json:"body"`
 	BodyHTML string `json:"body_html,omitempty"`
-	IsFromMe bool   `json:"is_from_me,omitempty"`
+	IsFromMe bool   `json:"is_from_me,omitzero"`
 	// BodyOmitted marks a conversation-window message whose body was left
 	// out to keep the response within the cumulative inline-body budget.
 	// The snippet is still present; fetch the full body via
 	// GET /api/v1/messages/{id}.
-	BodyOmitted bool             `json:"body_omitted,omitempty"`
+	BodyOmitted bool             `json:"body_omitted,omitzero"`
 	Attachments []AttachmentInfo `json:"attachments"`
 }
 
@@ -330,11 +369,12 @@ func attachmentInfoFromStore(att store.APIAttachment) AttachmentInfo {
 
 // SearchResult represents search results.
 type SearchResult struct {
-	Query    string           `json:"query"`
-	Total    int64            `json:"total"`
-	Page     int              `json:"page"`
-	PageSize int              `json:"page_size"`
-	Messages []MessageSummary `json:"messages"`
+	IndexState string           `json:"index_state,omitempty"`
+	Query      string           `json:"query"`
+	Total      int64            `json:"total"`
+	Page       int              `json:"page"`
+	PageSize   int              `json:"page_size"`
+	Messages   []MessageSummary `json:"messages"`
 }
 
 // hybridSearchResponse represents results from vector or hybrid search.
@@ -345,12 +385,20 @@ type hybridSearchResponse struct {
 	Mode             string                  `json:"mode"`
 	Returned         int                     `json:"returned"`
 	PoolSaturated    bool                    `json:"pool_saturated"`
+	Accelerator      string                  `json:"accelerator,omitempty"`
 	HasMore          bool                    `json:"has_more"`
 	Generation       hybridGenerationSummary `json:"generation"`
 	TookMS           int64                   `json:"took_ms"`
+	Timings          hybridSearchTimings     `json:"timings"`
 	ScopeLabel       string                  `json:"scope_label,omitempty"`
-	ScopeSourceCount int                     `json:"scope_source_count,omitempty"`
+	ScopeSourceCount int                     `json:"scope_source_count,omitzero"`
 	Results          []hybridSearchItem      `json:"results"`
+}
+
+type hybridSearchTimings struct {
+	QueryEmbeddingMS int64 `json:"query_embedding_ms"`
+	RetrievalMS      int64 `json:"retrieval_ms"`
+	HydrationMS      int64 `json:"hydration_ms"`
 }
 
 type similarSearchResponse struct {
@@ -373,21 +421,23 @@ type hybridGenerationSummary struct {
 // hybridSearchItem is a single hit in a vector/hybrid response. It
 // embeds MessageSummary (not APIMessage) so the JSON schema matches
 // /api/v1/search's summary surface — callers get the same snake-case
-// fields, and we do not leak full message bodies, headers, or
-// attachment metadata in search results. Score is present only when
-// explain=1 was requested.
+// fields. Full bodies and headers are excluded; attachment names and counts
+// are included intentionally. Score is present only when explain=1 was requested.
 type hybridSearchItem struct {
 	MessageSummary
 
-	Score            *scoreBreakdown     `json:"score,omitempty"`
+	AttachmentNames []string `json:"attachment_names,omitzero"`
+	AttachmentCount *int     `json:"attachment_count,omitzero" nullable:"false"`
+
+	Score            *scoreBreakdown     `json:"score,omitzero" nullable:"false"`
 	Matches          []hybridSearchMatch `json:"matches,omitempty"`
-	MatchesTruncated bool                `json:"matches_truncated,omitempty"`
+	MatchesTruncated bool                `json:"matches_truncated,omitzero"`
 }
 
 type hybridSearchMatch struct {
-	CharOffset *int    `json:"char_offset,omitempty"`
+	CharOffset *int    `json:"char_offset,omitzero" nullable:"false"`
 	Snippet    string  `json:"snippet"`
-	Line       *int    `json:"line,omitempty"`
+	Line       *int    `json:"line,omitzero" nullable:"false"`
 	Score      float64 `json:"score"`
 }
 
@@ -397,20 +447,33 @@ type hybridSearchMatch struct {
 // In particular, mode=vector reports vector with no rrf (RRF requires
 // two signals to fuse), and mode=fts reports bm25 with no rrf or vector.
 type scoreBreakdown struct {
-	RRF            *float64 `json:"rrf,omitempty"`
-	BM25           *float64 `json:"bm25,omitempty"`
-	Vector         *float64 `json:"vector,omitempty"`
-	SubjectBoosted bool     `json:"subject_boosted,omitempty"`
+	RRF            *float64 `json:"rrf,omitzero" nullable:"false"`
+	BM25           *float64 `json:"bm25,omitzero" nullable:"false"`
+	Vector         *float64 `json:"vector,omitzero" nullable:"false"`
+	SubjectBoosted bool     `json:"subject_boosted,omitzero"`
 }
 
-// writeJSON writes a JSON response.
+// encodeFailureBody is written when a response value cannot be encoded. It
+// is a literal so it cannot fail the same way.
+const encodeFailureBody = `{"error":"internal_error","message":"Failed to encode response"}`
+
+// writeJSON writes a JSON response. The body is encoded before the status
+// line so an encoding failure becomes a 500 with an error body instead of a
+// success status followed by a truncated or empty body.
 func writeJSON(w http.ResponseWriter, status int, data any) {
+	body, err := marshalAPIJSONBytes(data)
 	w.Header().Set("Content-Type", applicationJSONMediaType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if err != nil {
+		slog.Error("encode API response", "status", status, "error", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, encodeFailureBody)
+		return
+	}
 	w.WriteHeader(status)
-	// Headers already sent; if Encode fails mid-stream (broken pipe,
-	// non-serializable value) there's no meaningful recovery beyond
-	// truncating the response body.
-	_ = marshalAPIJSON(w, data)
+	// A write error here means the client went away; nothing to recover.
+	// #nosec G705 -- The body is JSON-encoded, served as application/json, and marked nosniff.
+	_, _ = w.Write(body)
 }
 
 // writeError writes an error response.
@@ -497,7 +560,9 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 	}
 
 	return MessageDetail{
-		CalendarState:   qMsg.CalendarState,
+		CalendarState:     qMsg.CalendarState,
+		ConversationTitle: qMsg.ConversationTitle,
+
 		ID:              qMsg.ID,
 		InboxState:      providerStateValue(qMsg.InboxState),
 		ReadState:       providerStateValue(qMsg.ReadState),
@@ -562,12 +627,18 @@ func toMessageSummary(m APIMessage) MessageSummary {
 
 // handleStats returns archive statistics.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if s.requestAuthentication(r).Grant != nil {
+		s.agentScopedStats(w, r, false)
+		return
+	}
 	if s.store == nil {
 		writeError(w, http.StatusServiceUnavailable, "store_unavailable", "Database not available")
 		return
 	}
 
-	stats, err := s.getStats(r.Context())
+	stats, asOf, stale, err := s.statsSnapshots.get(
+		r.Context(), s.importContext, "", s.statsSnapshotWait, s.getStats,
+	)
 	if err != nil {
 		if s.writeIfContextError(w, err) {
 			return
@@ -577,32 +648,34 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Vector stats are best-effort: log errors but still include
-	// whatever partial stats came back.
+	// Vector stats are best-effort and bounded: log errors but still
+	// include whatever partial stats came back.
 	_, backend, _ := s.vectorComponents()
-	vs, vsErr := vector.CollectStats(r.Context(), backend)
+	vectorCtx, cancelVector := context.WithTimeout(r.Context(), s.vectorStatsTimeout)
+	vs, vsErr := vector.CollectStats(vectorCtx, backend)
+	vectorTimedOut := errors.Is(vectorCtx.Err(), context.DeadlineExceeded)
+	cancelVector()
 	if vsErr != nil {
 		s.logger.Warn("vector stats", "error", vsErr)
 	}
 
 	resp := statsResponseFromStore(stats)
+	resp.Stale = stale
+	resp.AsOf = asOf
+	resp.VectorStatsUnavailable = vectorTimedOut
 	resp.VectorSearch = vs
 	s.refreshVectorStatus(r.Context())
 	if status, _ := s.VectorStatus(); status != VectorStatusDisabled {
 		resp.VectorStatus = string(status)
-		// Per-lane statuses mirror the shared status only for lanes the
-		// configuration actually enables (the daemon passes cfg.Vector at
-		// construction, so this holds during initialization too). Blanket
-		// mirroring advertised visual tools on text-only deployments and
-		// vice versa.
 		_, _, vectorCfg := s.vectorComponents()
+		lanes := vectorLaneCapabilitiesForConfig(vectorCfg)
 		resp.VectorTextStatus = string(VectorStatusDisabled)
-		if vectorCfg.Enabled {
+		if lanes.TextEnabled {
 			resp.VectorTextStatus = string(status)
 			resp.VectorTextMessageTypes = slices.Clone(vectorCfg.Embed.Scope.BuildScope().MessageTypes)
 		}
 		resp.VectorVisualStatus = string(VectorStatusDisabled)
-		if vectorCfg.Multimodal.Enabled {
+		if lanes.VisualEnabled {
 			resp.VectorVisualStatus = string(status)
 			// Visual init can fail while text search stays healthy: the
 			// shared status settles ready with no visual runtime installed.
@@ -653,7 +726,7 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messages, total, err := s.listMessages(r.Context(), offset, pageSize)
+	messages, total, err := s.listMessages(r.Context(), offset, pageSize, agentReadSourceIDs(r))
 	if err != nil {
 		if s.writeIfContextError(w, err) {
 			return
@@ -667,7 +740,6 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 	for i, m := range messages {
 		summaries[i] = toMessageSummary(m)
 	}
-
 	writeJSON(w, http.StatusOK, MessageListResponse{
 		Total:    total,
 		Page:     page,
@@ -701,7 +773,13 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 			if !s.validateExpectedMessageUID(w, r, id) {
 				return
 			}
-			writeJSON(w, http.StatusOK, messageDetailFromQuery(qMsg))
+			if !s.agentObjectSourceAllowed(r, qMsg.SourceID) {
+				writeError(w, http.StatusNotFound, "not_found", "Message not found")
+				return
+			}
+			detail := messageDetailFromQuery(qMsg)
+			detail.BodyHTML = s.archivedRemoteImageHTML(r.Context(), id, detail.BodyHTML)
+			writeJSON(w, http.StatusOK, detail)
 			return
 		}
 		// err is unsupported sentinel — fall through to store path so
@@ -732,12 +810,17 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.agentObjectSourceAllowed(r, msg.SourceID) {
+		writeError(w, http.StatusNotFound, "not_found", "Message not found")
+		return
+	}
 	detail := MessageDetail{
-		CalendarState:  msg.CalendarState,
-		MessageSummary: toMessageSummary(*msg),
-		Body:           msg.Body,
-		BodyHTML:       msg.BodyHTML,
-		IsFromMe:       msg.IsFromMe,
+		CalendarState:     msg.CalendarState,
+		MessageSummary:    toMessageSummary(*msg),
+		ConversationTitle: msg.ConversationTitle,
+		Body:              msg.Body,
+		BodyHTML:          msg.BodyHTML,
+		IsFromMe:          msg.IsFromMe,
 	}
 
 	attachments := make([]AttachmentInfo, 0, len(msg.Attachments))
@@ -745,6 +828,7 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		attachments = append(attachments, attachmentInfoFromStore(att))
 	}
 	detail.Attachments = attachments
+	detail.BodyHTML = s.archivedRemoteImageHTML(r.Context(), id, detail.BodyHTML)
 
 	if !s.validateExpectedMessageUID(w, r, id) {
 		return
@@ -785,6 +869,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parsedQuery.HideDeleted = true
+	if s.requestAuthentication(r).Grant != nil {
+		parsedQuery.AccountIDs = agentReadSourceIDs(r)
+	}
 
 	account := r.URL.Query().Get("account")
 	collection := r.URL.Query().Get("collection")
@@ -949,11 +1036,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, SearchResult{
-		Query:    searchText,
-		Total:    total,
-		Page:     page,
-		PageSize: pageSize,
-		Messages: summaries,
+		IndexState: agentIndexState(r),
+		Query:      searchText,
+		Total:      total,
+		Page:       page,
+		PageSize:   pageSize,
+		Messages:   summaries,
 	})
 }
 
@@ -971,6 +1059,7 @@ func parseSearchQueryRequest(r *http.Request, query string) *search.Query {
 }
 
 var semanticSearchStructuredFilterParamNames = []string{
+	"account_scopes",
 	"sender",
 	recipientParam,
 	"domain",
@@ -1077,6 +1166,7 @@ func (s *Server) handleHybridSearch(
 		return
 	}
 
+	hydrationStarted := time.Now()
 	pageStart := min(offset, len(hits))
 	pageEnd := min(pageStart+pageSize, len(hits))
 	hasMore := pageEnd < len(hits)
@@ -1103,6 +1193,13 @@ func (s *Server) handleHybridSearch(
 	for _, m := range summaries {
 		byID[m.ID] = m
 	}
+	metadata, err := s.searchMetadata(ctx, hitIDs, nil, false)
+	if err != nil {
+		if s.writeIfContextError(w, err) {
+			return
+		}
+		s.logger.Warn("hybrid attachment names failed", "ids", len(hitIDs), "error", err)
+	}
 	items := make([]hybridSearchItem, 0, len(pageHits))
 	for _, h := range pageHits {
 		msg, ok := byID[h.MessageID]
@@ -1114,6 +1211,10 @@ func (s *Server) handleHybridSearch(
 			continue
 		}
 		item := hybridSearchItem{MessageSummary: toMessageSummary(msg)}
+		if extra, ok := metadata[msg.ID]; ok {
+			item.AttachmentNames = extra.AttachmentNames
+			item.AttachmentCount = &extra.AttachmentCount
+		}
 		if explain {
 			sb := &scoreBreakdown{SubjectBoosted: h.SubjectBoosted}
 			if !math.IsNaN(h.RRFScore) {
@@ -1135,12 +1236,14 @@ func (s *Server) handleHybridSearch(
 	if includeMatches {
 		s.enrichHybridMatches(ctx, backend, vectorCfg, meta.Generation.ID, meta.QueryVector, items, minScore)
 	}
+	hydrationDuration := time.Since(hydrationStarted)
 
 	writeJSON(w, http.StatusOK, hybridSearchResponse{
 		Query:            q,
 		Mode:             mode,
 		Returned:         len(items),
 		PoolSaturated:    meta.PoolSaturated,
+		Accelerator:      meta.Accelerator,
 		HasMore:          hasMore,
 		ScopeLabel:       scope.displayName(),
 		ScopeSourceCount: len(scope.sourceIDs()),
@@ -1151,7 +1254,12 @@ func (s *Server) handleHybridSearch(
 			Fingerprint: meta.Generation.Fingerprint,
 			State:       string(meta.Generation.State),
 		},
-		TookMS:  time.Since(start).Milliseconds(),
+		TookMS: time.Since(start).Milliseconds(),
+		Timings: hybridSearchTimings{
+			QueryEmbeddingMS: meta.QueryEmbeddingDuration.Milliseconds(),
+			RetrievalMS:      meta.RetrievalDuration.Milliseconds(),
+			HydrationMS:      hydrationDuration.Milliseconds(),
+		},
 		Results: items,
 	})
 }
@@ -1328,6 +1436,11 @@ func parseRequiredInt64Query(r *http.Request, name string) (int64, error) {
 
 func (s *Server) similarSearchFilter(r *http.Request) (vector.Filter, *apiHTTPError) {
 	var filter vector.Filter
+	scopes, err := parseAccountScopes(r)
+	if err != nil {
+		return filter, apiHTTPErrorFromParam(err)
+	}
+	filter.AccountScopes = scopes
 	if account := r.URL.Query().Get("account"); account != "" {
 		cliStore, apiErr := s.cliStore()
 		if apiErr != nil {
@@ -1464,8 +1577,11 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sourceType := r.URL.Query().Get("source_type")
-	sources, err := statusStore.ListSources(sourceType)
+	sources, err := statusStore.ListSourcesContext(r.Context(), sourceType)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		s.logger.Error("failed to list sources for status",
 			"source_type", sourceType,
 			"error", err,
@@ -1480,8 +1596,14 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 		if !principal.Sees(source.ID) {
 			continue
 		}
-		status, err := s.sourceStatus(statusStore, source)
+		if r.Context().Err() != nil {
+			return
+		}
+		status, err := s.sourceStatus(r.Context(), statusStore, source)
 		if err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			s.logger.Error("failed to build source sync status",
 				"source_id", source.ID,
 				"source_type", source.SourceType,
@@ -1497,7 +1619,7 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SourceStatusResponse{Sources: statuses})
 }
 
-func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Source) (SourceStatus, error) {
+func (s *Server) sourceStatus(ctx context.Context, statusStore SourceStatusStore, source *store.Source) (SourceStatus, error) {
 	status := SourceStatus{
 		CalendarCoverage: store.ParseCalendarCoverage(source.SyncConfig),
 		ID:               source.ID,
@@ -1512,12 +1634,12 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 		status.LastSyncAt = nullableTimePtr(source.LastSyncAt.Time)
 	}
 
-	active, err := statusStore.GetActiveSync(source.ID)
+	active, err := statusStore.GetActiveSyncReadOnly(ctx, source.ID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return SourceStatus{}, fmt.Errorf("get active sync: %w", err)
 	}
 	status.ActiveSync = syncRunStatus(active)
-	if err := s.hydrateSyncRunStatus(statusStore, status.ActiveSync); err != nil {
+	if err := s.hydrateSyncRunStatus(ctx, statusStore, status.ActiveSync); err != nil {
 		return SourceStatus{}, err
 	}
 	scheduling := classifySourceScheduling(source.SourceType, source.Identifier)
@@ -1538,6 +1660,7 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 				if !scheduled.NextRun.IsZero() {
 					status.NextSyncAt = nullableTimePtr(scheduled.NextRun)
 				}
+				applySchedulerQueueState(&status, scheduled.Queued, scheduled.Pending, scheduled.StartedAt)
 				break
 			}
 		case sourceScheduleNonSchedulable:
@@ -1546,7 +1669,7 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 	switch {
 	case scheduling.kind == sourceScheduleNonSchedulable:
 		status.SyncUnavailableReason = "source_not_schedulable"
-	case status.ActiveSync != nil || schedulerRunning:
+	case status.ActiveSync != nil || schedulerRunning || status.SchedulerQueued || status.SchedulerPending:
 		status.SyncUnavailableReason = "sync_already_running"
 	case s.scheduler == nil:
 		status.SyncUnavailableReason = "scheduler_unavailable"
@@ -1556,21 +1679,21 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 		status.CanSync = true
 	}
 
-	latest, err := statusStore.GetLatestSync(source.ID)
+	latest, err := statusStore.GetLatestSyncContext(ctx, source.ID, 0)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return SourceStatus{}, fmt.Errorf("get latest sync: %w", err)
 	}
 	status.LatestSync = syncRunStatus(latest)
-	if err := s.hydrateSyncRunStatus(statusStore, status.LatestSync); err != nil {
+	if err := s.hydrateSyncRunStatus(ctx, statusStore, status.LatestSync); err != nil {
 		return SourceStatus{}, err
 	}
 
-	lastSuccessful, err := statusStore.GetLastSuccessfulSync(source.ID)
+	lastSuccessful, err := statusStore.GetLastSuccessfulSyncContext(ctx, source.ID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return SourceStatus{}, fmt.Errorf("get last successful sync: %w", err)
 	}
 	status.LastSuccessfulSync = syncRunStatus(lastSuccessful)
-	if err := s.hydrateSyncRunStatus(statusStore, status.LastSuccessfulSync); err != nil {
+	if err := s.hydrateSyncRunStatus(ctx, statusStore, status.LastSuccessfulSync); err != nil {
 		return SourceStatus{}, err
 	}
 
@@ -1593,23 +1716,32 @@ func (s *Server) applyGenericJobStatus(status *SourceStatus, jobName string) boo
 		if !job.NextRun.IsZero() {
 			status.NextSyncAt = nullableTimePtr(job.NextRun)
 		}
+		applySchedulerQueueState(status, job.Queued, job.Pending, job.StartedAt)
 		return job.Running
 	}
 	return false
 }
 
-func (s *Server) hydrateSyncRunStatus(statusStore SourceStatusStore, status *SyncRunStatus) error {
+func applySchedulerQueueState(status *SourceStatus, queued, pending bool, startedAt time.Time) {
+	status.SchedulerQueued = queued
+	status.SchedulerPending = pending
+	if !startedAt.IsZero() {
+		status.SchedulerStartedAt = nullableTimePtr(startedAt)
+	}
+}
+
+func (s *Server) hydrateSyncRunStatus(ctx context.Context, statusStore SourceStatusStore, status *SyncRunStatus) error {
 	if status == nil {
 		return nil
 	}
 
-	skippedCount, err := statusStore.CountSyncRunItems(status.ID, store.SyncRunItemStatusSkipped)
+	skippedCount, err := statusStore.CountSyncRunItemsContext(ctx, status.ID, store.SyncRunItemStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("count skipped sync items: %w", err)
 	}
 	status.SkippedCount = skippedCount
 
-	items, err := statusStore.ListSyncRunItems(status.ID, store.SyncRunItemStatusError, sourceStatusItemErrorLimit)
+	items, err := statusStore.ListSyncRunItemsContext(ctx, status.ID, store.SyncRunItemStatusError, sourceStatusItemErrorLimit)
 	if err != nil {
 		return fmt.Errorf("list sync item errors: %w", err)
 	}
@@ -1637,12 +1769,6 @@ func syncRunStatus(run *store.SyncRun) *SyncRunStatus {
 	}
 	if run.ErrorMessage.Valid {
 		status.ErrorMessage = new(run.ErrorMessage.String)
-	}
-	if run.CursorBefore.Valid {
-		status.CursorBefore = new(run.CursorBefore.String)
-	}
-	if run.CursorAfter.Valid {
-		status.CursorAfter = new(run.CursorAfter.String)
 	}
 	return status
 }
@@ -1688,16 +1814,28 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Account is not scheduled: "+account)
 			return
 		}
-		if err := s.scheduler.StartJob(scheduling.jobName); err != nil {
+		disp, err := s.scheduler.StartJob(scheduling.jobName)
+		if err != nil {
 			s.logger.Error("failed to trigger generic sync job",
 				"job", scheduling.jobName, "identifier", account, "error", err)
 			writeError(w, http.StatusConflict, "sync_error", err.Error())
 			return
 		}
-		s.logger.Info("generic sync triggered via API", "job", scheduling.jobName, "identifier", account)
-		writeJSON(w, http.StatusAccepted, StatusMessageResponse{
-			Status:  "accepted",
-			Message: "Sync started for " + account,
+		s.logger.Info("generic sync triggered via API",
+			"job", scheduling.jobName, "identifier", account, "disposition", disp)
+		var message string
+		switch disp {
+		case scheduler.JobStarted:
+			message = "Sync started for " + account
+		case scheduler.JobPending:
+			message = "Sync already running for " + account + "; one follow-up run queued"
+		default:
+			message = "Sync for " + account + " is already queued or has a follow-up pending; request merged, no additional run"
+		}
+		writeJSON(w, http.StatusAccepted, TriggerSyncResponse{
+			Status:      "accepted",
+			Message:     message,
+			Disposition: string(disp),
 		})
 		return
 	case sourceScheduleAccount:
@@ -1711,7 +1849,7 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.logger.Info("sync triggered via API", "account", account)
-		writeJSON(w, http.StatusAccepted, StatusMessageResponse{
+		writeJSON(w, http.StatusAccepted, TriggerSyncResponse{
 			Status:  "accepted",
 			Message: "Sync started for " + account,
 		})
@@ -1790,53 +1928,13 @@ func (s *Server) handleUploadToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tokens directory from config
-	tokensDir := s.cfg.TokensDir()
-
-	// Create tokens directory if needed
-	if err := fileutil.SecureMkdirAll(tokensDir, 0700); err != nil {
-		s.logger.Error("failed to create tokens directory", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to create tokens directory")
-		return
-	}
-
-	// Sanitize email for filename
-	tokenPath := sanitizeTokenPath(tokensDir, email)
-
-	// Marshal token back to JSON (normalized)
-	data, err := json.MarshalIndent(tf, "", "  ")
+	data, err := json.Marshal(tf, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to serialize token")
 		return
 	}
-
-	// Atomic write via temp file
-	tmpFile, err := os.CreateTemp(tokensDir, ".token-*.tmp")
-	if err != nil {
-		s.logger.Error("failed to create temp file", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save token")
-		return
-	}
-	tmpPath := tmpFile.Name()
-
-	if _, err := tmpFile.Write(data); err != nil {
-		_ = tmpFile.Close()
-		_ = os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to write token")
-		return
-	}
-	if err := tmpFile.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to close token file")
-		return
-	}
-	if err := fileutil.SecureChmod(tmpPath, 0600); err != nil {
-		_ = os.Remove(tmpPath)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to set token permissions")
-		return
-	}
-	if err := os.Rename(tmpPath, tokenPath); err != nil {
-		_ = os.Remove(tmpPath)
+	if err := oauth.NewTokenStore(s.cfg.TokensDir(), s.cfg.OAuth.Tokens).Write(r.Context(), email, data); err != nil {
+		s.logger.Error("failed to save uploaded token", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to save token")
 		return
 	}
@@ -1846,29 +1944,6 @@ func (s *Server) handleUploadToken(w http.ResponseWriter, r *http.Request) {
 		Status:  "created",
 		Message: "Token saved for " + email,
 	})
-}
-
-// sanitizeTokenPath returns a safe file path for the token.
-func sanitizeTokenPath(tokensDir, email string) string {
-	// Remove dangerous characters
-	safe := strings.Map(func(r rune) rune {
-		if r == '/' || r == '\\' || r == '\x00' {
-			return -1
-		}
-		return r
-	}, email)
-
-	// Build path and verify it's within tokensDir
-	path := filepath.Join(tokensDir, safe+".json")
-	cleanPath := filepath.Clean(path)
-	cleanTokensDir := filepath.Clean(tokensDir)
-
-	// If path escapes tokensDir, use hash-based fallback
-	if !strings.HasPrefix(cleanPath, cleanTokensDir+string(os.PathSeparator)) {
-		return filepath.Join(tokensDir, fmt.Sprintf("%x.json", sha256.Sum256([]byte(email))))
-	}
-
-	return cleanPath
 }
 
 // AddAccountRequest represents a request to add an account to the config.
@@ -1882,8 +1957,8 @@ type AddAccountRequest struct {
 // POST /api/v1/accounts.
 func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 	var req AddAccountRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		s.logger.Warn("invalid account request JSON", "error", err)
 		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request JSON format")
 		return
@@ -1967,20 +2042,30 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 // ============================================================================
 
 type QueryRequest struct {
-	SQL string `json:"sql"`
+	SQL   string `json:"sql"`
+	Fresh *bool  `json:"fresh,omitempty"`
 }
 
 // ErrSQLQueryEngineUnavailable is returned when a raw SQL request has no
 // analytics engine. Callers outside the API package use this sentinel so the
 // handler can preserve its 503 engine-unavailable response.
 var ErrSQLQueryEngineUnavailable = errors.New("SQL query requires DuckDB engine (analytics cache may not be built)")
+var ErrCacheBuildUnavailable = errors.New("analytics cache build unavailable")
 
 // handleQuery executes a raw SQL query against DuckDB views.
 // POST /api/v1/query.
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
+	s.handleSQLQuery(w, r, false)
+}
+
+func (s *Server) handleArchiveQuery(w http.ResponseWriter, r *http.Request) {
+	s.handleSQLQuery(w, r, true)
+}
+
+func (s *Server) handleSQLQuery(w http.ResponseWriter, r *http.Request, archiveOnly bool) {
 	var req QueryRequest
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(&req); err != nil {
+	dec := jsontext.NewDecoder(r.Body)
+	if err := json.UnmarshalDecode(dec, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_json", "Invalid request body")
 		return
 	}
@@ -1999,9 +2084,51 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "not_read_only", err.Error())
 		return
 	}
+	fresh := false
+	if req.Fresh != nil {
+		fresh = *req.Fresh
+	}
+	if values, present := r.URL.Query()["fresh"]; present {
+		if len(values) != 1 {
+			writeError(w, http.StatusBadRequest, "invalid_fresh", "Specify fresh once")
+			return
+		}
+		parsed, err := strconv.ParseBool(values[0])
+		if err != nil || (req.Fresh != nil && parsed != *req.Fresh) {
+			writeError(w, http.StatusBadRequest, "invalid_fresh", "Invalid or conflicting fresh value")
+			return
+		}
+		fresh = parsed
+	}
 
-	result, err := s.runSQLQuery(r.Context(), req.SQL)
+	// Startup already owns cache recovery. Keep serving an installed SQL
+	// engine, but do not start a duplicate build while it is unavailable.
+	if s.analyticsCacheInitializingForContext(r.Context()) {
+		if _, usable := s.queryEngineForContext(r.Context()).(query.SQLQuerier); !usable {
+			writeError(w, http.StatusServiceUnavailable, "engine_unavailable", "Analytics engine is initializing")
+			return
+		}
+	}
+
+	var result *query.QueryResult
+	var accepted *CacheBuildAccepted
+	var err error
+	if archiveOnly {
+		if s.archiveSQLQueryRunner == nil {
+			err = ErrSQLQueryEngineUnavailable
+		} else {
+			result, accepted, err = s.archiveSQLQueryRunner(r.Context(), req.SQL, fresh)
+		}
+	} else if s.sqlQueryRunner != nil {
+		result, accepted, err = s.sqlQueryRunner(r.Context(), req.SQL, fresh)
+	} else {
+		result, err = s.runSQLQuery(r.Context(), req.SQL)
+	}
 	if err != nil {
+		if errors.Is(err, ErrCacheBuildUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, "cache_build_unavailable", err.Error())
+			return
+		}
 		if errors.Is(err, ErrSQLQueryEngineUnavailable) {
 			writeError(w, http.StatusServiceUnavailable,
 				"engine_unavailable",
@@ -2018,16 +2145,30 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "query_error", err.Error())
 		return
 	}
+	if accepted != nil {
+		writeJSON(w, http.StatusAccepted, accepted)
+		return
+	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleCacheBuildStatus(w http.ResponseWriter, r *http.Request) {
+	if s.cacheBuildStatusReader == nil {
+		writeError(w, http.StatusServiceUnavailable, "cache_build_unavailable", "Analytics cache build status unavailable")
+		return
+	}
+	status, ok := s.cacheBuildStatusReader(r.PathValue("job_id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "cache_build_not_found", "Analytics cache build not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
 }
 
 func (s *Server) runSQLQuery(ctx context.Context, sql string) (*query.QueryResult, error) {
 	if s.analyticsInitializingForContext(ctx) {
 		return nil, ErrSQLQueryEngineUnavailable
-	}
-	if s.sqlQueryRunner != nil {
-		return s.sqlQueryRunner(ctx, sql)
 	}
 	querier, ok := s.queryEngineForContext(ctx).(query.SQLQuerier)
 	if !ok {
@@ -2050,6 +2191,7 @@ func (s *Server) writeIfAnalyticsInitializing(ctx context.Context, w http.Respon
 
 // AggregateResponse represents aggregate query results.
 type AggregateResponse struct {
+	IndexState       string             `json:"index_state,omitempty"`
 	ViewType         string             `json:"view_type"`
 	Rows             []AggregateRowJSON `json:"rows"`
 	AppliedSourceIDs []int64            `json:"applied_source_ids,omitempty"`
@@ -2073,6 +2215,7 @@ type AggregateRowJSON struct {
 // SourceDeletedMessages break that total into its two populations so a client
 // can label it rather than guess which semantic the number carries.
 type TotalStatsResponse struct {
+	IndexState            string  `json:"index_state,omitempty"`
 	MessageCount          int64   `json:"message_count"`
 	ActiveMessages        int64   `json:"active_messages"`
 	SourceDeletedMessages int64   `json:"source_deleted_messages"`
@@ -2081,16 +2224,17 @@ type TotalStatsResponse struct {
 	AttachmentSize        int64   `json:"attachment_size"`
 	LabelCount            int64   `json:"label_count"`
 	AccountCount          int64   `json:"account_count"`
-	AppliedSearchScope    *bool   `json:"applied_search_scope,omitempty"`
+	AppliedSearchScope    *bool   `json:"applied_search_scope,omitzero" nullable:"false"`
 	AppliedSourceIDs      []int64 `json:"applied_source_ids,omitempty"`
 }
 
 // SearchFastResponse represents fast search results with stats.
 type SearchFastResponse struct {
+	IndexState       string              `json:"index_state,omitempty"`
 	Query            string              `json:"query"`
 	Messages         []MessageSummary    `json:"messages"`
 	TotalCount       int64               `json:"total_count"`
-	Stats            *TotalStatsResponse `json:"stats,omitempty"`
+	Stats            *TotalStatsResponse `json:"stats,omitzero" nullable:"false"`
 	AppliedSourceIDs []int64             `json:"applied_source_ids,omitempty"`
 }
 
@@ -2123,7 +2267,7 @@ type TextMessagesResponse struct {
 }
 
 type TextSearchResponse struct {
-	AppliedSourceID *int64                 `json:"applied_source_id,omitempty"`
+	AppliedSourceID *int64                 `json:"applied_source_id,omitzero" nullable:"false"`
 	Count           int                    `json:"count"`
 	HasMore         bool                   `json:"has_more"`
 	Offset          int                    `json:"offset"`
@@ -2196,7 +2340,7 @@ func viewTypeString(v query.ViewType) string {
 
 // Accepted values for enum query parameters, surfaced in 400 messages.
 var (
-	aggregateSortFields = []string{"count", "size", "attachment_size", "name"}
+	aggregateSortFields = []string{"count", "size", "attachment_size", nameKey}
 	messageSortFields   = []string{activityDateField, "size", "subject"}
 	textSortFields      = []string{"last_message", "count", "name"}
 	sortDirections      = []string{"asc", apiSortDirectionDesc}
@@ -2301,6 +2445,11 @@ func parseTextSortField(s string) (query.TextSortField, bool) {
 // handler can reject them with a 400; out-of-range limits are clamped.
 func parseAggregateOptions(r *http.Request) (query.AggregateOptions, error) {
 	opts := query.DefaultAggregateOptions()
+	scopes, err := parseAccountScopes(r)
+	if err != nil {
+		return opts, err
+	}
+	opts.AccountScopes = scopes
 
 	if v := r.URL.Query().Get("sort"); v != "" {
 		field, ok := parseSortField(v)
@@ -2384,6 +2533,11 @@ func requestWithoutParams(r *http.Request, keys ...string) *http.Request {
 
 func parseMessageFilter(r *http.Request) (query.MessageFilter, error) {
 	var filter query.MessageFilter
+	scopes, err := parseAccountScopes(r)
+	if err != nil {
+		return filter, err
+	}
+	filter.AccountScopes = scopes
 	filter.Pagination.Limit = -1 // sentinel: "not provided"
 
 	filter.Sender = r.URL.Query().Get("sender")
@@ -2815,6 +2969,7 @@ func (s *Server) handleAggregates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, AggregateResponse{
+		IndexState:       agentIndexState(r),
 		ViewType:         viewTypeString(viewType),
 		Rows:             jsonRows,
 		AppliedSourceIDs: append([]int64(nil), opts.SourceIDs...),
@@ -2878,6 +3033,7 @@ func (s *Server) handleSubAggregates(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, AggregateResponse{
+		IndexState:       agentIndexState(r),
 		ViewType:         viewTypeString(viewType),
 		Rows:             jsonRows,
 		AppliedSourceIDs: append([]int64(nil), filter.SourceIDs...),
@@ -2933,6 +3089,7 @@ func (s *Server) handleFilteredMessages(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, FilteredMessagesResponse{
+		IndexState:       agentIndexState(r),
 		Count:            len(summaries),
 		HasMore:          hasMore,
 		Offset:           filter.Pagination.Offset,
@@ -2968,17 +3125,17 @@ type ChangedMessageJSON struct {
 	SourceMessageID     string  `json:"source_message_id,omitempty"`
 	ConversationID      int64   `json:"conversation_id"`
 	MessageType         string  `json:"message_type,omitempty"`
-	ListID              *string `json:"list_id,omitempty"`
+	ListID              *string `json:"list_id,omitzero" nullable:"false"`
 	Subject             string  `json:"subject,omitempty"`
 	Snippet             string  `json:"snippet,omitempty"`
-	SentAt              *string `json:"sent_at,omitempty" format:"date-time"`
-	ReceivedAt          *string `json:"received_at,omitempty" format:"date-time"`
-	InternalDate        *string `json:"internal_date,omitempty" format:"date-time"`
+	SentAt              *string `json:"sent_at,omitzero" nullable:"false" format:"date-time"`
+	ReceivedAt          *string `json:"received_at,omitzero" nullable:"false" format:"date-time"`
+	InternalDate        *string `json:"internal_date,omitzero" nullable:"false" format:"date-time"`
 	SizeEstimate        int64   `json:"size_estimate"`
 	HasAttachments      bool    `json:"has_attachments"`
 	AttachmentCount     int     `json:"attachment_count"`
-	DeletedAt           *string `json:"deleted_at,omitempty" format:"date-time"`
-	DeletedFromSourceAt *string `json:"deleted_from_source_at,omitempty" format:"date-time"`
+	DeletedAt           *string `json:"deleted_at,omitzero" nullable:"false" format:"date-time"`
+	DeletedFromSourceAt *string `json:"deleted_from_source_at,omitzero" nullable:"false" format:"date-time"`
 	ContentChangedAt    string  `json:"content_changed_at" format:"date-time"`
 }
 
@@ -3323,6 +3480,10 @@ func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "Attachment not found")
 		return
 	}
+	if !s.agentObjectSourceAllowed(r, att.SourceID) {
+		writeError(w, http.StatusNotFound, "not_found", "Attachment not found")
+		return
+	}
 
 	writeJSON(w, http.StatusOK, AttachmentInfo{
 		ID:          att.ID,
@@ -3334,37 +3495,45 @@ func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetAttachmentContent streams a stored attachment's raw bytes by its
-// SHA-256 content hash. The /content suffix keeps this binary response distinct
-// from GET /attachments/{id}, which returns attachment metadata as JSON.
-func (s *Server) handleGetAttachmentContent(w http.ResponseWriter, r *http.Request) {
+func (s *Server) attachmentCandidatesForRequest(r *http.Request, hash string) ([]query.AttachmentInfo, *apiHTTPError) {
 	engine := s.queryEngineForContext(r.Context())
 	if engine == nil {
-		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", "Query engine not available")
-		return
-	}
-
-	hash := r.PathValue("hash")
-
-	if err := msgexport.ValidateContentHash(hash); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_hash", "Attachment hash must be a 64-character hex SHA-256")
-		return
+		return nil, newAPIHTTPError(http.StatusServiceUnavailable, "engine_unavailable", "Query engine not available")
 	}
 
 	attachments, err := engine.GetAttachmentsByHash(r.Context(), hash)
 	if err != nil {
 		s.logger.Error("failed to look up attachment by hash", "error", err, "hash", hash)
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to look up attachment")
+		return nil, newAPIHTTPError(http.StatusInternalServerError, "internal_error", "Failed to look up attachment")
+	}
+	// Agents see only attachments in granted accounts, so a hash held elsewhere reads as missing.
+	attachments = slices.DeleteFunc(attachments, func(att query.AttachmentInfo) bool { return !s.agentObjectSourceAllowed(r, att.SourceID) })
+	if len(attachments) == 0 {
+		return nil, newAPIHTTPError(http.StatusNotFound, "not_found", "Attachment not found")
+	}
+	return attachments, nil
+}
+
+// handleGetAttachmentContent streams a stored attachment's raw bytes by its
+// SHA-256 content hash. The /content suffix keeps this binary response distinct
+// from GET /attachments/{id}, which returns attachment metadata as JSON.
+func (s *Server) handleGetAttachmentContent(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	if err := msgexport.ValidateContentHash(hash); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_hash", "Attachment hash must be a 64-character hex SHA-256")
 		return
 	}
-	if len(attachments) == 0 {
-		writeError(w, http.StatusNotFound, "not_found", "Attachment not found")
+	attachments, apiErr := s.attachmentCandidatesForRequest(r, hash)
+	if apiErr != nil {
+		writeAPIHTTPError(w, apiErr)
 		return
 	}
 	att := &attachments[0]
+	releaseReadSnapshot(r)
 
 	var content io.ReadCloser
 	var contentLength int64
+	var err error
 	if s.blobStore != nil {
 		content, contentLength, err = s.blobStore.OpenStream(r.Context(), hash)
 	}
@@ -3534,6 +3703,10 @@ func (s *Server) handleSearchByDomains(w http.ResponseWriter, r *http.Request) {
 		filter.Pagination.Limit = maxPageSize
 	}
 
+	sourceIDs := filter.SourceIDs
+	if sourceIDs == nil && filter.SourceID != nil {
+		sourceIDs = []int64{*filter.SourceID}
+	}
 	requestLimit := filter.Pagination.Limit
 	messages, err := engine.SearchByDomains(
 		r.Context(),
@@ -3542,6 +3715,7 @@ func (s *Server) handleSearchByDomains(w http.ResponseWriter, r *http.Request) {
 		filter.Before,
 		requestLimit+1,
 		filter.Pagination.Offset,
+		sourceIDs,
 	)
 	if err != nil {
 		s.logger.Error("domain search failed", "error", err)
@@ -3603,6 +3777,7 @@ func (s *Server) handleTotalStats(w http.ResponseWriter, r *http.Request) {
 	for _, name := range []string{
 		"sender", "sender_name", recipientParam, "recipient_name", "domain", "label", "list_id",
 		"message_type", "time_period", "time_granularity", "conversation_id", "after", "before", "empty_targets",
+		"account_scopes",
 	} {
 		if _, present := r.URL.Query()[name]; present {
 			opts.Filter = &filter
@@ -3669,6 +3844,7 @@ func (s *Server) handleTotalStats(w http.ResponseWriter, r *http.Request) {
 
 	response := toTotalStatsResponse(stats)
 	if response != nil {
+		response.IndexState = agentIndexState(r)
 		if opts.SearchScope {
 			response.AppliedSearchScope = &opts.SearchScope
 		}
@@ -3735,9 +3911,16 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 		limit = maxPageSize
 	}
 
+	indexState := agentIndexState(r)
 	result, err := engine.SearchFastWithStats(r.Context(), q, queryStr, filter, statsGroupBy, limit, offset)
 	if err != nil {
 		if s.writeIfContextError(w, err) {
+			return
+		}
+		if query.IsEncodingError(err) {
+			s.logger.Error("fast search hit invalid UTF-8 in the analytics cache", "error", err)
+			writeError(w, http.StatusInternalServerError, "cache_encoding_error",
+				"The analytics cache contains invalid UTF-8. Run 'msgvault build-cache --full-rebuild' and retry.")
 			return
 		}
 		s.logger.Error("fast search failed", "query", queryStr, "error", err)
@@ -3751,6 +3934,7 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, SearchFastResponse{
+		IndexState:       indexState,
 		Query:            queryStr,
 		Messages:         summaries,
 		TotalCount:       result.TotalCount,
@@ -3846,7 +4030,11 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 				"Query engine does not support exact message body search")
 			return
 		}
-		messages, err = bodySearcher.SearchMessageBodies(r.Context(), merged, limit+1, offset)
+		var result *query.SearchFastResult
+		result, err = bodySearcher.SearchMessageBodies(r.Context(), merged, limit+1, offset)
+		if err == nil {
+			messages = result.Messages
+		}
 	} else {
 		searchScope := *q
 		if filter.HideDeletedFromSource {
@@ -3909,6 +4097,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, DeepSearchResponse{
+		IndexState:   agentIndexState(r),
 		Query:        queryStr,
 		Scope:        scope,
 		Messages:     summaries,
@@ -4213,10 +4402,6 @@ type archivedMessageRawReader interface {
 // without ambiguity in the routing layer.
 func (s *Server) handleMessageInline(w http.ResponseWriter, r *http.Request) {
 	engine := s.queryEngineForContext(r.Context())
-	if engine == nil {
-		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", "Query engine not available")
-		return
-	}
 
 	idStr := r.PathValue("id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
@@ -4228,6 +4413,14 @@ func (s *Server) handleMessageInline(w http.ResponseWriter, r *http.Request) {
 	cidParam := r.URL.Query().Get("cid")
 	if cidParam == "" {
 		writeError(w, http.StatusBadRequest, "missing_cid", "Missing 'cid' query parameter")
+		return
+	}
+	if strings.HasPrefix(cidParam, "remote-image:") {
+		s.serveArchivedRemoteImage(w, r, id, cidParam)
+		return
+	}
+	if engine == nil {
+		writeError(w, http.StatusServiceUnavailable, "engine_unavailable", "Query engine not available")
 		return
 	}
 

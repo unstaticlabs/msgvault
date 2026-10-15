@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,10 +16,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v7"
+
 	"go.kenn.io/msgvault/internal/export"
 	"go.kenn.io/msgvault/internal/gmail"
 	"go.kenn.io/msgvault/internal/identityops"
 	"go.kenn.io/msgvault/internal/mime"
+	"go.kenn.io/msgvault/internal/rederive"
+	"go.kenn.io/msgvault/internal/remoteimage"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/textutil"
 )
@@ -52,6 +57,8 @@ type Options struct {
 
 	// AttachmentsDir is where to store attachments
 	AttachmentsDir string
+	// RemoteImages is nil unless remote image archiving was explicitly enabled.
+	RemoteImages *remoteimage.Fetcher
 
 	// Limit caps the number of messages scanned per sync (0 = unlimited).
 	// Enforced by truncating the message ID list before downloading content.
@@ -88,6 +95,11 @@ type Syncer struct {
 	opts               *Options
 	successfulHookName string
 	successfulHook     SuccessfulSyncHook
+
+	// failedRelocationGuards holds run-scoped protection for forced
+	// relocation targets that failed this run. It is set only on the scoped
+	// Syncer copy a single full() run uses and never persists.
+	failedRelocationGuards *failedRelocationGuards
 }
 
 // SuccessfulSyncHook runs after the durable sync run is marked complete.
@@ -120,12 +132,57 @@ type sourceMessageMatcher interface {
 	) (matches bool, conclusive bool, err error)
 }
 
+type messageRelocationTargetProvider interface {
+	MessageRelocationTarget(sourceMessageID string) (gmail.MessageRelocationTarget, bool)
+}
+
 type sourceMessageAliaser interface {
 	CanonicalSourceMessageID(sourceMessageID string) (string, bool)
 }
 
 type preferredIMAPSourceID interface {
 	IsPreferredSourceMessageID(messageID string) bool
+}
+
+// trustedOutgoingPlacement is implemented by clients whose production path
+// authenticates outgoing-mailbox placement.
+type trustedOutgoingPlacement interface {
+	// IsTrustedOutgoingMailbox reports whether the mailbox this composite
+	// source ID names is trusted to hold only mail the account itself
+	// authored: an unambiguous \Sent or \Drafts role advertised by the
+	// authenticated LIST response, or an explicit user configuration for
+	// servers without role discovery. RFC 6154 roles advise intent rather
+	// than prove authorship, so this is a scoped trust assumption — but
+	// sender-controlled headers can never produce it.
+	IsTrustedOutgoingMailbox(messageID string) bool
+}
+
+// sentPrecedencePlacement is implemented by clients that can distinguish a
+// Sent placement from a Drafts placement. Both are trusted outgoing
+// placements, but a Sent copy is the account's own final form of a message
+// while a surviving Drafts copy is usually its earlier draft.
+type sentPrecedencePlacement interface {
+	// IsSentPlacementMailbox reports whether the mailbox this composite
+	// source ID names is a Sent placement (unambiguous advertised \Sent or
+	// the explicitly configured Sent folder).
+	IsSentPlacementMailbox(messageID string) bool
+	// IsDraftsPlacementMailbox reports whether the mailbox this composite
+	// source ID names is a Drafts placement and nothing stronger.
+	IsDraftsPlacementMailbox(messageID string) bool
+}
+
+// relocationContentAuthorized reports whether replacing an archived snapshot
+// with content fetched from destinationSourceMessageID is backed by trusted
+// outgoing placement. RFC822 Message-ID equality never authorizes replacement
+// on its own: the header is sender-controlled, so an incoming message with a
+// forged Message-ID must only rekey the location and reconcile labels while
+// the canonical snapshot is preserved. Absent, unauthenticated, ambiguous,
+// or non-placement evidence denies the refresh.
+func (s *Syncer) relocationContentAuthorized(
+	destinationSourceMessageID string,
+) bool {
+	placement, ok := s.client.(trustedOutgoingPlacement)
+	return ok && placement.IsTrustedOutgoingMailbox(destinationSourceMessageID)
 }
 
 type fetchedSourceMessageMatcher interface {
@@ -301,26 +358,25 @@ func (s *Syncer) runPageIdentityDiscovery(
 	sourceID int64,
 	sourceMessageIDs []string,
 ) (parkedBacklog bool) {
-	backoff := identityDiscoveryRetryBackoff
-	var err error
-	for attempt := range identityDiscoveryAttempts {
-		if _, err = identityops.DiscoverStrongForSourceMessageIDs(
-			ctx, s.store, sourceID, sourceMessageIDs,
-		); err == nil {
-			return false
-		}
-		if ctx.Err() != nil || attempt == identityDiscoveryAttempts-1 {
-			break
-		}
-		s.logger.Warn(identityDiscoveryRetryLogMessage,
-			"source_id", sourceID, "attempt", attempt+1, "error", err)
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			return false
-		}
-		backoff *= 2
+	policy := backoff.NewExponentialBackOff()
+	policy.InitialInterval = identityDiscoveryRetryBackoff
+	policy.MaxInterval = 2 * identityDiscoveryRetryBackoff
+	policy.Multiplier = 2
+	attempt := 0
+	_, err := backoff.Retry(ctx, func() (struct{}, error) {
+		attempt++
+		_, err := identityops.DiscoverStrongForSourceMessageIDs(
+			ctx, s.store, sourceID, sourceMessageIDs)
+		return struct{}{}, err
+	}, backoff.WithBackOff(policy), backoff.WithMaxTries(identityDiscoveryAttempts),
+		backoff.WithMaxElapsedTime(0), backoff.WithNotify(func(err error, _ time.Duration) {
+			s.logger.Warn(identityDiscoveryRetryLogMessage,
+				"source_id", sourceID, "attempt", attempt, "error", err)
+		}))
+	if err == nil {
+		return false
 	}
+	err = backoff.AsRetryError(err).LastErr
 	if ctx.Err() != nil {
 		return false
 	}
@@ -557,7 +613,84 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 	}
 	result.sourceMessageIDs = messageIDs
 
-	// Check which messages already exist
+	result.processed = int64(len(messageIDs))
+
+	// Relocate exact targets before ordinary routing can invalidate a reused
+	// composite ID. A failing target stays a retryable per-item failure whose
+	// old composite key and guarded row survive the run untouched, so ordinary
+	// messages (and later pages) keep flowing while the next attempt
+	// rediscovers the candidate through the retained key.
+	if s.opts.SourceType == sourceTypeIMAP {
+		if provider, ok := s.client.(messageRelocationTargetProvider); ok {
+			var forcedIDs, ordinaryIDs []string
+			targets := make(map[string]gmail.MessageRelocationTarget)
+			for _, id := range messageIDs {
+				if target, selected := provider.MessageRelocationTarget(id); selected {
+					forcedIDs = append(forcedIDs, id)
+					targets[id] = target
+				} else {
+					ordinaryIDs = append(ordinaryIDs, id)
+				}
+			}
+			if len(forcedIDs) > 0 {
+				rawMessages, err := s.getMessagesRawBatchWithDiagnostics(ctx, forcedIDs)
+				if err != nil {
+					for _, id := range forcedIDs {
+						s.recordSyncItem(syncID, id, syncItemPhaseFetch, store.SyncRunItemStatusError, syncItemKindBatchFetchError, err)
+					}
+					checkpoint.ErrorsCount += int64(len(forcedIDs))
+					return nil, fmt.Errorf("fetch IMAP relocation messages: %w", err)
+				}
+				for i, id := range forcedIDs {
+					if err := ctx.Err(); err != nil {
+						return nil, fmt.Errorf("relocate IMAP message %q: %w", id, err)
+					}
+					fetch := gmail.RawMessageBatchResult{Err: errRawBatchMissing}
+					if i < len(rawMessages) {
+						fetch = rawMessages[i]
+					}
+					phase, kind := syncItemPhaseIngest, syncItemKindIngestError
+					err := fetch.Err
+					if err != nil {
+						phase, kind = syncItemPhaseFetch, syncItemKindFetchError
+					} else {
+						err = s.relocateIMAPMessageToTarget(ctx, sourceID, targets[id], fetch.Message, threadIDs[id], labelMap)
+					}
+					if err != nil {
+						if fatalRelocationError(err) {
+							// Cancellation and sync-generation fencing
+							// invalidate the run itself; no further work can
+							// commit, so stop instead of deferring.
+							return nil, fmt.Errorf("relocate IMAP message %q: %w", id, err)
+						}
+						// A failed target stays a retryable per-item failure
+						// so unrelated mail keeps ingesting, but its old
+						// composite key and guarded row must survive this
+						// run untouched: the key is what rediscovers the
+						// candidate next attempt, and the run cannot commit
+						// topology while it reports errors. The target is
+						// not acknowledged.
+						s.recordSyncItem(syncID, id, phase, store.SyncRunItemStatusError, kind, err)
+						checkpoint.ErrorsCount++
+						s.guardFailedRelocation(targets[id])
+						s.logger.Warn("failed to relocate IMAP message; deferring target and continuing",
+							"id", id, "error", err)
+						continue
+					}
+					result.updated++
+					result.acknowledged = append(result.acknowledged, id)
+					summary.BytesDownloaded += int64(len(fetch.Message.Raw))
+				}
+				messageIDs = ordinaryIDs
+			}
+		}
+	}
+	if len(messageIDs) == 0 {
+		return result, nil
+	}
+
+	// Load ordinary metadata after relocation so reused IDs resolve against
+	// the newly committed archive identities.
 	lookupMessageIDs := append([]string(nil), messageIDs...)
 	aliases := make(map[string]string)
 	if s.opts.SourceType == sourceTypeIMAP {
@@ -594,6 +727,19 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 	var existingCount int
 	inconclusiveRefreshes := make(map[string]inconclusiveLabelRefresh)
 	for _, id := range messageIDs {
+		if existing, exists := existingMap[id]; exists &&
+			(s.relocationCompositeProtected(id) ||
+				s.relocationRowProtectedByID(existing.ID)) {
+			// A failed relocation target keeps its keys and row out of
+			// ordinary routing entirely: label refresh, preferred rekey
+			// through a saved alias, UID-reuse invalidation, and dedup-stub
+			// acknowledgement could each consume the old composite key or
+			// mutate the guarded row. Leave the item unacknowledged so the
+			// next attempt rediscovers it.
+			s.logger.Warn("deferring IMAP composite key of a failed relocation target",
+				"id", id)
+			continue
+		}
 		if _, exists := existingMap[id]; !exists {
 			fetchIDs = append(fetchIDs, id)
 			continue
@@ -610,7 +756,6 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 		fetchIDs = append(fetchIDs, id)
 	}
 
-	result.processed = int64(len(messageIDs))
 	result.skipped = int64(existingCount)
 
 	if len(labelRefreshIDs) > 0 {
@@ -701,6 +846,15 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 					continue
 				}
 				if !matches {
+					if s.relocationRowProtected(existing.ID, sourceMessageID) {
+						// The row is a failed relocation target: its old
+						// composite key is the provenance the next retry
+						// rediscovers the candidate with, so this run must not
+						// consume the key. Leave the item unacknowledged.
+						s.logger.Warn("deferring reused IMAP composite key of a failed relocation target",
+							"id", sourceMessageID)
+						continue
+					}
 					err := s.preserveReusedIMAPSource(
 						existing.ID, sourceMessageID)
 					if err != nil {
@@ -749,7 +903,8 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 	// Raw MIME is needed for new messages and as a compatibility fallback for
 	// incomplete snapshots whose client cannot fetch labels separately.
 	if len(fetchIDs) > 0 {
-		rawMessages, err := s.getMessagesRawBatchWithDiagnostics(ctx, fetchIDs)
+		rawMessages, err := s.getMessagesRawBatchWithIdentityValidation(
+			ctx, fetchIDs, inconclusiveRefreshes)
 		if err != nil {
 			for _, id := range fetchIDs {
 				s.recordSyncItem(syncID, id, syncItemPhaseFetch, store.SyncRunItemStatusError, syncItemKindBatchFetchError, err)
@@ -764,6 +919,7 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 			pendingRefresh, needsRawComparison :=
 				inconclusiveRefreshes[sourceMessageID]
 			raw := fetch.Message
+
 			if raw == nil {
 				if kind, gone := messageGoneKind(fetch.Err); gone {
 					s.logger.Debug("skipping message deleted before fetch", "id", sourceMessageID)
@@ -800,6 +956,13 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 			// dedup skip (e.g. same message in All Mail and Trash).
 			// Distinct from []byte{} which is a genuine empty body.
 			if raw.Raw == nil {
+				if s.relocationCompositeProtected(sourceMessageID) {
+					// Never acknowledge a failed relocation target's key
+					// through a dedup stub.
+					s.logger.Warn("deferring IMAP composite key of a failed relocation target",
+						"id", sourceMessageID)
+					continue
+				}
 				if !alreadyExists {
 					result.skipped++
 				}
@@ -855,6 +1018,13 @@ func (s *Syncer) processBatch(ctx context.Context, syncID, sourceID int64, listR
 					continue
 				}
 
+				if s.relocationRowProtected(existing.ID, sourceMessageID) {
+					// Same protection as the label path: never consume the
+					// old composite key of a failed relocation target.
+					s.logger.Warn("deferring reused IMAP composite key of a failed relocation target",
+						"id", sourceMessageID)
+					continue
+				}
 				if err := s.preserveReusedIMAPSource(
 					existing.ID, sourceMessageID); err != nil {
 					s.logger.Warn("failed to preserve reused IMAP source ID",
@@ -1024,6 +1194,13 @@ func (s *Syncer) runWithSyncExecution(
 			err = errors.Join(err, releaseErr)
 		}
 	}()
+	src, err := s.store.GetSourceByIDContext(ctx, sourceID)
+	if err != nil {
+		return nil, fmt.Errorf("load source %d: %w", sourceID, err)
+	}
+	if src != nil {
+		rederive.Heal(ctx, s.logger, s.store, src)
+	}
 	return run(execution)
 }
 
@@ -1151,6 +1328,7 @@ func (s *Syncer) full(
 	}
 	scoped := *s
 	scoped.store = s.store.ScopedToSync(source.ID, state.syncID)
+	scoped.failedRelocationGuards = newFailedRelocationGuards()
 	s = &scoped
 	summary.SyncRunID = state.syncID
 	summary.WasResumed = state.wasResumed
@@ -1174,6 +1352,10 @@ func (s *Syncer) full(
 	if err != nil {
 		s.failStoppedSync(state.syncID, err)
 		return nil, fmt.Errorf("get profile: %w", err)
+	}
+	if err := s.refreshProfileIdentity(ctx, source, profile); err != nil {
+		s.failStoppedSync(state.syncID, err)
+		return nil, err
 	}
 	handoffHistoryID := profile.HistoryID
 	if reconcilePresence {
@@ -1273,9 +1455,18 @@ func (s *Syncer) full(
 		// Report progress
 		s.progress.OnProgress(state.checkpoint.MessagesProcessed, state.checkpoint.MessagesAdded, result.skipped)
 
-		// Save checkpoint
+		// Save checkpoint. While relocation targets remain failed, the
+		// saved cursor stays empty. The resume query only picks up runs with
+		// a non-empty cursor_before, so the next attempt is a fresh full
+		// replan whose first page carries the forced targets ahead of any
+		// ordinary routing — the run-scoped guards cannot be lost across a
+		// resume boundary because there is none. Production IMAP syncs
+		// disable resume anyway (session-local page offsets).
 		pageToken = listResp.NextPageToken
 		state.checkpoint.PageToken = pageToken
+		if s.relocationGuardsActive() {
+			state.checkpoint.PageToken = ""
+		}
 		if err := s.store.UpdateSyncCheckpoint(state.syncID, state.checkpoint); err != nil {
 			s.logger.Warn("failed to save checkpoint", "error", err)
 		}
@@ -1327,11 +1518,11 @@ func (s *Syncer) full(
 		return nil, err
 	}
 
-	// Checkpoint WAL after sync to fold it back into the main database.
-	// This prevents WAL accumulation across long sync sessions and ensures
-	// readers (e.g. build-cache) see a consistent database state.
-	if err := s.store.CheckpointWAL(); err != nil {
-		s.logger.Warn("wal checkpoint after sync failed", "error", err)
+	// Fold what the WAL can give back without waiting on readers or writers.
+	// A busy archive usually leaves frames behind; the daemon's daily SQLite
+	// maintenance truncates the WAL off-peak.
+	if err := s.store.CheckpointWALPassive(ctx); err != nil {
+		s.logger.Debug("wal checkpoint after sync incomplete", "error", err)
 	}
 
 	// Build summary
@@ -1403,6 +1594,7 @@ func (s *Syncer) syncLabels(ctx context.Context, sourceID int64) (map[string]int
 
 // messageData holds all parsed data for a message before persistence.
 type messageData struct {
+	metadata          *sql.NullString
 	message           *store.Message
 	threadID          string
 	conversationType  string
@@ -1419,13 +1611,9 @@ type messageData struct {
 	participantMap    map[string]int64
 }
 
-// parseToModel parses a raw Gmail message into a messageData struct.
-func (s *Syncer) parseToModel(sourceID int64, raw *gmail.RawMessage, threadID string) (*messageData, error) {
-	data, err := s.prepareMessage(sourceID, raw, threadID, false)
-	if err != nil {
-		return nil, err
-	}
-
+// resolvePreparedMessage performs the store-mutating resolution needed by
+// ordinary ingest after pure MIME preparation and deduplication have finished.
+func (s *Syncer) resolvePreparedMessage(data *messageData) (*messageData, error) {
 	allAddresses := make([]mime.Address, 0, len(data.from)+len(data.to)+len(data.cc)+len(data.bcc))
 	allAddresses = append(allAddresses, data.from...)
 	allAddresses = append(allAddresses, data.to...)
@@ -1445,11 +1633,11 @@ func (s *Syncer) parseToModel(sourceID int64, raw *gmail.RawMessage, threadID st
 	var conversationID int64
 	if data.conversationType == conversationTypeChat {
 		conversationID, err = s.store.EnsureConversationWithType(
-			sourceID, data.threadID, data.conversationType, data.conversationTitle,
+			data.message.SourceID, data.threadID, data.conversationType, data.conversationTitle,
 		)
 	} else {
 		conversationID, err = s.store.EnsureConversation(
-			sourceID, data.threadID, data.conversationTitle,
+			data.message.SourceID, data.threadID, data.conversationTitle,
 		)
 	}
 	if err != nil {
@@ -1592,7 +1780,17 @@ func (s *Syncer) prepareMessage(
 		msg.SentAt = sql.NullTime{Time: resolvedDate, Valid: true}
 	}
 
+	var metadata *sql.NullString
+	if origin := s.imapContentOrigin(raw.ID); s.opts.SourceType == sourceTypeIMAP && origin != "" {
+		encoded, err := json.Marshal(imapMessageMetadata{ContentOrigin: origin}, json.Deterministic(true))
+		if err != nil {
+			return nil, fmt.Errorf("encode IMAP content origin: %w", err)
+		}
+		metadata = &sql.NullString{String: string(encoded), Valid: true}
+	}
+
 	return &messageData{
+		metadata:          metadata,
 		message:           msg,
 		threadID:          threadID,
 		conversationType:  conversationType,
@@ -1648,6 +1846,7 @@ func (s *Syncer) persistMessage(data *messageData, labelMap map[string]int64) (i
 	// Persist atomically
 	messageID, err := s.store.PersistMessage(&store.MessagePersistData{
 		Message:    data.message,
+		Metadata:   data.metadata,
 		BodyText:   sql.NullString{String: data.bodyText, Valid: data.bodyText != ""},
 		BodyHTML:   sql.NullString{String: data.bodyHTML, Valid: data.bodyHTML != ""},
 		RawMIME:    data.rawMIME,
@@ -1731,7 +1930,7 @@ func (s *Syncer) ingestMessage(
 	threadID string,
 	labelMap map[string]int64,
 ) (bool, error) {
-	data, err := s.parseToModel(sourceID, raw, threadID)
+	data, err := s.prepareMessage(sourceID, raw, threadID, false)
 	if err != nil {
 		return false, err
 	}
@@ -1762,6 +1961,13 @@ func (s *Syncer) ingestMessage(
 			if err != nil {
 				return false, fmt.Errorf("get dedup source ID: %w", err)
 			}
+			if s.relocationRowProtectedByID(existingID) {
+				// A failed relocation target keeps its snapshot and identity
+				// this run; a duplicate copy reaching it through alias,
+				// composite, or RFC822 routing is deferred unacknowledged
+				// instead of mutating the guarded row.
+				return false, errDeferredIMAPIdentity
+			}
 			matches := false
 			conclusive := true
 			if !isInvalidatedIMAPSourceID(oldSourceMessageID) {
@@ -1790,8 +1996,62 @@ func (s *Syncer) ingestMessage(
 					errDeferredIMAPIdentity,
 				)
 			}
+			savedOrigin, err := s.savedIMAPContentOrigin(existingID)
+			if err != nil {
+				return false, err
+			}
+			destinationOrigin := s.imapContentOrigin(data.message.SourceMessageID)
+			canonicalOrigin := s.imapContentOrigin(oldSourceMessageID)
+
 			complete := s.labelsSnapshotComplete()
 			if matches {
+				if complete && oldSourceMessageID != data.message.SourceMessageID {
+					if destinationOrigin.canRefresh(savedOrigin, true) && destinationOrigin.canRefresh(canonicalOrigin, true) {
+						storedRaw, err := s.store.GetMessageRaw(existingID)
+						if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, store.ErrInvalidMessageRaw) {
+							return false, fmt.Errorf("read canonical IMAP raw: %w", err)
+						}
+						if err != nil || !bytes.Equal(storedRaw, raw.Raw) {
+							// A missing or unreadable snapshot still needs the fetched copy.
+							expected := store.MessageIdentityGuard{
+								ID: existingID, SourceID: sourceID,
+								SourceMessageID: oldSourceMessageID,
+							}
+							err := s.relocateIMAPMessage(
+								ctx, expected, raw, threadID, labelMap,
+								complete, deferLabels,
+							)
+							return dedupMutationResult(
+								true, "refresh relocated IMAP message", err)
+						}
+						// Identical bytes need no content rewrite or relocation. Save
+						// their outgoing origin so later stale Drafts copies still
+						// lose, then apply the normal location and label rules.
+						if err := s.store.SetMessageMetadata(existingID, *data.metadata); err != nil {
+							return false, fmt.Errorf("record identical IMAP content origin: %w", err)
+						}
+					}
+					if preferred, ok := s.client.(preferredIMAPSourceID); ok &&
+						preferred.IsPreferredSourceMessageID(data.message.SourceMessageID) {
+						// The preferred copy sits where the provider also files
+						// received mail (\All or unadvertised), so its content is
+						// not trusted: adopt the stable canonical ID and keep the
+						// archived snapshot. Rekey and label reconciliation share
+						// one guarded transaction so a late failure or
+						// cancellation cannot consume the old composite key
+						// without the labels the adoption intended.
+						adopted, err := s.store.AdoptMessageSourceIDContext(
+							ctx,
+							existingID, oldSourceMessageID, data.message.SourceMessageID,
+							!deferLabels, labelIDs, complete)
+						if err != nil {
+							return false, fmt.Errorf(
+								"adopt preferred IMAP source ID: %w", err)
+						}
+						return dedupMutationResult(
+							adopted, "adopt preferred IMAP source ID", nil)
+					}
+				}
 				changed := false
 				if !deferLabels {
 					changed, err = s.store.ReconcileMessageLabels(
@@ -1801,26 +2061,25 @@ func (s *Syncer) ingestMessage(
 							"reconcile validated dedup labels: %w", err)
 					}
 				}
-				if complete && oldSourceMessageID != data.message.SourceMessageID {
-					if preferred, ok := s.client.(preferredIMAPSourceID); ok &&
-						preferred.IsPreferredSourceMessageID(data.message.SourceMessageID) {
-						rekeyed, err := s.store.RekeyMessageSourceID(
-							existingID, oldSourceMessageID, data.message.SourceMessageID)
-						if err != nil {
-							return false, fmt.Errorf(
-								"adopt preferred IMAP source ID: %w", err)
-						}
-						if !rekeyed {
-							return false, fmt.Errorf(
-								"preferred IMAP source ID %q changed before adoption",
-								data.message.SourceMessageID)
-						}
-						changed = true
-					}
-				}
 				return dedupMutationResult(
 					changed, "reconcile validated dedup labels", nil)
 			}
+			if destinationOrigin.canRefresh(savedOrigin, false) && destinationOrigin.canRefresh(canonicalOrigin, false) {
+				expected := store.MessageIdentityGuard{
+					ID: existingID, SourceID: sourceID,
+					SourceMessageID: oldSourceMessageID,
+				}
+				err = s.relocateIMAPMessage(
+					ctx, expected, raw, threadID, labelMap,
+					complete, deferLabels,
+				)
+				return dedupMutationResult(
+					true, "refresh relocated IMAP message", err)
+			}
+			// The vanished canonical cannot be tied to this survivor by
+			// provider evidence, so a matching RFC822 Message-ID authorizes
+			// only the location adoption: keep the archived snapshot and
+			// follow the previous rekey and label behavior.
 			if complete {
 				if deferLabels {
 					rekeyed, err := s.store.RekeyMessageSourceID(
@@ -1854,7 +2113,17 @@ func (s *Syncer) ingestMessage(
 		}
 	}
 
-	_, err = s.persistMessage(data, labelMap)
+	data, err = s.resolvePreparedMessage(data)
+	if err != nil {
+		return false, err
+	}
+	messageID, err := s.persistMessage(data, labelMap)
+	if err == nil && s.opts.RemoteImages != nil && data.message.MessageType == store.MessageTypeEmail {
+		archived := s.opts.RemoteImages.Archive(ctx, s.store, s.opts.AttachmentsDir, messageID, data.bodyHTML)
+		for _, imageErr := range archived.Errors {
+			s.logger.Warn("failed to archive remote image", "message", messageID, "error", imageErr)
+		}
+	}
 	return false, err
 }
 
@@ -1992,16 +2261,17 @@ func buildRecipientSet(recipientType string, addresses []mime.Address, participa
 	return rs
 }
 
-// storeAttachment stores an attachment to disk and records it in the database.
-func (s *Syncer) storeAttachment(messageID int64, att *mime.Attachment) error {
-	storagePath, err := export.StoreAttachmentFile(s.opts.AttachmentsDir, att)
+// StoreMIMEAttachment publishes one MIME attachment through the same
+// content-addressed path used by ordinary sync and returns its row data.
+func StoreMIMEAttachment(attachmentsDir string, att *mime.Attachment) (store.AttachmentWrite, error) {
+	storagePath, err := export.StoreAttachmentFile(attachmentsDir, att)
 	if err != nil || storagePath == "" {
-		return err
+		return store.AttachmentWrite{}, err
 	}
 
 	role, roleSource := store.AttachmentRoleFromMIME(
 		att.Disposition, att.IsInline, att.ContentID)
-	return s.store.UpsertAttachmentRecord(context.Background(), messageID, store.AttachmentWrite{
+	return store.AttachmentWrite{
 		Filename:      att.Filename,
 		MIMEType:      att.ContentType,
 		StoragePath:   storagePath,
@@ -2011,7 +2281,16 @@ func (s *Syncer) storeAttachment(messageID int64, att *mime.Attachment) error {
 		RoleSource:    roleSource,
 		SourcePartKey: att.PartKey,
 		ContentID:     att.ContentID,
-	})
+	}, nil
+}
+
+// storeAttachment stores an attachment to disk and records it in the database.
+func (s *Syncer) storeAttachment(messageID int64, att *mime.Attachment) error {
+	write, err := StoreMIMEAttachment(s.opts.AttachmentsDir, att)
+	if err != nil || write.StoragePath == "" {
+		return err
+	}
+	return s.store.UpsertAttachmentRecord(context.Background(), messageID, write)
 }
 
 // joinEmails concatenates email addresses from a slice of mime.Address with spaces.

@@ -19,4 +19,5 @@ export const ExploreFilterDimension = {
   read_state: "read_state",
   row_unit: "row_unit",
   handling_state: "handling_state",
+  account: "account",
 } as const;

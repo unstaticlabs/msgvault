@@ -2,7 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -10,12 +11,14 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/providercredentials"
+	"go.kenn.io/msgvault/internal/scheduler"
 )
 
 const (
@@ -32,17 +35,45 @@ const (
 type SecretSettingState struct {
 	Configured bool   `json:"configured"`
 	Source     string `json:"source,omitempty" enum:"stored,environment,none"`
+	// Hint is the first three and last three characters of the value joined
+	// by an ellipsis, so a person can tell which key is set without seeing
+	// it. It is omitted for a value under twelve characters, for passwords,
+	// and when nothing is set.
+	Hint string `json:"hint,omitempty" doc:"First three and last three characters of the value joined by an ellipsis, so a person can tell which key is set. Omitted for a value under twelve characters, for passwords, and when nothing is set."`
+}
+
+// secretHintMinimumLength is the shortest value that gets a hint: six of
+// twelve characters leaves as much hidden as shown.
+const secretHintMinimumLength = 12
+
+// secretHint masks a secret for display: "sk-…x9Q". Values too short to
+// hide most of themselves get no hint.
+func secretHint(value string) string {
+	runes := []rune(value)
+	if len(runes) < secretHintMinimumLength {
+		return ""
+	}
+	return string(runes[:3]) + "…" + string(runes[len(runes)-3:])
+}
+
+// secretStateOf reports a resolved credential to a client: whether it is
+// set, where it comes from, and a masked hint of its value.
+func secretStateOf(value string, state providercredentials.State) SecretSettingState {
+	if !state.Configured {
+		value = ""
+	}
+	return SecretSettingState{Configured: state.Configured, Source: string(state.Source), Hint: secretHint(value)}
 }
 
 // SettingValue is an explicit JSON union. Exactly one member is populated,
 // keeping generated Go and TypeScript clients typed without exposing an
 // unstructured config map.
 type SettingValue struct {
-	String  *string   `json:"string,omitempty"`
-	Integer *int      `json:"integer,omitempty"`
-	Number  *float64  `json:"number,omitempty"`
-	Boolean *bool     `json:"boolean,omitempty"`
-	Strings *[]string `json:"strings,omitempty"`
+	String  *string   `json:"string,omitzero" nullable:"false"`
+	Integer *int      `json:"integer,omitzero" nullable:"false"`
+	Number  *float64  `json:"number,omitzero" nullable:"false"`
+	Boolean *bool     `json:"boolean,omitzero" nullable:"false"`
+	Strings *[]string `json:"strings,omitzero" nullable:"false"`
 }
 
 // SettingValidation lets generic Settings clients render the same basic
@@ -50,9 +81,43 @@ type SettingValue struct {
 // remain authoritative at PATCH/PUT time.
 type SettingValidation struct {
 	Hint     string   `json:"hint,omitempty"`
-	Required bool     `json:"required,omitempty"`
-	Minimum  *float64 `json:"minimum,omitempty"`
-	Maximum  *float64 `json:"maximum,omitempty"`
+	Required bool     `json:"required,omitzero"`
+	Minimum  *float64 `json:"minimum,omitzero" nullable:"false"`
+	Maximum  *float64 `json:"maximum,omitzero" nullable:"false"`
+	// Format names a structured syntax the client can check as the user
+	// types and render with a purpose-built control.
+	Format string `json:"format,omitempty" enum:"cron"`
+	// Off names the value that switches the setting off. Minimum and
+	// Maximum keep covering every accepted value, the off value included,
+	// so a client that ignores Off still accepts what the daemon stores.
+	// Clients that understand Off render a switch beside the value control
+	// and bound the "on" values with OnMinimum.
+	Off *SettingOff `json:"off,omitzero" nullable:"false"`
+}
+
+// SettingOff describes the one value that turns a setting off or hands it
+// back to a default.
+// text returns the off value as text; an absent value reads as "".
+func (o *SettingOff) text() string {
+	if o == nil || o.Value == nil {
+		return ""
+	}
+	return *o.Value
+}
+
+type SettingOff struct {
+	// Value is the off value in the same text form the value control shows:
+	// "0" for a count, "0s" for a duration, "" for an optional size. It is
+	// a pointer so a generated client can tell an empty off value, which is
+	// a real value, from a missing one.
+	Value *string `json:"value"`
+	// Label says what happens while the setting is off, such as "No limit".
+	Label string `json:"label"`
+	// Suggest is the value the control starts from when switched on.
+	Suggest string `json:"suggest,omitempty"`
+	// OnMinimum is the smallest value accepted while the setting is on. It
+	// is set when the off value sits below that range.
+	OnMinimum *float64 `json:"on_minimum,omitzero" nullable:"false"`
 }
 
 // Setting describes one browser-managed allowlisted config value. ReadOnly
@@ -64,21 +129,38 @@ type Setting struct {
 	Label           string              `json:"label"`
 	Description     string              `json:"description"`
 	Kind            string              `json:"kind"`
-	Value           *SettingValue       `json:"value,omitempty"`
-	Secret          *SecretSettingState `json:"secret,omitempty"`
+	Value           *SettingValue       `json:"value,omitzero" nullable:"false"`
+	Secret          *SecretSettingState `json:"secret,omitzero" nullable:"false"`
 	Options         []string            `json:"options,omitempty"`
 	RestartRequired bool                `json:"restart_required"`
-	Testable        bool                `json:"testable,omitempty"`
-	ReadOnly        bool                `json:"read_only,omitempty"`
-	Inherited       bool                `json:"inherited,omitempty"`
+	Testable        bool                `json:"testable,omitzero"`
+	ReadOnly        bool                `json:"read_only,omitzero"`
+	Inherited       bool                `json:"inherited,omitzero"`
 	CredentialID    string              `json:"credential_id,omitempty"`
-	Validation      *SettingValidation  `json:"validation,omitempty"`
+	Validation      *SettingValidation  `json:"validation,omitzero" nullable:"false"`
+	// Section names one of the owning group's sections. Empty when the group
+	// has no sections.
+	Section string `json:"section,omitempty"`
+}
+
+// legacySettingsGroupIDs are group IDs that daemons before API schema 2.22.0
+// emitted. They stay in the published enum so generated clients accept those
+// daemons; the current daemon never emits them.
+var legacySettingsGroupIDs = []string{"sync", "logging", "activity", "backup"}
+
+// SettingSection is one titled run of settings inside a group. Clients render
+// sections in the order the group lists them.
+type SettingSection struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
 }
 
 type SettingGroup struct {
-	ID          string `json:"id"`
-	Label       string `json:"label"`
-	Description string `json:"description"`
+	ID          string           `json:"id"`
+	Label       string           `json:"label"`
+	Description string           `json:"description"`
+	Sections    []SettingSection `json:"sections,omitempty"`
 }
 
 type SettingsResponse struct {
@@ -96,8 +178,8 @@ type SecretSettingUpdate struct {
 
 type SettingUpdate struct {
 	Key    string               `json:"key"`
-	Value  *SettingValue        `json:"value,omitempty"`
-	Secret *SecretSettingUpdate `json:"secret,omitempty"`
+	Value  *SettingValue        `json:"value,omitzero" nullable:"false"`
+	Secret *SecretSettingUpdate `json:"secret,omitzero" nullable:"false"`
 }
 
 type SettingsPatchRequest struct {
@@ -120,7 +202,7 @@ type settingDefinition struct {
 	// daemon-side resources (such as environment variable names) which a
 	// remote session must never control.
 	localOnly             bool
-	secret                func(*config.Config) bool
+	secret                func(*Server, *config.Config) string
 	serverSecret          func(context.Context, *Server, *config.Config) bool
 	credentialID          string
 	credentialEndpoint    func(*config.Config) string
@@ -135,10 +217,11 @@ var settingsCatalog = []settingDefinition{
 	liveStringSetting("web.density", "browser", []string{"compact", "comfortable"}, func(c *config.Config) string { return c.Web.Density }),
 	readOnlyStringSetting("server.bind_addr", "server", func(c *config.Config) string { return c.Server.BindAddr }),
 	readOnlyIntSetting("server.api_port", "server", func(c *config.Config) int { return c.Server.APIPort }),
-	readOnlySecretSetting("server.api_key", "server", func(c *config.Config) bool { return c.Server.APIKey != "" }),
+	readOnlySecretSetting("server.api_key", "server", func(s *Server, _ *config.Config) string { return s.cfg.Server.AuthenticationKey() }),
 	readOnlyBoolSetting("server.allow_insecure", "server", func(c *config.Config) bool { return c.Server.AllowInsecure }),
 	readOnlyStringArraySetting("server.trusted_proxies", "server", func(c *config.Config) []string { return c.Server.TrustedProxies }),
 	stringSetting("server.daemon_idle_timeout", "server", nil, func(c *config.Config) string { return c.Server.DaemonIdleTimeout.String() }),
+	boolSetting("server.daemon_auto_start", "server", func(c *config.Config) bool { return c.Server.DaemonAutoStartEnabled() }),
 	stringSetting("server.daemon_auto_restart", "server", []string{config.DaemonAutoRestartNewer, config.DaemonAutoRestartNever, config.DaemonAutoRestartAlways}, func(c *config.Config) string { return c.Server.DaemonAutoRestart }),
 	stringSetting("analytics.engine", "archive", []string{"auto", "sql", "duckdb"}, func(c *config.Config) string { return c.Analytics.Engine }),
 	boolSetting("analytics.auto_build_cache", "archive", func(c *config.Config) bool { return c.Analytics.AutoBuildCache }),
@@ -146,11 +229,11 @@ var settingsCatalog = []settingDefinition{
 	stringSetting("analytics.builder_memory_limit", "archive", nil, func(c *config.Config) string { return c.Analytics.BuilderMemoryLimit }),
 	intSetting("analytics.builder_threads", "archive", func(c *config.Config) int { return c.Analytics.BuilderThreads }),
 	stringSetting("analytics.builder_temp_limit", "archive", nil, func(c *config.Config) string { return c.Analytics.BuilderTempLimit }),
-	intSetting("sync.rate_limit_qps", "sync", func(c *config.Config) int { return c.Sync.RateLimitQPS }),
-	boolSetting("log.enabled", "logging", func(c *config.Config) bool { return c.Log.Enabled }),
-	stringSetting("log.level", "logging", []string{"", "debug", "info", "warn", "error"}, func(c *config.Config) string { return c.Log.Level }),
-	int64Setting("log.sql_slow_ms", "logging", func(c *config.Config) int64 { return c.Log.SQLSlowMs }),
-	boolSetting("log.sql_trace", "logging", func(c *config.Config) bool { return c.Log.SQLTrace }),
+	intSetting("sync.rate_limit_qps", settingsGroupSources, func(c *config.Config) int { return c.Sync.RateLimitQPS }),
+	boolSetting("log.enabled", "server", func(c *config.Config) bool { return c.Log.Enabled }),
+	stringSetting("log.level", "server", []string{"", "debug", "info", "warn", "error"}, func(c *config.Config) string { return c.Log.Level }),
+	int64Setting("log.sql_slow_ms", "server", func(c *config.Config) int64 { return c.Log.SQLSlowMs }),
+	boolSetting("log.sql_trace", "server", func(c *config.Config) bool { return c.Log.SQLTrace }),
 	boolSetting("vector.enabled", "search", func(c *config.Config) bool { return c.Vector.Enabled }),
 	readOnlyStringSettingWithOptions("vector.backend", "search", []string{"sqlite-vec", "pgvector"}, func(c *config.Config) string { return c.Vector.Backend }),
 	readOnlyStringSetting("vector.db_path", "search", func(c *config.Config) string { return c.Vector.DBPath }),
@@ -210,6 +293,10 @@ var settingsCatalog = []settingDefinition{
 	intSetting("vector.search.k_per_signal", "search", func(c *config.Config) int { return c.Vector.Search.KPerSignal }),
 	numberSetting("vector.search.subject_boost", "search", func(c *config.Config) float64 { return c.Vector.Search.SubjectBoost }),
 	intSetting("vector.search.max_page_size_hybrid", "search", func(c *config.Config) int { return c.Vector.Search.MaxPageSizeHybridClamp() }),
+	stringSetting("vector.search.sqlite_accelerator", "search", []string{"auto", "exact"}, func(c *config.Config) string { return c.Vector.Search.SQLiteAccelerator }),
+	intSetting("vector.search.ann_nprobe", "search", func(c *config.Config) int { return c.Vector.Search.ANNNProbe }),
+	intSetting("vector.search.ann_oversample", "search", func(c *config.Config) int { return c.Vector.Search.ANNOversample }),
+	intSetting("vector.search.ann_threads", "search", func(c *config.Config) int { return c.Vector.Search.ANNThreads }),
 	configuredBoolSetting("vector.preprocess.strip_quotes", "search", func(c *config.Config) bool { return c.Vector.Preprocess.StripQuotesEnabled() }, func(c *config.Config) bool { return c.Vector.Preprocess.StripQuotes == nil }),
 	configuredBoolSetting("vector.preprocess.strip_signatures", "search", func(c *config.Config) bool { return c.Vector.Preprocess.StripSignaturesEnabled() }, func(c *config.Config) bool { return c.Vector.Preprocess.StripSignatures == nil }),
 	configuredBoolSetting("vector.preprocess.strip_html", "search", func(c *config.Config) bool { return c.Vector.Preprocess.StripHTMLEnabled() }, func(c *config.Config) bool { return c.Vector.Preprocess.StripHTML == nil }),
@@ -225,6 +312,8 @@ var settingsCatalog = []settingDefinition{
 	stringSetting("slack.schedule", settingsGroupSources, nil, func(c *config.Config) string { return c.Slack.Schedule }),
 	stringArraySetting("slack.channels", settingsGroupSources, func(c *config.Config) []string { return c.Slack.Channels }),
 	stringArraySetting("slack.exclude_channels", settingsGroupSources, func(c *config.Config) []string { return c.Slack.ExcludeChannels }),
+	configuredBoolSetting("slack.dms", settingsGroupSources, func(c *config.Config) bool { return c.Slack.DMsEnabled() }, func(c *config.Config) bool { return c.Slack.DMs == nil }),
+	configuredBoolSetting("slack.group_dms", settingsGroupSources, func(c *config.Config) bool { return c.Slack.GroupDMsEnabled() }, func(c *config.Config) bool { return c.Slack.GroupDMs == nil }),
 	configuredBoolSetting("beeper.media", settingsGroupAttachments, func(c *config.Config) bool { return c.Beeper.MediaEnabled() }, func(c *config.Config) bool { return c.Beeper.Media == nil }),
 	stringSetting("beeper.media_scope", settingsGroupAttachments, []string{"all", "direct", "none"}, func(c *config.Config) string { return effectiveMediaScope(c.Beeper.MediaScope) }),
 	intSetting("beeper.media_max_participants", settingsGroupAttachments, func(c *config.Config) int { return c.Beeper.MediaMaxParticipants }),
@@ -241,15 +330,17 @@ var settingsCatalog = []settingDefinition{
 	stringSetting("teams.media_scope", settingsGroupAttachments, []string{"all", "direct", "none"}, func(c *config.Config) string { return effectiveMediaScope(c.Teams.MediaScope) }),
 	intSetting("teams.media_max_participants", settingsGroupAttachments, func(c *config.Config) int { return c.Teams.MediaMaxParticipants }),
 	intSetting("teams.max_media_mb", settingsGroupAttachments, func(c *config.Config) int { return c.Teams.MaxMediaMB }),
-	stringSetting("activity.timezone", "activity", nil, func(c *config.Config) string { return c.Activity.Timezone }),
-	intSetting("activity.max_direct_counterparts", "activity", func(c *config.Config) int { return c.Activity.MaxDirectCounterparts }),
-	intSetting("activity.batch_size", "activity", func(c *config.Config) int { return c.Activity.BatchSize }),
-	stringSetting("activity.schedule", "activity", nil, func(c *config.Config) string { return c.Activity.Schedule }),
-	intSetting("backup.zstd_level", "backup", func(c *config.Config) int { return c.Backup.ZstdLevel }),
+	stringSetting("activity.timezone", "archive", nil, func(c *config.Config) string { return c.Activity.Timezone }),
+	intSetting("activity.max_direct_counterparts", "archive", func(c *config.Config) int { return c.Activity.MaxDirectCounterparts }),
+	intSetting("activity.batch_size", "archive", func(c *config.Config) int { return c.Activity.BatchSize }),
+	stringSetting("activity.schedule", "archive", nil, func(c *config.Config) string { return c.Activity.Schedule }),
+	intSetting("backup.zstd_level", "archive", func(c *config.Config) int { return c.Backup.ZstdLevel }),
 	boolSetting("people.enrichment.enabled", settingsGroupEnrichment, func(c *config.Config) bool { return c.People.Enrichment.Enabled }),
 	stringSetting("people.enrichment.schedule", settingsGroupEnrichment, nil, func(c *config.Config) string { return c.People.Enrichment.Schedule }),
 	intSetting("people.enrichment.batch_size", settingsGroupEnrichment, func(c *config.Config) int { return c.People.Enrichment.BatchSize }),
 	stringSetting("people.enrichment.lease_duration", settingsGroupEnrichment, nil, func(c *config.Config) string { return c.People.Enrichment.LeaseDuration.String() }),
+	readOnlyStringSetting("carddav.provider", settingsGroupSources, func(c *config.Config) string { return c.CardDAV.Provider }),
+	readOnlyStringSetting("carddav.oauth_app", settingsGroupSources, func(c *config.Config) string { return c.CardDAV.OAuthApp }),
 	readOnlyStringSetting("carddav.base_url", settingsGroupSources, func(c *config.Config) string { return c.CardDAV.BaseURL }),
 	readOnlyStringSetting("carddav.username", settingsGroupSources, func(c *config.Config) string { return c.CardDAV.Username }),
 	readOnlyStringSetting("carddav.schedule", settingsGroupSources, func(c *config.Config) string { return c.CardDAV.Schedule }),
@@ -257,8 +348,12 @@ var settingsCatalog = []settingDefinition{
 	readOnlyCardDAVSecretSetting(),
 	boolSetting("integrations.tasks.enabled", "integrations", func(c *config.Config) bool { return c.Integrations.Tasks.Enabled }),
 	stringSetting("integrations.tasks.endpoint", "integrations", nil, func(c *config.Config) string { return c.Integrations.Tasks.Endpoint }),
-	secretSetting("integrations.tasks.api_key", "integrations", func(c *config.Config) bool { return c.Integrations.Tasks.APIKey != "" }),
+	secretSetting("integrations.tasks.api_key", "integrations", func(_ *Server, c *config.Config) string { return c.Integrations.Tasks.APIKey }),
 	stringSetting("integrations.tasks.default_project", "integrations", nil, func(c *config.Config) string { return c.Integrations.Tasks.DefaultProject }),
+	boolSetting("integrations.kata.enabled", "integrations", func(c *config.Config) bool { return c.Integrations.Kata.Enabled }),
+	stringSetting("integrations.kata.endpoint", "integrations", nil, func(c *config.Config) string { return c.Integrations.Kata.Endpoint }),
+	secretSetting("integrations.kata.api_key", "integrations", func(_ *Server, c *config.Config) string { return c.Integrations.Kata.APIKey }),
+	stringSetting("integrations.kata.default_project", "integrations", nil, func(c *config.Config) string { return c.Integrations.Kata.DefaultProject }),
 }
 
 func (s *Server) registerSettingsRoutes(api huma.API) {
@@ -292,6 +387,7 @@ func (s *Server) registerSettingsRoutes(api huma.API) {
 	registerRawHumaRoute(api, patch, s.handlePatchSettings)
 	s.registerProviderCredentialSettingsRoutes(api)
 	s.registerPersonEnrichmentSettingsRoute(api)
+	s.registerPeopleInferenceSettingsRoute(api)
 }
 
 func addSettingsETagHeader(response *huma.Response) {
@@ -357,8 +453,8 @@ func readOnlyStringArraySetting(key, group string, read func(*config.Config) []s
 	return definition
 }
 
-func readOnlySecretSetting(key, group string, configured func(*config.Config) bool) settingDefinition {
-	definition := secretSetting(key, group, configured)
+func readOnlySecretSetting(key, group string, value func(*Server, *config.Config) string) settingDefinition {
+	definition := secretSetting(key, group, value)
 	definition.localOnly = true
 	return definition
 }
@@ -403,8 +499,8 @@ func stringArraySetting(key, group string, read func(*config.Config) []string) s
 	return settingDefinition{key: key, group: group, kind: "string_array", restartRequired: true, read: func(c *config.Config) any { return read(c) }}
 }
 
-func secretSetting(key, group string, configured func(*config.Config) bool) settingDefinition {
-	return settingDefinition{key: key, group: group, kind: "secret", restartRequired: true, secret: configured}
+func secretSetting(key, group string, value func(*Server, *config.Config) string) settingDefinition {
+	return settingDefinition{key: key, group: group, kind: "secret", restartRequired: true, secret: value}
 }
 
 func providerCredentialSetting(
@@ -465,13 +561,13 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request SettingsPatchRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil {
+	decoder := jsontext.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20), json.RejectUnknownMembers(true))
+
+	if err := json.UnmarshalDecode(decoder, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid settings request")
 		return
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := json.UnmarshalDecode(decoder, &struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "bad_request", "Invalid settings request")
 		return
 	}
@@ -521,7 +617,7 @@ func (s *Server) handlePatchSettings(w http.ResponseWriter, r *http.Request) {
 	if restartRequired {
 		s.settingsPendingRestart.Store(true)
 	}
-	loaded, err := config.LoadConfigFile(snapshot, "")
+	loaded, err := s.cfg.ReloadConfigFile(snapshot)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "settings_read_failed", "Could not read settings")
 		return
@@ -606,10 +702,7 @@ func (s *Server) readPersistedSettings() (config.ConfigFile, *config.Config, err
 	if err != nil {
 		return config.ConfigFile{}, nil, err
 	}
-	if !snapshot.Exists {
-		return snapshot, config.NewDefaultConfig(), nil
-	}
-	loaded, err := config.LoadConfigFile(snapshot, "")
+	loaded, err := s.cfg.ReloadConfigFile(snapshot)
 	if err != nil {
 		return config.ConfigFile{}, nil, err
 	}
@@ -636,23 +729,26 @@ func (s *Server) buildSettingsResponse(
 			ReadOnly:        definition.localOnly,
 			CredentialID:    definition.credentialID,
 			Validation:      validationForSetting(definition.key),
+			Section:         metadata.section,
 		}
 		if definition.inherited != nil {
 			setting.Inherited = definition.inherited(cfg)
 		}
 		if definition.credentialID != "" {
-			_, state, err := credentials.Resolve(definition.credentialID,
+			value, state, err := credentials.Resolve(definition.credentialID,
 				definition.credentialEndpoint(cfg), definition.credentialEnvironment(cfg), osLookupEnv)
 			if errors.Is(err, providercredentials.ErrOriginMismatch) {
 				state = providercredentials.State{Configured: false, Source: providercredentials.SourceNone}
 			} else if err != nil {
 				return SettingsResponse{}, err
 			}
-			setting.Secret = &SecretSettingState{Configured: state.Configured, Source: string(state.Source)}
+			secret := secretStateOf(value, state)
+			setting.Secret = &secret
 		} else if definition.serverSecret != nil {
 			setting.Secret = &SecretSettingState{Configured: definition.serverSecret(ctx, s, cfg)}
 		} else if definition.secret != nil {
-			setting.Secret = &SecretSettingState{Configured: definition.secret(cfg)}
+			value := definition.secret(s, cfg)
+			setting.Secret = &SecretSettingState{Configured: value != "", Hint: secretHint(value)}
 		} else {
 			setting.Value = settingValue(definition.kind, definition.read(cfg))
 		}
@@ -687,6 +783,12 @@ var credentialBindings = []credentialBinding{
 		credentialKey:   "integrations.tasks.api_key",
 		currentEndpoint: func(c *config.Config) string { return c.Integrations.Tasks.Endpoint },
 		credentialSet:   func(c *config.Config) bool { return c.Integrations.Tasks.APIKey != "" },
+	},
+	{
+		endpointKey:     "integrations.kata.endpoint",
+		credentialKey:   "integrations.kata.api_key",
+		currentEndpoint: func(c *config.Config) string { return c.Integrations.Kata.Endpoint },
+		credentialSet:   func(c *config.Config) bool { return c.Integrations.Kata.APIKey != "" },
 	},
 }
 
@@ -853,7 +955,7 @@ func settingsEdits(current *config.Config, updates []SettingUpdate) ([]config.Ed
 			if err != nil {
 				return nil, false, fmt.Errorf("setting %q: %w", update.Key, err)
 			}
-			value = converted
+			value = normalizeSettingValue(update.Key, converted)
 		}
 		if err := validateSettingUpdate(update.Key, value, definition.options); err != nil {
 			return nil, false, fmt.Errorf("%w: %s", errInvalidSettingUpdate, update.Key)
@@ -876,6 +978,9 @@ func validateSettingUpdate(key string, value any, options []string) error {
 		}
 	}
 	if err := validateSettingBounds(key, value); err != nil {
+		return err
+	}
+	if err := validateSettingText(key, value); err != nil {
 		return err
 	}
 	switch key {
@@ -922,6 +1027,72 @@ func validateSettingUpdate(key string, value any, options []string) error {
 		}
 		if _, err := time.ParseDuration(text); err != nil {
 			return errors.New("invalid duration")
+		}
+	}
+	return nil
+}
+
+// validateSettingText enforces the published Required and Format rules for
+// string settings so the daemon rejects what the browser rejects. Config
+// defaulting would otherwise turn an empty required schedule into the
+// built-in one without telling the caller.
+// normalizeSettingValue stores a schedule the way the scheduler reads it: a
+// value made only of spaces, or only of a time zone with no fields, is the
+// empty off value instead of text that fails the config check after the
+// PATCH was accepted.
+//
+// A number that lands between the off value and the on minimum is raised to
+// the on minimum: the control's step cannot express "any positive value", so
+// the daemon settles the gap instead of rejecting the save.
+func normalizeSettingValue(key string, value any) any {
+	validation := validationForSetting(key)
+	if validation == nil {
+		return value
+	}
+	if text, ok := value.(string); ok && validation.Format == settingFormatCron {
+		return scheduler.NormalizeCronExpr(text)
+	}
+	if validation.Off == nil || validation.Off.OnMinimum == nil {
+		return value
+	}
+	off, err := strconv.ParseFloat(validation.Off.text(), 64)
+	if err != nil {
+		return value
+	}
+	onMinimum := *validation.Off.OnMinimum
+	switch typed := value.(type) {
+	case float64:
+		if typed > off && typed < onMinimum {
+			return onMinimum
+		}
+	case int:
+		if float64(typed) > off && float64(typed) < onMinimum {
+			return int(math.Ceil(onMinimum))
+		}
+	case int64:
+		if float64(typed) > off && float64(typed) < onMinimum {
+			return int64(math.Ceil(onMinimum))
+		}
+	}
+	return value
+}
+
+func validateSettingText(key string, value any) error {
+	validation := validationForSetting(key)
+	if validation == nil {
+		return nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return nil
+	}
+	trimmed := strings.TrimSpace(text)
+	if validation.Required && trimmed == "" {
+		return errors.New("a value is required")
+	}
+	if validation.Format == settingFormatCron && trimmed != "" {
+		if err := scheduler.ValidateCronExpr(trimmed); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -10,7 +10,7 @@ package calsync
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"go.kenn.io/msgvault/internal/gcal"
+	"go.kenn.io/msgvault/internal/rederive"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -219,6 +220,9 @@ func (s *Syncer) syncCalendarFull(
 	if err := s.updateCalendarSourceOAuthApp(src.ID, cal.ID); err != nil {
 		return err
 	}
+	// Heal events an older msgvault archived before its config and confirmed
+	// identity existed; the ledger makes this a no-op once done.
+	rederive.Heal(ctx, s.logger, s.store, src)
 
 	// Resume a stopped run from its checkpoint, then start a new run. StartSync
 	// rejects a running sync, so a live worker cannot be replaced. The prior
@@ -372,7 +376,7 @@ func (s *Syncer) syncCalendarFull(
 	if completeErr != nil {
 		return fail(fmt.Errorf("complete sync: %w", completeErr))
 	}
-	_ = s.store.CheckpointWAL()
+	_ = s.store.CheckpointWALPassive(ctx)
 	s.logger.Info("calendar full sync complete",
 		"calendar", cal.ID, "events_processed", cp.MessagesProcessed,
 		"events_added", cp.MessagesAdded, "events_cancelled", cp.MessagesUpdated)
@@ -395,7 +399,7 @@ func encodeCalendarFullCheckpoint(pageToken string) string {
 	b, err := json.Marshal(calendarFullCheckpoint{
 		Kind:      calendarFullCheckpointKind,
 		PageToken: pageToken,
-	})
+	}, json.Deterministic(true))
 	if err != nil {
 		return ""
 	}

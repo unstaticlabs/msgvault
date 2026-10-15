@@ -88,7 +88,7 @@
       const message = await emailWorkBody(client, member.message_id, key, controller?.signal);
       if (current === generation) bodies = {...bodies, [key]: {id: message.id, conversationId: message.conversation_id ?? member.conversation_id, subject: message.subject, sender: message.from,
         recipients: message.to ?? [], sentAt: message.sent_at, snippet: message.snippet, body: message.body, bodyHtml: message.body_html,
-        attachments: (message.attachments ?? []).map((file) => ({filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes}))}};
+        attachments: (message.attachments ?? []).map((file) => ({id: file.id, filename: file.filename, mimeType: file.mime_type, sizeBytes: file.size_bytes}))}};
     } catch (cause) { if (current === generation) bodyErrors = {...bodyErrors, [key]: cause instanceof Error ? cause.message : 'Could not open this copy.'}; }
     finally { if (current === generation) bodyLoading = bodyLoading.filter((value) => value !== key); }
   }

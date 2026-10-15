@@ -4,7 +4,6 @@ package gmail
 import (
 	"context"
 	"errors"
-
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -41,7 +40,10 @@ type CompleteMessageSnapshotReader interface {
 	ListCompleteMessageSnapshot(ctx context.Context, pageToken string) (*MessageListResponse, error)
 }
 
-// MessageDeleter provides write operations for deleting Gmail messages.
+// ErrBatchUnsupported tells the executor to delete messages individually.
+var ErrBatchUnsupported = errors.New("batch deletion is unsupported")
+
+// MessageDeleter provides write operations for deleting source messages.
 type MessageDeleter interface {
 	// TrashMessage moves a message to trash (recoverable for 30 days).
 	TrashMessage(ctx context.Context, messageID string) error
@@ -50,6 +52,7 @@ type MessageDeleter interface {
 	DeleteMessage(ctx context.Context, messageID string) error
 
 	// BatchDeleteMessages permanently deletes multiple messages (max 1000).
+	// Clients without batch deletion return ErrBatchUnsupported.
 	BatchDeleteMessages(ctx context.Context, messageIDs []string) error
 }
 
@@ -72,6 +75,65 @@ type InboxArchiver interface {
 	// so an empty map is the fully successful case.
 	ArchiveFromInbox(ctx context.Context, messageIDs []string) (failures map[string]error, err error)
 }
+
+// DraftAPI provides Gmail-native draft operations. It is separate from API
+// because IMAP clients implement the archive sync surface but cannot create a
+// Gmail draft.
+type DraftAPI interface {
+	CreateDraft(ctx context.Context, raw []byte, threadID string) (*Draft, error)
+	GetDraft(ctx context.Context, draftID string) (*Draft, error)
+	UpdateDraft(ctx context.Context, draftID string, raw []byte, threadID string) (*Draft, error)
+	DeleteDraft(ctx context.Context, draftID string) error
+	ListSendAs(ctx context.Context) ([]SendAs, error)
+	Close() error
+}
+
+// Draft is the Gmail draft receipt. Gmail keeps ID stable while replacing the
+// enclosed message.
+type Draft struct {
+	ID      string
+	Message RawMessage
+}
+
+// SendAs is one provider-listed sender identity.
+type SendAs struct {
+	Email              string
+	DisplayName        string
+	VerificationStatus string
+	Primary            bool
+	Default            bool
+}
+
+const (
+	DraftStateRejected      = "rejected"
+	DraftStateRemoteUnknown = "remote_unknown"
+	DraftStateCancelled     = "cancelled"
+)
+
+// DraftWriteError carries a stable client-facing result for a draft mutation.
+type DraftWriteError struct {
+	State string
+	Code  string
+	Err   error
+}
+
+func (e *DraftWriteError) Error() string {
+	if e.Code != "" {
+		return e.Code
+	}
+	return e.State
+}
+
+func (e *DraftWriteError) Unwrap() error { return e.Err }
+
+// StatusError is a typed HTTP failure from Gmail. Its text matches the
+// pre-existing client errors so callers that still match text keep working.
+type StatusError struct {
+	StatusCode int
+	msg        string
+}
+
+func (e *StatusError) Error() string { return e.msg }
 
 // API defines the interface for Gmail operations.
 // This interface enables mocking for tests without hitting the real API.
@@ -108,7 +170,7 @@ type Label struct {
 // the localized label name returned to users.
 func SystemRoleForLabelID(sourceLabelID string) string {
 	if sourceLabelID == "DRAFT" {
-		return store.LabelSystemRoleDraft
+		return store.LabelSystemRoleDrafts
 	}
 	if sourceLabelID == "SENT" {
 		return store.LabelSystemRoleSent
@@ -190,4 +252,14 @@ type HistoryMessage struct {
 type HistoryLabelChange struct {
 	Message  MessageID
 	LabelIDs []string
+}
+
+// MessageRelocationTarget retains the archived identity selected for adopting
+// a fetched snapshot after its previous IMAP location disappears.
+type MessageRelocationTarget struct {
+	InternalID         int64
+	SourceID           int64
+	SourceMessageID    string // Expected old archived composite ID.
+	RFC822MessageID    string
+	NewSourceMessageID string
 }

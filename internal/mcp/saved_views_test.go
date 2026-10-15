@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/query/querytest"
 	"go.kenn.io/msgvault/internal/savedview"
@@ -90,6 +93,46 @@ func (f *savedViewServiceFixture) DeleteSavedView(context.Context, int64, int64)
 	return errors.ErrUnsupported
 }
 
+func TestSavedViewOutputSchemasPublishCanonicalStateAsSchemaObject(t *testing.T) {
+	assertions := assert.New(t)
+	const canonicalStateDescription = "Stored definition, including incompatible values; check incompatibility_reason before execution"
+	view := store.SavedView{
+		ID: 7, Name: "Invoices", CanonicalState: json.RawMessage(`{"query":"invoice"}`),
+		SchemaVersion: 1, Revision: 1,
+	}
+	opts := ServeOptions{
+		Engine:     &querytest.MockEngine{},
+		SavedViews: &savedViewServiceFixture{views: []store.SavedView{view}},
+	}
+	tools := toolsByName(t, rawListTools(t, opts, true))
+	cases := []struct {
+		name string
+		tool string
+		path []string
+	}{
+		{name: "create", tool: ToolCreateSavedView, path: []string{"properties", "canonical_state"}},
+		{name: "get", tool: ToolGetSavedView, path: []string{"properties", "canonical_state"}},
+		{name: "update", tool: ToolUpdateSavedView, path: []string{"properties", "canonical_state"}},
+		{name: "list", tool: ToolListSavedViews, path: []string{"properties", "saved_views", "items", "properties", "canonical_state"}},
+		{name: "run", tool: ToolRunSavedView, path: []string{"properties", "saved_view", "properties", "canonical_state"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			requirements := require.New(t)
+			value := tools[tc.tool]["outputSchema"]
+			for _, segment := range tc.path {
+				schema, ok := value.(map[string]any)
+				requirements.True(ok, "%s schema node: %#v", segment, value)
+				value, ok = schema[segment]
+				requirements.True(ok, "%s schema node in %#v", segment, schema)
+			}
+			schema, ok := value.(map[string]any)
+			requirements.True(ok, "canonical_state schema: %#v", value)
+			assertions.Equal(map[string]any{"description": canonicalStateDescription}, schema)
+		})
+	}
+}
+
 func TestSavedViewReadToolsUseTypedDefinitions(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -126,6 +169,33 @@ func TestSavedViewReadToolsUseTypedDefinitions(t *testing.T) {
 	assertions.Equal([]any{"domain"}, savedViewTestMap(t, definition["canonical_state"])["grouping"])
 }
 
+func TestSavedViewReadToolsReturnNonObjectCanonicalStateVerbatim(t *testing.T) {
+	legacyState := []any{"legacy", map[string]any{"query": "invoice"}}
+	reader := &savedViewServiceFixture{views: []store.SavedView{{
+		ID: 17, Name: "Legacy", CanonicalState: json.RawMessage(`["legacy",{"query":"invoice"}]`),
+		SchemaVersion: 0, Revision: 1,
+	}}}
+	opts := ServeOptions{Engine: &querytest.MockEngine{}, SavedViews: reader}
+
+	for _, tool := range []string{ToolGetSavedView, ToolListSavedViews} {
+		t.Run(tool, func(t *testing.T) {
+			arguments := map[string]any{}
+			if tool == ToolGetSavedView {
+				arguments["id"] = 17
+			}
+			result := rawCallTool(t, opts, tool, arguments)
+			require.NotEqual(t, true, result["isError"], "result: %#v", result)
+			definition := savedViewTestMap(t, result["structuredContent"])
+			if tool == ToolListSavedViews {
+				views := savedViewTestSlice(t, definition["saved_views"])
+				require.Len(t, views, 1)
+				definition = savedViewTestMap(t, views[0])
+			}
+			assert.Equal(t, legacyState, definition["canonical_state"])
+		})
+	}
+}
+
 func TestRunSavedViewReturnsTypedExplorePage(t *testing.T) {
 	assertions := assert.New(t)
 	view := store.SavedView{
@@ -136,7 +206,7 @@ func TestRunSavedViewReturnsTypedExplorePage(t *testing.T) {
 	reader := &savedViewServiceFixture{page: &savedview.RunPage{
 		View: view, ResultKind: savedview.ResultEntries,
 		Rows:       []query.EntryRow{{Key: "message:42", Kind: query.EntryEmail, Title: "Project update"}},
-		TotalCount: &total, Returned: 1, HasMore: true, NextCursor: "next-page",
+		TotalCount: &total, NextCursor: "next-page",
 		CacheRevision: "cache-7",
 	}}
 	opts := ServeOptions{Engine: &querytest.MockEngine{}, SavedViews: reader}
@@ -171,6 +241,123 @@ func TestSavedViewReadToolsReturnCleanErrors(t *testing.T) {
 	failed := rawCallTool(t, invalid, ToolRunSavedView, map[string]any{"id": 7})
 	assertions.Equal(true, failed["isError"])
 	assertions.Contains(savedViewToolErrorText(t, failed), "invalid_saved_view")
+}
+
+func TestSavedViewWriteToolsRejectInvalidInputBeforeCallingTheService(t *testing.T) {
+	assertions := assert.New(t)
+	service := &savedViewServiceFixture{}
+	opts := ServeOptions{Engine: &querytest.MockEngine{}, SavedViews: service}
+
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+		want string
+	}{
+		{
+			name: "transient workspace state", tool: ToolCreateSavedView,
+			args: map[string]any{"name": "Invalid", "schema_version": 1, "canonical_state": map[string]any{"selection": []any{1}}},
+			want: "selection",
+		},
+		{
+			// An explicit null is not an absent field: the store rejects it,
+			// and the input schema rejects it before the handler runs.
+			name: "explicit null", tool: ToolCreateSavedView,
+			args: map[string]any{"name": "Null filters", "schema_version": 1, "canonical_state": map[string]any{"filters": nil}},
+			want: `"null"`,
+		},
+		{
+			name: "missing name", tool: ToolCreateSavedView,
+			args: map[string]any{"schema_version": 1, "canonical_state": map[string]any{}},
+			want: `"name"`,
+		},
+		{
+			name: "empty patch", tool: ToolUpdateSavedView,
+			args: map[string]any{"id": 7, "revision": 1},
+			want: "at least one mutable",
+		},
+		{
+			name: "non-object canonical state", tool: ToolUpdateSavedView,
+			args: map[string]any{"id": 7, "revision": 1, "canonical_state": "table"},
+			want: "object",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := rawCallTool(t, opts, tc.tool, tc.args)
+			assertions.Equal(true, result["isError"], "result: %#v", result)
+			assertions.Contains(savedViewToolErrorText(t, result), tc.want)
+		})
+	}
+}
+
+func TestRunSavedViewMapsDaemonRunFailuresToActionableToolErrors(t *testing.T) {
+	cases := []struct {
+		code string
+		want string
+	}{
+		{code: "archive_revision_changed", want: "run the Saved View again without a cursor"},
+		{code: "search_revision_changed", want: "run the Saved View again without a cursor"},
+		{code: "analytical_cache_unavailable", want: "retry after it finishes preparing"},
+		{code: "invalid_cursor", want: "Saved View execution failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.code, func(t *testing.T) {
+			assertions := assert.New(t)
+			opts := ServeOptions{Engine: &querytest.MockEngine{}, SavedViews: &savedViewServiceFixture{
+				err: codedPeopleError{code: tc.code},
+			}}
+			result := rawCallTool(t, opts, ToolRunSavedView, map[string]any{"id": 7})
+			assertions.Equal(true, result["isError"], "result: %#v", result)
+			text := savedViewToolErrorText(t, result)
+			assertions.Contains(text, tc.code+": ")
+			assertions.Contains(text, tc.want)
+		})
+	}
+}
+
+func TestSavedViewReadToolsPreserveDaemonMetadata(t *testing.T) {
+	requirements := require.New(t)
+	definition := json.RawMessage(`{
+        "id":7,"name":"Future view","schema_version":2,"revision":1,
+        "canonical_state":{"query":{"text":"invoice"},"inspector_pinned":false},
+        "incompatibility_reason":"unsupported schema version 2",
+        "created_at":"2026-08-18T08:00:00Z","updated_at":"2026-08-18T09:00:00Z"
+    }`)
+	daemon := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/saved-views" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"saved_views": []json.RawMessage{definition}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(definition)
+	}))
+	t.Cleanup(daemon.Close)
+	client, err := daemonclient.New(daemonclient.Config{URL: daemon.URL, AllowInsecure: true, HTTPClient: daemon.Client(), Context: t.Context()})
+	requirements.NoError(err)
+	opts := ServeOptions{Engine: &querytest.MockEngine{}, SavedViews: client}
+	for _, tool := range []string{ToolListSavedViews, ToolGetSavedView} {
+		t.Run(tool, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			args := map[string]any{}
+			if tool == ToolGetSavedView {
+				args["id"] = 7
+			}
+			result := rawCallTool(t, opts, tool, args)
+			requirements.NotEqual(true, result["isError"], "%#v", result)
+			definition := savedViewTestMap(t, result["structuredContent"])
+			if tool == ToolListSavedViews {
+				views := savedViewTestSlice(t, definition["saved_views"])
+				requirements.Len(views, 1)
+				definition = savedViewTestMap(t, views[0])
+			}
+			assertions.Equal("unsupported schema version 2", definition["incompatibility_reason"])
+			state := savedViewTestMap(t, definition["canonical_state"])
+			assertions.Equal(false, state["inspector_pinned"])
+			assertions.Equal(map[string]any{"text": "invoice"}, state["query"])
+		})
+	}
 }
 
 type savedViewStoreService struct {
@@ -241,8 +428,7 @@ func (s *savedViewStoreService) RunSavedView(
 	}
 	return &savedview.RunPage{
 		View: *view, ResultKind: savedview.ResultEntries,
-		Rows:     []query.EntryRow{{Key: "message:1", Kind: query.EntryEmail, Title: state.Query}},
-		Returned: 1,
+		Rows: []query.EntryRow{{Key: "message:1", Kind: query.EntryEmail, Title: state.Query}},
 	}, nil
 }
 

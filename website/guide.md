@@ -1,7 +1,12 @@
-# The archive lifecycle
+# How msgvault works
 
-One archive moves through nine stages. Your data stays local and complete at
-every stop.
+Sync or import your messages, link them to people, search your history, and
+back up your archive. What gets saved depends on source access and your media
+settings. Optional hosted processing sends selected data to the providers you
+configure.
+
+See the [0.21.0 changelog](/docs/changelog/#0210) for new features and upgrade
+steps.
 
 1. [Capture](#capture)
 2. [Preserve](#preserve)
@@ -15,84 +20,88 @@ every stop.
 
 ## Capture
 
-Live sources sync on a schedule — Gmail, IMAP, Slack, Teams, Discord, Beeper,
-Google Calendar, CardDAV, meeting notes. Dead exports import once — MBOX,
-Apple Mail, PST, WhatsApp, iMessage, Messenger, SMS backups. Interrupted syncs
-resume from checkpoints.
+Choose a connected source for recurring sync or import a local export.
+Supported sources include email, chat, calendars, meeting notes, and contacts.
+Each source guide explains setup, captured history, media limits, and how
+interrupted work resumes.
 
-[Importing local email](/docs/usage/importing/)
+[Choose a source](/docs/guides/sources/)
 
 ## Preserve
 
-Raw provider payloads are retained compressed beside the parsed record.
-Attachments are content-addressed by SHA-256, deduplicated, and sealed into
-immutable packs. Cross-account duplicates hide behind a reversible safety
-ladder — the surviving copy is always the complete one.
+Keep original message data alongside the records used for browsing. Downloaded
+attachments share storage when their contents match. They start as individual
+files and can be grouped into packs. Preview duplicate messages before hiding
+extra copies; hidden copies remain available to restore.
 
 [Data storage](/docs/architecture/storage/)
 
 ## Resolve
 
-Every source knows you and your contacts by different addresses and handles.
-Identity discovery classifies the evidence; observed people cluster from
-explicit archive links, never from matching display names. Nothing merges
-without proof.
+Connect the addresses and handles that belong to the same person. msgvault
+groups identities using explicit links in the archive; matching display names
+alone do not merge people. Review suggested identity matches before accepting
+them.
 
 [People, profiles, and identities](/docs/usage/people/)
 
 ## Curate
 
-Promote the people who matter into durable profiles with stable IDs and vCard
-UIDs. Attach typed attributes, organizations, employment history, and
-relationships over a fact ledger with evidence and reversible merges. Watch
-each relationship's activity calendar and temperature across every channel.
+Save a profile to keep contact details, notes, employment, and relationships
+together. Inspect the evidence behind profile facts and correct them when
+needed. Activity calendars show when you were in contact; profile history
+records supported merges and reversals.
 
 [Curating people](/docs/usage/people/)
 
 ## Understand
 
-Opt in to semantic search by pointing msgvault at an embedding server you
-choose — local ones included. The embedded Docbank document engine extracts
-and indexes attachment text and images behind explicit, fail-closed consent.
-Every intelligence lane is disposable and rebuildable; the record is not.
+Enable search by meaning with a local or hosted embedding service. Separately
+configure document and image processing, and approve uploads before sending
+attachment content to a provider. You can rebuild search indexes from the
+archive; stored evidence and saved profiles remain part of the record.
 
 [Vector search](/docs/usage/vector-search/)
 
 ## Search
 
-Full-text search with Gmail-style operators answers instantly and offline.
-Semantic and hybrid modes fuse BM25 with vectors through reciprocal rank
-fusion, with explainable ranking and honest coverage states; msgvault never quietly
-substitutes one mode for another.
+Find messages offline with keywords and filters such as sender, subject, and
+date. Semantic search finds related meanings using your configured service.
+Hybrid search combines both. Coverage and ranking details show which content
+the selected mode can find.
 
 [Searching](/docs/usage/searching/)
 
 ## Analyze
 
-A DuckDB-over-Parquet analytics cache answers aggregate questions across
-hundreds of thousands of messages in milliseconds: senders, domains, labels,
-time. Drill down from a decade to a single message in the TUI or the browser.
+See which people, domains, labels, and periods account for your messages and
+storage. Drill down from a group to individual messages in the terminal or
+browser. SQLite archives use a separate analytics cache so these summaries do
+not scan message bodies.
 
 [Analytics and stats](/docs/usage/analytics/)
 
 ## Act
 
-Staging and execution never share a surface. Any interface can stage a
-deletion manifest for review; only the CLI executes it, behind an explicit
-environment gate, defaulting to recoverable trash. The local archive is never
-modified, and deleted mail remains searchable.
+Select messages and create a deletion manifest: a saved list you can review
+before removing mail from a provider. A separate CLI command requires your
+consent to execute it. Gmail and IMAP move messages to Trash by default;
+Microsoft Graph mail uses Deleted Items. Permanent deletion needs an explicit
+option. Archived content remains available unless you separately purge it locally.
 
 [Deleting email](/docs/usage/deletion/)
 
 ## Own
 
-Run it on a laptop or serve it from your own NAS: the daemon carries the Web
-UI, HTTP API, scheduler, and MCP server in one binary. Verifiable backup
-snapshots restore the archive with no provider in the loop.
+Run msgvault on your laptop or your own server. One binary provides the browser
+interface, API, scheduled work, and tools for assistants. For SQLite archives,
+backup snapshots include the database and attachments and restore without
+contacting the original providers. PostgreSQL archives require separate
+database backups.
 
 [Backup and restore](/docs/usage/backup/)
 
 ## Next
 
-Move from the lifecycle model to [installation and setup](/docs/setup/) or
-[all documentation](/docs/).
+[Install msgvault and connect your first account](/docs/setup/). The
+[docs](/docs/) cover commands, configuration, and how msgvault stores your data.

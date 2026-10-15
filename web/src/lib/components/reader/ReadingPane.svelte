@@ -1,4 +1,5 @@
 <script module lang="ts">
+  import type { MeetingExploreScope, MessageDetail } from "../../api/generated/models";
   import type {
     EntryRow,
     ExploreGroupDimension,
@@ -7,6 +8,7 @@
 
   export type ReadingPaneSelection =
     | { kind: 'entry'; row: EntryRow }
+    | { kind: 'archive'; message: MessageDetail }
     | {
         kind: 'group';
         dimension: ExploreGroupDimension;
@@ -15,6 +17,8 @@
         count?: number;
         estimatedBytes?: number;
         latestAt?: string;
+        /** Authority from this group detail result, never the outer list. */
+        meetingScope?: MeetingExploreScope;
       };
 
   export type ReadingPaneStatus = 'ready' | 'loading' | 'missing' | 'error' | 'unavailable';
@@ -24,16 +28,24 @@
 <script lang="ts">
   import type { EmailWorkMemberFact } from '../../api/generated/models';
   import type { PrincipalInfo } from '../../api/generated/models';
-  import { Button, EmptyState } from '@kenn-io/kit-ui';
+    import { messageTitle } from '../../archive/message-title';
+  import { Button, EmptyState, IconButton } from '@kenn-io/kit-ui';
+  import X from '@lucide/svelte/icons/x';
   import { onDestroy, untrack } from 'svelte';
 
   import type { APIClient } from '../../api/client';
+  import type { MeetingActionsRequest, MeetingContextRequest, MeetingRef } from '../../api/generated/models';
   import { createExploreAPI } from '../../explore/api';
+  import { entryKindPresentation } from '../../explore/labels';
   import { filtersForGroup } from '../../explore/group-context';
   import type { ExploreCacheUnavailable, ExploreFileFact, ExploreFilter } from '../../explore/models';
   import { isEmailMessageType } from '../../explore/models';
+  import { formatBytes } from '../../util/format';
   import IdentityBadge from '../explore/IdentityBadge.svelte';
   import TaskLinks from '../tasks/TaskLinks.svelte';
+  import MeetingPanel from '../meetings/MeetingPanel.svelte';
+  import MeetingActions from '../meetings/MeetingActions.svelte';
+  import MeetingContextExport from '../meetings/MeetingContextExport.svelte';
   import AttachmentRail from './AttachmentRail.svelte';
   import EmailWorkView from './EmailWorkView.svelte';
   import ConversationView from './ConversationView.svelte';
@@ -52,12 +64,15 @@
     onRefresh = undefined,
     onOpenIndividual = undefined,
     onClose = undefined,
+    onRetry = undefined,
     conversationAnchorId = undefined,
     conversationStart = undefined,
     conversationEnd = undefined,
     onConversationAnchorChange = undefined,
     onOpenSettings = undefined,
-    onOpenRelationship = undefined
+    onOpenRelationship = undefined,
+    onOpenMeeting = undefined,
+    onReloadMeetings = undefined
   }: {
     client: APIClient;
     principal?: PrincipalInfo;
@@ -72,6 +87,7 @@
     onRefresh?: () => void;
     onOpenIndividual?: (member: EmailWorkMemberFact) => void;
     onClose?: () => void;
+    onRetry?: () => void;
     /** Overrides the entry's own anchor when the reader navigated within the
      * thread (URL-carried, so Back/Forward restore the same message). */
     conversationAnchorId?: number;
@@ -88,6 +104,9 @@
      * Relationships hub's own reading pane, whose timeline rows don't carry
      * participant IDs. */
     onOpenRelationship?: (participantID: number) => void;
+    /** Opens the exact generated archive reference carried by meeting action evidence. */
+    onOpenMeeting?: (meeting: MeetingRef) => void;
+    onReloadMeetings?: () => void;
   } = $props();
 
   const api = createExploreAPI(untrack(() => client));
@@ -99,15 +118,17 @@
   let requestGeneration = 0;
   let requestController: AbortController | undefined;
   const title = $derived(selection
-    ? selection.kind === 'entry' ? selection.row.title || '(untitled)' : selection.label
+    ? selection.kind === 'entry' ? selection.row.title || '(untitled)' : selection.kind === 'archive' ? messageTitle(selection.message.subject, selection.message.conversation_title) || '(untitled)' : selection.label
     : targetKey || 'Selected result');
   const showFiles = $derived(selection?.kind === 'group' &&
     (selection.dimension === 'participant' || selection.dimension === 'domain'));
   const conversationRow = $derived(selection?.kind === 'entry' && selection.row.conversation_id &&
     selection.row.anchor_message_id ? selection.row : undefined);
+  const archiveMessage = $derived(selection?.kind === 'archive' ? selection.message : undefined);
+  const conversationID = $derived(archiveMessage?.conversation_id ?? conversationRow?.conversation_id);
   // The thread opens immediately at the entry's own anchor; an explicit
   // anchor (in-thread navigation restored from the URL) overrides it.
-  const threadAnchorId = $derived(conversationAnchorId ?? conversationRow?.anchor_message_id);
+  const threadAnchorId = $derived(conversationAnchorId ?? archiveMessage?.id ?? conversationRow?.anchor_message_id);
   // counterpart_participant_id is server-computed (see EntryRow): the
   // smallest non-owner participant on the entry, or absent when the owner
   // set is unknown or every participant is the owner. Unlike
@@ -118,12 +139,26 @@
   const workUID = $derived(selection?.kind === 'entry' ? selection.row.email_work?.uid : targetKey.startsWith('email-work:') ? targetKey.slice(11) : undefined);
   const showTasks = $derived(!workUID && selection?.kind === 'entry' &&
     isEmailMessageType(selection.row.message_type) && selection.row.anchor_message_id !== undefined);
+  const meetingAnchorId = $derived(
+    archiveMessage?.message_type === 'meeting_transcript' ? archiveMessage.id : selection?.kind === 'entry' &&
+      selection.row.message_type === 'meeting_transcript' &&
+      selection.row.anchor_message_id !== undefined
+      ? selection.row.anchor_message_id
+      : undefined,
+  );
+  const meetingContextRequest = $derived<MeetingContextRequest | undefined>(
+    meetingAnchorId === undefined ? undefined : { message_ids: [meetingAnchorId] },
+  );
+  const meetingActionsRequest = $derived<MeetingActionsRequest | undefined>(
+    meetingAnchorId === undefined ? undefined : { scope: { message_ids: [meetingAnchorId] }, limit: 200 },
+  );
 
   const metaStrip = $derived.by((): string => {
     if (!selection) return '';
+    if (selection.kind === 'archive') return `${entryKindPresentation('', selection.message.message_type).name} · ${formatDate(selection.message.sent_at)}`;
     if (selection.kind === 'entry') {
       const row = selection.row;
-      const parts = [row.message_type, row.source_identifier, formatDate(row.occurred_at)];
+      const parts = [entryKindPresentation(row.kind, row.message_type).name, row.source_identifier, formatDate(row.occurred_at)];
       if (row.message_count > 1) parts.push(`${row.message_count.toLocaleString()} items`);
       if (row.attachment_count > 0) {
         parts.push(`${row.attachment_count.toLocaleString()} ${row.attachment_count === 1 ? 'file' : 'files'}`);
@@ -214,11 +249,6 @@
       : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(parsed);
   }
 
-  function formatBytes(value: number): string {
-    if (value < 1024) return `${value} B`;
-    if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  }
 </script>
 
 <aside class="reading-pane" aria-label={`Reading pane: ${title}`}>
@@ -235,9 +265,14 @@
     </div>
     <div class="pane-actions">
       {#if showTasks}
-        <details class="tasks-disclosure" bind:open={tasksOpen}>
-          <summary aria-label="Tasks for this message">Tasks</summary>
-        </details>
+        <Button
+          size="sm"
+          surface="outline"
+          label="Tasks"
+          ariaLabel="Tasks for this message"
+          ariaExpanded={tasksOpen}
+          onclick={() => (tasksOpen = !tasksOpen)}
+        />
       {/if}
       {#if onOpenRelationship && counterpartParticipantId !== undefined}
         <Button
@@ -248,7 +283,9 @@
           onclick={handleOpenRelationship}
         />
       {/if}
-      <Button size="sm" surface="outline" label="Close" ariaLabel="Close reading pane" onclick={() => onClose?.()} />
+      <IconButton size="sm" ariaLabel="Close reading pane" onclick={() => onClose?.()}>
+        <X size={14} />
+      </IconButton>
     </div>
   </header>
 
@@ -265,13 +302,24 @@
     </div>
   {/if}
 
+  {#if meetingContextRequest && meetingActionsRequest}
+    <div class="meeting-context-sheet">
+      <MeetingContextExport {client} request={meetingContextRequest} />
+    </div>
+  {/if}
+
   <div class="pane-body">
-    {#if workUID}
+    {#if meetingActionsRequest && !workUID}
+      <div class="meeting-actions-sheet" data-scroll>
+        <MeetingActions {client} request={meetingActionsRequest} {onOpenMeeting} />
+      </div>
+    {/if}
+        {#if workUID}
       <EmailWorkView canCurate={principal?.role === 'member' || principal?.role === 'admin'} {client} uid={workUID} {predicate} {cacheRevision} {onRefresh} {savedViewID} {savedViewRevision} {onOpenIndividual} />
-    {:else if conversationRow && threadAnchorId !== undefined}
+    {:else if conversationID !== undefined && threadAnchorId !== undefined}
       <ConversationView
         {client}
-        conversationId={conversationRow.conversation_id!}
+        conversationId={conversationID}
         anchorId={threadAnchorId}
         start={conversationStart}
         end={conversationEnd}
@@ -291,16 +339,23 @@
               title="Nothing to read here"
               description={statusMessage || 'The selected result is no longer available in this context.'}
             />
+            {#if status === 'error' && onRetry}<Button label="Retry" size="sm" surface="soft" onclick={onRetry} />{/if}
           </div>
         {/if}
       </section>
-    {:else if selection.kind === 'entry'}
+    {:else if selection.kind === 'entry' || selection.kind === 'archive'}
       <section class="pane-status" aria-label="Entry details">
-        <p class="preview">{selection.row.preview || 'No preview is available.'}</p>
+        <p class="preview">{(selection.kind === 'entry' ? selection.row.preview : selection.message.snippet) || 'No preview is available.'}</p>
       </section>
     {:else}
       <div class="group-scroll" aria-label="Group details" data-scroll>
         {#if showFiles}
+          {#if selection.meetingScope}
+            <MeetingPanel {client} scope={{ kind: 'explore', explore: selection.meetingScope }}
+              onReloadScope={onReloadMeetings} {onOpenMeeting} />
+          {:else}
+            <p class="pane-status" role="status">Reload this group to load meeting activity with its current search scope.</p>
+          {/if}
           <AttachmentRail files={files} totalCount={totalFiles} loading={filesLoading} error={filesError} />
         {:else}
           <section class="pane-status">
@@ -343,21 +398,25 @@
     min-height: 40px;
     flex: none;
     align-items: center;
+    flex-wrap: wrap;
     justify-content: space-between;
-    gap: var(--space-4);
+    gap: var(--space-2) var(--space-4);
     padding: var(--space-2) var(--space-4);
     border-bottom: 1px solid var(--border-muted);
     box-shadow: 0 1px 0 var(--hairline-sheen);
   }
 
+  /* A narrow pane wraps the actions below the heading instead of squeezing the title away. */
   .pane-heading {
     display: flex;
     min-width: 0;
+    flex: 1 1 12rem;
     align-items: baseline;
     gap: var(--space-4);
   }
 
   .pane-title {
+    min-width: min(8rem, 100%);
     overflow: hidden;
     color: var(--text-primary);
     font-size: var(--font-size-sm);
@@ -366,7 +425,8 @@
   }
 
   .pane-meta {
-    flex: none;
+    min-width: 0;
+    flex: 0 1 auto;
     overflow: hidden;
     color: var(--text-muted);
     font-size: var(--font-size-2xs);
@@ -409,33 +469,27 @@
     }
   }
 
-  .tasks-disclosure summary {
-    display: inline-flex;
-    align-items: center;
-    padding: 3px 10px;
-    border: 1px solid var(--control-border);
-    border-radius: var(--radius-md);
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: var(--font-size-xs);
-    list-style: none;
-  }
 
-  .tasks-disclosure summary::-webkit-details-marker {
-    display: none;
-  }
 
-  .tasks-disclosure[open] summary,
-  .tasks-disclosure summary:hover {
-    background: var(--bg-surface-hover);
-    color: var(--text-primary);
-  }
 
   .tasks-sheet {
     flex: none;
     max-height: 40%;
     overflow: auto;
     padding: 0 var(--space-4);
+    border-bottom: 1px solid var(--border-muted);
+  }
+
+  .meeting-actions-sheet {
+    flex: none;
+    min-height: 0;
+    max-height: 50%;
+    overflow: auto;
+  }
+
+  .meeting-context-sheet {
+    flex: none;
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border-muted);
   }
 

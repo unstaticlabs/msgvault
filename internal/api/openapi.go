@@ -1,14 +1,15 @@
 package api
 
 import (
-	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/explorecatalog"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 // APISchemaVersion is the version stamped into the OpenAPI document
@@ -280,44 +281,97 @@ import (
 // status identifiers. It adds GET /api/v1/documents/status/current to resolve
 // status for the selected durable document profile. These Operations response
 // changes remain within the unreleased 2.x contract.
-// 2.21.0 adds the calling principal to the session bootstrap, the
-// login_methods list, GET /api/v1/me, and 403 forbidden for callers whose
-// role does not cover an operation. This shipped in this repository as 2.17.0
-// before the fork caught up with upstream, which had independently used that
-// number for source scoping; a daemon reporting 2.17.0 may therefore be either.
-// Clients that need to distinguish them should treat >= 2.21.0 as the reliable
-// signal for the principal fields.
-// 2.22.0 adds POST /api/v1/inbox-archive/authorize and
-// POST /api/v1/inbox-archive/execute, which remove messages from the inbox at
-// the mail provider. Both refuse unless the daemon opts in with
-// [inbox_archive] remote_enabled or MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED, so a
-// client that finds the routes present still cannot assume the capability is
-// available. A run that stopped part-way answers 200 with its counts and
-// partial_failure rather than an error, because the messages it archived stay
-// archived. The routes were briefly reserved at 2.20.0 while the fork was
-// catching up with upstream; they take a number above the auth work instead,
-// because 2.21.0 shipped without them and >= 2.20.0 would otherwise claim them
-// on a daemon that has none.
-// 2.23.0 makes source_message_ids optional on POST
-// /api/v1/inbox-archive/execute. The daemon records the exact set of messages
-// when it mints a confirmation token, so a caller holding the token no longer
-// has to keep the list or rebuild the query that produced it -- which removes
-// the class of failure where a plan could not be confirmed because its
-// selection could not be reproduced. Ids remain accepted and, when present,
-// must still match the token.
-// Includes calendar coverage and freshness from 2.24.0.
-// 2.25.0 adds provider-neutral inbox_state/read_state filters to Explore and
-// Saved Views, provider state in message/entry results, and source_id in CLI
-// message detail so remote MCP readers retain account provenance.
-// 2.26.0 adds opt-in related-email work rows, handling filters and scoped,
-// revision-pinned member provenance. Cached member body links can require their
-// opaque message identity so physical ID reuse cannot redirect an old link.
-const APISchemaVersion = "2.26.0"
+// 2.20.0 adds the "last time we talked" person brief: the current version, the
+// version history, owner rejection, manual generation, and the brief enrollment
+// opt-in at /api/v1/people/{id}/brief*. A brief version reports its
+// renderer_policy, and each sentence carries evidence_ordinals naming the
+// entries of that version's evidence list the sentence cites. Additive (minor
+// bump): every existing person route and response is unchanged.
+// 2.21.0 adds POST /api/v1/saved-views/{id}/run, which executes a Saved View
+// through the Explore surface its definition selects, and narrows the Saved
+// View schema enums to the executable version-1 vocabulary the store already
+// enforces. POST /api/v1/explore/files gains search_deletion_scope so file
+// pages declare a semantic narrowing the same way entry and group pages do.
+// Saved View responses include incompatibility_reason for invalid definitions.
+// Additive (minor bump): existing Saved View and Explore routes are unchanged.
+// 2.22.0 adds the optional rfc822_message_id to CLI message detail responses.
+// 2.23.0 adds `section` on settings in sectioned groups, `sections` on those
+// groups, and `validation.format` and `validation.off`. `minimum` and
+// `maximum` keep covering every accepted value, so clients that ignore `off`
+// still accept a stored off value. The daemon stops emitting the sync,
+// logging, activity, and backup groups but keeps them in the enum.
+// Additive (minor bump): existing settings routes are unchanged.
+// 2.24.0 adds Google Contacts authorization endpoints and optional provider
+// and oauth_app fields to CardDAV account setup. Password-based CardDAV
+// requests retain their existing meaning.
+// 2.25.0 adds the CardDAV publication review flow: GET
+// /api/v1/carddav/publications/{person_id}/preview returns the exact vCard a
+// publication would send plus an approval token, and POST
+// /api/v1/carddav/publications/{person_id}/approve approves that token. Conflict
+// previews require explicit keep_local resolution afterward; other previews
+// publish on approval. Oversized previews return 413.
+// Publication responses gain inference_review_required, and publishing a person
+// whose inferred facts changed since the last approval fails with 409
+// carddav_inference_review_required. Additive (minor bump): existing CardDAV
+// routes are unchanged.
+// 2.26.0 adds optional web_url metadata to message result schemas.
+// 2.27.0 adds deterministic meeting context, archived action-item listing,
+// and duration metrics with exact direct or Explore scope. Additive (minor
+// bump): meeting import and every existing route retain their behavior.
+// 2.28.0 adds optional text_enabled and visual_enabled facts to authenticated
+// vector health. Existing health and search routes keep their behavior.
+// 2.29.0 adds required took_ms and timings fields to vector and hybrid
+// /api/v1/search responses. timings reports query embedding, retrieval, and
+// hydration latency. Additive (minor bump): existing search fields are unchanged.
+// 2.30.0 adds Kata availability and person agenda reads, creation, linking,
+// list placement, and unlinking. Each task links to one person; reads expose
+// canonical person identity and whether the bounded open-task list is truncated.
+// 2.31.0 adds analytics query freshness, accepted cache-build jobs, and a
+// cache-build status endpoint, plus archive-only SQL for MCP. Existing query
+// requests remain valid.
+// 2.32.0 adds frozen sender keys to agent-token source views and optional
+// sender selections to owner token issuance.
+// 2.33.0 adds GET /api/v1/cli/message/original (a message's original MIME
+// and provenance) and GET /api/v1/cli/message/thread (a complete,
+// chronological conversation listing with original-MIME availability).
+// Additive (minor bump): existing routes are unchanged.
+// 2.34.0 adds optional display_name to person promotion requests and seeds
+// newly created profiles from observed participant cluster names by default.
+// Existing person edits, clears, and idempotent re-promotion are preserved.
+// 2.35.0 adds scope_escalation_source_type to staged-deletion plans so local
+// CLI clients can authorize Microsoft Graph mail before starting the worker.
+// 3.0.0 replaces unguarded identity decisions with review-token routes and adds consented identity scoring.
+// 3.1.0 adds opt-in calendar event control and availability queries.
+// 3.2.0 adds counts_pending to CLI account listing for callers that opt in by
+// header while the first count refresh runs.
+// 3.3.0 adds POST /api/v1/telemetry/events for web UI usage events. Additive (minor bump).
+// 3.4.0 adds Kata issues that quote exact message and file evidence, the
+// microsoft CardDAV provider, microsoft_authorization_required and
+// microsoft_contact_too_large.
+// 3.5.0 adds the account: and received: search operators.
+// 3.6.0 adds GET /api/v1/messages/{id}/recordings for live audio and transcript coverage.
+// 3.7.0 adds scoped lexical transcript search at GET /api/v1/media/search.
+// 3.8.0 adds reader credentials, HTTP 409 for ambiguous raw references, and HTTP 413 for remote read limits.
+// 3.9.0 adds source-scoped agent read permissions, optional expires_at, and GET /api/v1/agent-tokens/self.
+// 3.10.0 adds person UID lookup and exposes current vCard UIDs and CardDAV
+// bindings on person and directory responses.
+// 3.11.0 adds structured account scopes, the explore account filter, the virtual account catalog on /cli/accounts, GET /api/v1/media/search/status, participant_id to media search, source filename, title and date to media search results, and optional conversation_title to message detail.
+// 3.12.0 adds Kata source lookup and issue evidence context.
+// 3.13.0 adds Docbank transcript evidence.
+// 3.14.0 adds resumable paused source syncs to operation history.
+// 3.14.0 adds filename: filters, optional include_snippet/match_snippet context,
+// attachment names/counts, and hybrid_available on CLI search responses.
+// 3.15.0 adds native Gmail label, IMAP keyword, and Microsoft Graph category
+// reads and delta updates.
+// 3.16.0 adds authenticated implementation-only MCP capability discovery.
+// 3.17.0 adds bounded opt-in filename suggestions, including person scope.
+// 3.18.0 combines upstream operations with scoped mailbox and email-work contracts.
+const APISchemaVersion = "3.18.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
 func OpenAPIDocument() *huma.OpenAPI {
-	doc := baseOpenAPIDocument()
+	doc := baseOpenAPIDocument(false)
 	hardenSourceStatusPublicSchemas(doc)
 	relaxResponseAdditionalProperties(doc)
 	hardenOperationSchemas(doc)
@@ -325,7 +379,7 @@ func OpenAPIDocument() *huma.OpenAPI {
 }
 
 func openAPIClientDocument() *huma.OpenAPI {
-	doc := baseOpenAPIDocument()
+	doc := baseOpenAPIDocument(true)
 	hardenSourceStatusClientSchemas(doc)
 	clearResponseAdditionalProperties(doc)
 	hardenOperationSchemas(doc)
@@ -354,10 +408,17 @@ func hardenOperationSchemas(doc *huma.OpenAPI) {
 	}
 }
 
-func baseOpenAPIDocument() *huma.OpenAPI {
+func baseOpenAPIDocument(includeHidden bool) *huma.OpenAPI {
 	mux := http.NewServeMux()
 	s := &Server{cfg: config.NewDefaultConfig()}
 	api := s.setupHumaAPI(mux)
+	if includeHidden {
+		group := huma.NewGroup(api)
+		group.UseSimpleModifier(func(operation *huma.Operation) {
+			operation.Hidden = false
+		})
+		api = group
+	}
 	apiV1 := s.setupAPIV1Group(api)
 	s.registerHumaRoutes(api, apiV1)
 	doc := api.OpenAPI()
@@ -369,7 +430,154 @@ func baseOpenAPIDocument() *huma.OpenAPI {
 	hardenPersonRelationshipSchemas(doc)
 	hardenPersonSearchSchemas(doc)
 	hardenActivitySchemas(doc)
+	hardenMeetingSchemas(doc)
+	hardenCalendarControlSchemas(doc)
 	return doc
+}
+
+func hardenCalendarControlSchemas(doc *huma.OpenAPI) {
+	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
+		return
+	}
+	schemas := doc.Components.Schemas.Map()
+	request := schemas["CalendarRequest"]
+	if request != nil {
+		// Availability can use calendar_ids without a positional calendar_id.
+		// The daemon validator still enforces the action-specific target rules.
+		required := make([]string, 0, len(request.Required))
+		for _, name := range request.Required {
+			if name != "calendar_id" {
+				required = append(required, name)
+			}
+		}
+		request.Required = required
+		if field := request.Properties["calendar_id"]; field != nil {
+			field.Description = "Required for event mutations. For freebusy or conflicts, use this as the target or omit it and provide calendar_ids."
+		}
+		if field := request.Properties["calendar_ids"]; field != nil {
+			field.Description = "Availability target IDs. When nonempty, only these calendars are checked; calendar_id may be omitted."
+		}
+		if field := request.Properties["expected_plan_fingerprint"]; field != nil {
+			field.Description = "Optional precondition from a prior dry run; rejects the mutation if the OAuth account, planned writes, or normalized notification mode differs."
+		}
+		request.Not = &huma.Schema{
+			Type: "object",
+			Properties: map[string]*huma.Schema{
+				"action": {Type: "string", Enum: []any{"move", "respond"}},
+				"scope":  {Type: "string", Enum: []any{"future"}},
+			},
+			Required: []string{"action", "scope"},
+		}
+	}
+	if attendee := schemas["GCalAttendee"]; attendee != nil {
+		for name, description := range map[string]string{
+			"organizer":      "Provider-controlled attendee role; do not send in event input.",
+			"responseStatus": "Provider-controlled RSVP state; use the self RSVP operation to change your response.",
+			"self":           "Provider-controlled marker for the authenticated attendee; do not send in event input.",
+		} {
+			if field := attendee.Properties[name]; field != nil {
+				field.ReadOnly = true
+				field.Description = description
+			}
+		}
+	}
+	input := schemas["GCalEventInput"]
+	if input == nil {
+		return
+	}
+	// The strict control decoder rejects nulls. Omission preserves a field;
+	// explicit empty strings and slices clear values without a null sentinel.
+	for _, field := range input.Properties {
+		field.Nullable = false
+	}
+	for _, name := range []string{"summary", "description", "location"} {
+		if field := input.Properties[name]; field != nil {
+			field.Description = "Omit to preserve the existing value; use an empty string to clear it on update. JSON null is not accepted."
+		}
+	}
+	// Plans share this event shape, but the daemon supplies these two fields.
+	for name, description := range map[string]string{
+		"id":               "Server-assigned event ID returned in plans. Do not send this field in a control request.",
+		"attendeesOmitted": "Internal self-RSVP marker returned in plans. Do not send this field in a control request.",
+	} {
+		if field := input.Properties[name]; field != nil {
+			field.ReadOnly = true
+			field.Description = description
+		}
+	}
+}
+
+func hardenMeetingSchemas(doc *huma.OpenAPI) {
+	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
+		return
+	}
+	schemas := doc.Components.Schemas.Map()
+	contextRequest := schemas["MeetingContextRequest"]
+	if contextRequest != nil {
+		if messageIDs := contextRequest.Properties["message_ids"]; messageIDs != nil {
+			messageIDs.Nullable = false
+			one := 1
+			messageIDs.MinItems = &one
+			hardenMeetingIDItems(messageIDs)
+		}
+		if selection := contextRequest.Properties["selection"]; selection != nil {
+			selection.Nullable = false
+		}
+		contextRequest.OneOf = []*huma.Schema{
+			{
+				Type: huma.TypeObject, Required: []string{"message_ids"},
+				Properties: map[string]*huma.Schema{"message_ids": contextRequest.Properties["message_ids"]},
+			},
+			{
+				Type: huma.TypeObject, Required: []string{"selection"},
+				Properties: map[string]*huma.Schema{"selection": contextRequest.Properties["selection"]},
+			},
+		}
+	}
+	for _, name := range []string{"MeetingActionsRequest", "MeetingMetricsRequest"} {
+		request := schemas[name]
+		if request == nil {
+			continue
+		}
+		for _, field := range []string{"scope", "explore"} {
+			if property := request.Properties[field]; property != nil {
+				property.Nullable = false
+			}
+		}
+		request.Not = &huma.Schema{Type: huma.TypeObject, Required: []string{"scope", "explore"}}
+	}
+	scope := schemas["MeetingScopeRequest"]
+	if scope != nil {
+		if messageIDs := scope.Properties["message_ids"]; messageIDs != nil {
+			messageIDs.Nullable = false
+			hardenMeetingIDItems(messageIDs)
+		}
+		for _, field := range []string{"source_ids", "participant_ids"} {
+			if property := scope.Properties[field]; property != nil {
+				one := 1
+				property.MinItems = &one
+				hardenMeetingIDItems(property)
+			}
+		}
+		if domains := scope.Properties["domains"]; domains != nil {
+			one := 1
+			domains.MinItems = &one
+		}
+		scope.AllOf = []*huma.Schema{
+			{Not: &huma.Schema{Type: huma.TypeObject, Required: []string{"person_id", "participant_id"}}},
+			{Not: &huma.Schema{Type: huma.TypeObject, Required: []string{"person_id", "participant_ids"}}},
+			{Not: &huma.Schema{Type: huma.TypeObject, Required: []string{"participant_id", "participant_ids"}}},
+		}
+	}
+}
+
+func hardenMeetingIDItems(array *huma.Schema) {
+	if array == nil || array.Items == nil {
+		return
+	}
+	minimum, maximum := float64(1), float64(maxPublicMeetingID)
+	array.Items.Minimum = &minimum
+	array.Items.Maximum = &maximum
 }
 
 func hardenPersonSearchSchemas(doc *huma.OpenAPI) {
@@ -557,13 +765,49 @@ func hardenSavedViewSchemas(doc *huma.OpenAPI) {
 	schemas := doc.Components.Schemas.Map()
 	if filter := schemas["SavedViewFilter"]; filter != nil {
 		filter.Properties["values"].Nullable = false
+		filter.Properties["field"].Enum = enumValues(store.SavedViewFilterFields())
+		filter.Properties["operator"].Enum = enumValues(store.SavedViewFilterOperators)
+	}
+	if sort := schemas["SavedViewSort"]; sort != nil {
+		sort.Properties["field"].Enum = enumValues([]string{explorecatalog.EntrySortField})
+		sort.Properties["direction"].Enum = enumValues([]string{explorecatalog.EntrySortDirection})
 	}
 	if state := schemas["SavedViewStateEnvelope"]; state != nil {
 		for _, name := range []string{"filters", "grouping", "sort", "columns"} {
 			state.Properties[name].Nullable = false
 		}
-		state.Properties["presentation"].Enum = []any{"table", "timeline", "files"}
+		state.Properties["search_mode"].Enum = enumValues(explorecatalog.SearchModes())
+		state.Properties["presentation"].Enum = enumValues(explorecatalog.Presentations())
+		state.Properties["grouping"].Items.Enum = enumValues(explorecatalog.GroupingDimensions())
+		state.Properties["columns"].Items.Enum = enumValues(store.SavedViewColumns)
 	}
+}
+
+// qualifiedEnumNames derives Go constant names for enum values so a new enum
+// never claims a bare name (Files, Desc) that generated clients already use.
+func qualifiedEnumNames(prefix string, values []string) []any {
+	names := make([]any, len(values))
+	for i, value := range values {
+		var name strings.Builder
+		name.WriteString(prefix)
+		for part := range strings.SplitSeq(value, "_") {
+			if part == "id" {
+				name.WriteString("ID")
+				continue
+			}
+			name.WriteString(strings.ToUpper(part[:1]) + part[1:])
+		}
+		names[i] = name.String()
+	}
+	return names
+}
+
+func enumValues(values []string) []any {
+	enum := make([]any, len(values))
+	for i, value := range values {
+		enum[i] = value
+	}
+	return enum
 }
 
 func hardenSettingsSchemas(doc *huma.OpenAPI) {
@@ -589,10 +833,17 @@ func hardenSettingsSchemas(doc *huma.OpenAPI) {
 		}
 	}
 	if setting := schemas["Setting"]; setting != nil {
-		setting.Properties["group"].Enum = []any{
-			"browser", "server", "archive", "sync", "logging", "search", "sources", "attachments",
-			"activity", "backup", "enrichment", "integrations",
+		// The enum keeps group IDs that older daemons in the compatibility
+		// range still emit, so a newer generated client can validate their
+		// responses. The daemon itself emits only settingsGroups.
+		groupIDs := make([]any, 0, len(settingsGroups)+len(legacySettingsGroupIDs))
+		for _, group := range settingsGroups {
+			groupIDs = append(groupIDs, group.ID)
 		}
+		for _, id := range legacySettingsGroupIDs {
+			groupIDs = append(groupIDs, id)
+		}
+		setting.Properties["group"].Enum = groupIDs
 		setting.Properties["kind"].Enum = []any{"string", "integer", "number", "boolean", "string_array", "secret"}
 	}
 	if request := schemas["SettingsPatchRequest"]; request != nil {
@@ -657,12 +908,11 @@ func OpenAPIJSONVersion(version string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("render OpenAPI %s JSON: %w", version, err)
 	}
-	var pretty bytes.Buffer
-	if err := json.Indent(&pretty, raw, "", "  "); err != nil {
+	pretty := jsontext.Value(raw)
+	if err := pretty.Indent(jsontext.WithIndent("  ")); err != nil {
 		return nil, err
 	}
-	pretty.WriteByte('\n')
-	return pretty.Bytes(), nil
+	return append(pretty, '\n'), nil
 }
 
 func relaxResponseAdditionalProperties(doc *huma.OpenAPI) {
@@ -679,6 +929,35 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 	}
 	schemas := doc.Components.Schemas.Map()
 	const emailProperty = "email"
+	if input := schemas["GCalEventInput"]; input != nil {
+		for name, goType := range map[string]string{"attendees": "*[]GCalAttendee", "recurrence": "*[]string"} {
+			if field := input.Properties[name]; field != nil {
+				setCodegenGoType(field, goType)
+			}
+		}
+	}
+
+	if contextRequest := schemas["MeetingContextRequest"]; contextRequest != nil {
+		// Keep the public one-of validation, but avoid an unusable generated
+		// union overlay. The concrete fields already describe both request forms.
+		contextRequest.OneOf = nil
+	}
+	for _, schemaName := range []string{"MeetingContextRequest", "MeetingScopeRequest"} {
+		if schema := schemas[schemaName]; schema != nil {
+			if messageIDs := schema.Properties["message_ids"]; messageIDs != nil {
+				// Optional slices otherwise collapse omission and an explicit empty
+				// slice, even though the server assigns those different meanings.
+				setCodegenGoType(messageIDs, "*[]int64")
+				validation := "omitempty,max=100,dive,gte=1,lte=9007199254740991"
+				if schemaName == "MeetingContextRequest" {
+					validation = "omitempty,min=1,max=100,dive,gte=1,lte=9007199254740991"
+				}
+				messageIDs.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
+					"validate": validation,
+				}
+			}
+		}
+	}
 	if meeting := schemas["Meeting"]; meeting != nil {
 		// The Go client generator treats composed object schemas as union
 		// wrappers. Runtime validation and the public schema retain these
@@ -689,7 +968,39 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 				setCodegenGoType(timestamp, "string")
 			}
 		}
+		if actions := meeting.Properties["action_items"]; actions != nil {
+			setCodegenGoType(actions, "*[]MeetingActionItem")
+			actions.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
+				"validate": "omitempty,max=1000,dive",
+			}
+		}
 	}
+	if person := schemas["MeetingPerson"]; person != nil {
+		// As with Meeting, keep the email-or-phone rule in the public schema but
+		// give the Go client a plain struct instead of a union wrapper.
+		person.AnyOf = nil
+		if email := person.Properties[emailProperty]; email != nil {
+			// Email used to be required. Keep the Go client field a plain string
+			// so existing callers still compile, and omit it when empty so a
+			// phone-only attendee never sends "" against format: email.
+			if email.Extensions == nil {
+				email.Extensions = map[string]any{}
+			}
+			email.Extensions["x-go-type-skip-optional-pointer"] = true
+			email.Extensions["x-omitempty"] = true
+			email.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
+				"validate": "required_without=Phone",
+			}
+		}
+	}
+	if totals := schemas["DurationTotals"]; totals != nil {
+		if average := totals.Properties["average_known_seconds"]; average != nil {
+			setCodegenGoType(average, "*float64")
+		}
+		nullableSchemaProperty(totals, "average_known_seconds")
+	}
+	nullableSchemaProperty(schemas["Metrics"], "first_meeting_at")
+	nullableSchemaProperty(schemas["Metrics"], "last_meeting_at")
 	for schemaName, property := range map[string]string{
 		"MeetingPerson": emailProperty,
 		"Source":        "account_email",
@@ -708,7 +1019,7 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		}
 	}
 
-	for _, schemaName := range []string{"FileSearchRow", "FileMetadataResponse", "PersonFileSearchRow"} {
+	for _, schemaName := range []string{"FileSearchRow", "FileMetadataResponse", "PersonFileSearchRow", "MessageRecording"} {
 		if schema := schemas[schemaName]; schema != nil {
 			for _, property := range []string{"filename", "mime_type"} {
 				if schema.Properties[property] != nil {
@@ -728,15 +1039,43 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 			}
 		}
 	}
-	if tracking := schemas["PersonTracking"]; tracking != nil {
-		if trackedAt := tracking.Properties["tracked_at"]; trackedAt != nil {
-			if trackedAt.Extensions == nil {
-				trackedAt.Extensions = map[string]any{}
+	// A changed or unavailable passage carries an empty excerpt.
+	if evidence := schemas["Evidence"]; evidence != nil {
+		if excerpt := evidence.Properties["excerpt"]; excerpt != nil {
+			if excerpt.Extensions == nil {
+				excerpt.Extensions = map[string]any{}
 			}
-			trackedAt.Extensions["x-omitempty"] = false
-			trackedAt.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
+			excerpt.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
 				"validate": "omitempty",
 			}
+		}
+	}
+	nullableSchemaProperty(schemas["PersonTracking"], "tracked_at")
+	// The brief's structure and input boundary are raw JSON documents the
+	// client hands back untouched; without this the generator emits struct{}.
+	if brief := schemas["PersonBrief"]; brief != nil {
+		for _, propertyName := range []string{"structured", "boundary"} {
+			property := brief.Properties[propertyName]
+			if property == nil {
+				continue
+			}
+			if property.Extensions == nil {
+				property.Extensions = map[string]any{}
+			}
+			property.Extensions["x-go-type"] = "jsontext.Value"
+			property.Extensions["x-go-type-import"] = map[string]any{pathKey: "encoding/json/jsontext"}
+		}
+		for _, propertyName := range []string{"rejected_at", "superseded_at"} {
+			nullableSchemaProperty(brief, propertyName)
+		}
+	}
+	nullableSchemaProperty(schemas["PersonBriefEnrollment"], "enabled_at")
+	// Read responses preserve definitions from any stored schema version.
+	if view := schemas["SavedView"]; view != nil {
+		state := view.Properties["canonical_state"]
+		state.Extensions = map[string]any{
+			"x-go-type":        "jsontext.Value",
+			"x-go-type-import": map[string]any{pathKey: "encoding/json/jsontext"},
 		}
 	}
 	if response := schemas["PersonMergeSnapshotResponse"]; response != nil {
@@ -744,8 +1083,8 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 			if snapshot.Extensions == nil {
 				snapshot.Extensions = map[string]any{}
 			}
-			snapshot.Extensions["x-go-type"] = "json.RawMessage"
-			snapshot.Extensions["x-go-type-import"] = map[string]any{pathKey: "encoding/json"}
+			snapshot.Extensions["x-go-type"] = "jsontext.Value"
+			snapshot.Extensions["x-go-type-import"] = map[string]any{pathKey: "encoding/json/jsontext"}
 		}
 	}
 	if manifest := schemas["Manifest"]; manifest != nil {
@@ -753,8 +1092,8 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 			if rawFilter.Extensions == nil {
 				rawFilter.Extensions = map[string]any{}
 			}
-			rawFilter.Extensions["x-go-type"] = "json.RawMessage"
-			rawFilter.Extensions["x-go-type-import"] = map[string]any{pathKey: "encoding/json"}
+			rawFilter.Extensions["x-go-type"] = "jsontext.Value"
+			rawFilter.Extensions["x-go-type-import"] = map[string]any{pathKey: "encoding/json/jsontext"}
 		}
 	}
 	for schemaName, properties := range map[string][]string{
@@ -803,6 +1142,106 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		}
 		schema.Extensions["x-enum-names"] = enumNames
 	}
+	for _, name := range []string{"FileSuggestionRow", "PersonFileSuggestionRow"} {
+		schema := schemas[name]
+		nullableSchemaProperty(schema, "occurred_at")
+		if schema == nil {
+			continue
+		}
+		// Unknown MIME is an empty string, not a missing property.
+		if mime := schema.Properties["mime_type"]; mime != nil {
+			mime.Nullable = true
+		}
+	}
+	for _, name := range []string{"FileSuggestionHTTPRequest", "PersonFileSuggestionHTTPRequest", "FileSuggestionRow", "PersonFileSuggestionRow"} {
+		if schema := schemas[name]; schema != nil {
+			for property, suffix := range map[string]string{
+				"mime_families": "MimeFamilies", "mime_family": "MimeFamily",
+				"directions": "Directions", "content_state": "ContentState", "filename_match": "FilenameMatch",
+			} {
+				field := schema.Properties[property]
+				if field == nil {
+					continue
+				}
+				if field.Type == huma.TypeArray {
+					field = field.Items
+				}
+				values := make([]string, len(field.Enum))
+				for i, value := range field.Enum {
+					text, ok := value.(string)
+					if !ok {
+						panic("filename suggestion enum must contain strings")
+					}
+					values[i] = text
+				}
+				setEnumNames(field, qualifiedEnumNames(name+suffix, values))
+			}
+		}
+	}
+	if recording := schemas["MessageRecording"]; recording != nil {
+		setEnumNames(recording.Properties["state"], qualifiedEnumNames("MessageRecordingState",
+			[]string{recordingReady, recordingProcessing, recordingMissing, recordingFailed, recordingUnsupported, recordingMediaMissing, recordingUnavailable}))
+	}
+	if transcript := schemas["MessageTranscript"]; transcript != nil {
+		setEnumNames(transcript.Properties["origin"], qualifiedEnumNames("MessageTranscriptOrigin", []string{"supplied", "generated"}))
+	}
+	if result := schemas["MediaSearchResult"]; result != nil {
+		setEnumNames(result.Properties["origin"], qualifiedEnumNames("MediaSearchResultOrigin", []string{"supplied", "generated"}))
+	}
+	if request := schemas["CalendarRequest"]; request != nil {
+		for property, names := range map[string][]any{
+			"response":     qualifiedEnumNames("CalendarRequestResponse", []string{"accepted", "declined", "tentative"}),
+			"scope":        qualifiedEnumNames("CalendarRequestScope", []string{"single", "future", "all"}),
+			"send_updates": qualifiedEnumNames("CalendarRequestSendUpdates", []string{"none", "all", "externalOnly"}),
+		} {
+			setEnumNames(request.Properties[property], names)
+		}
+	}
+	for schemaName, properties := range map[string]map[string][]any{
+		"CreateAttributeDefinitionRequest": {
+			"cardinality": {"Single", "Multi"},
+		},
+		"SecretSettingState": {
+			"source": {"Stored", "Environment", "None"},
+		},
+	} {
+		schema := schemas[schemaName]
+		if schema == nil {
+			continue
+		}
+		for property, names := range properties {
+			setEnumNames(schema.Properties[property], names)
+		}
+	}
+	for _, operation := range documentOperations(doc) {
+		if operation.OperationID != "listPersonRelationshipReviews" {
+			continue
+		}
+		for _, parameter := range operation.Parameters {
+			if parameter.Name == statusFieldName {
+				setEnumNames(parameter.Schema, []any{"Pending", "Accepted", "Rejected"})
+			}
+		}
+	}
+	if state := schemas["SavedViewStateEnvelope"]; state != nil {
+		setEnumNames(state.Properties["grouping"].Items,
+			qualifiedEnumNames("SavedViewStateEnvelopeGrouping", explorecatalog.GroupingDimensions()))
+		setEnumNames(state.Properties["columns"].Items,
+			qualifiedEnumNames("SavedViewStateEnvelopeColumns", store.SavedViewColumns))
+		setEnumNames(state.Properties["search_mode"],
+			qualifiedEnumNames("SavedViewStateEnvelopeSearchMode", explorecatalog.SearchModes()))
+	}
+	if filter := schemas["SavedViewFilter"]; filter != nil {
+		setEnumNames(filter.Properties["field"], qualifiedEnumNames("SavedViewFilterField", store.SavedViewFilterFields()))
+		setEnumNames(filter.Properties["operator"], qualifiedEnumNames("SavedViewFilterOperator", store.SavedViewFilterOperators))
+	}
+	if sort := schemas["SavedViewSort"]; sort != nil {
+		setEnumNames(sort.Properties["field"], qualifiedEnumNames("SavedViewSortField", []string{explorecatalog.EntrySortField}))
+	}
+	if run := schemas["RunSavedViewResponse"]; run != nil {
+		setEnumNames(run.Properties["result_kind"],
+			qualifiedEnumNames("RunSavedViewResponseResultKind", []string{"entries", "groups", "files"}))
+	}
 	setEnumNames(schemas["ExploreGroupDimension"], []any{
 		"ExploreGroupDimensionSource", "ExploreGroupDimensionParticipant", "ExploreGroupDimensionDomain",
 		"ExploreGroupDimensionMessageType", "ExploreGroupDimensionMailingList", "ExploreGroupDimensionKind", "ExploreGroupDimensionYear", "ExploreGroupDimensionMonth",
@@ -823,6 +1262,14 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		setEnumNames(response.Properties["status"], []any{
 			"MeetingImportResponseStatusCreated",
 			"MeetingImportResponseStatusUpdated",
+		})
+	}
+	if request := schemas["MeetingActionsRequest"]; request != nil {
+		setEnumNames(request.Properties["status"], []any{
+			"MeetingActionsRequestStatusPending",
+			"MeetingActionsRequestStatusCompleted",
+			"MeetingActionsRequestStatusCancelled",
+			"MeetingActionsRequestStatusUnknown",
 		})
 	}
 	for schemaName, properties := range map[string]map[string][]any{
@@ -872,11 +1319,14 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 			"pending_operation": {"CardDAVPublicationResponsePendingOperationCreate", "CardDAVPublicationResponsePendingOperationUpdate", "CardDAVPublicationResponsePendingOperationDelete"},
 			"state":             {"CardDAVPublicationResponseStateUnpublished", "CardDAVPublicationResponseStatePublished", "CardDAVPublicationResponseStatePending", "CardDAVPublicationResponseStateConflict"},
 		},
+		"CardDAVPublicationPreviewResponse": {
+			"kind": {"CardDAVPublicationPreviewResponseKindCurrent", "CardDAVPublicationPreviewResponseKindPending", "CardDAVPublicationPreviewResponseKindConflict"},
+		},
 		"ExploreCacheUnavailableResponse": {
 			"readiness": {"ExploreCacheUnavailableResponseReadinessAbsent", "ExploreCacheUnavailableResponseReadinessBuilding", "ExploreCacheUnavailableResponseReadinessInterrupted", "ExploreCacheUnavailableResponseReadinessStaleSchema", "ExploreCacheUnavailableResponseReadinessDrifted"},
 		},
 		"ExploreFilter": {
-			"dimension": {"ExploreFilterDimensionSource", "ExploreFilterDimensionParticipant", "ExploreFilterDimensionDomain", "ExploreFilterDimensionMessageType", "ExploreFilterDimensionMailingList", "ExploreFilterDimensionAfter", "ExploreFilterDimensionBefore", "ExploreFilterDimensionDeletion", "ExploreFilterDimensionIdentity", "ExploreFilterDimensionInboxState", "ExploreFilterDimensionReadState"},
+			"dimension": {"ExploreFilterDimensionSource", "ExploreFilterDimensionParticipant", "ExploreFilterDimensionDomain", "ExploreFilterDimensionMessageType", "ExploreFilterDimensionMailingList", "ExploreFilterDimensionAfter", "ExploreFilterDimensionBefore", "ExploreFilterDimensionDeletion", "ExploreFilterDimensionIdentity", "ExploreFilterDimensionAccount"},
 		},
 		"ExploreGroupSort": {
 			"direction": {"ExploreGroupSortDirectionAsc", "ExploreGroupSortDirectionDesc"},
@@ -927,6 +1377,12 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 			schemaName + "AllowedResolutionsKeepLocal",
 			schemaName + "AllowedResolutionsKeepRemote",
 		})
+	}
+	// Without the override, empty-schema map values generate struct{}, which cannot carry surface="web".
+	if telemetry := schemas["TelemetryEventRequest"]; telemetry != nil && telemetry.Properties["properties"] != nil {
+		if values, ok := telemetry.Properties["properties"].AdditionalProperties.(*huma.Schema); ok {
+			setCodegenGoType(values, "any")
+		}
 	}
 	meeting := schemas["Meeting"]
 	if meeting == nil || meeting.Properties == nil {
@@ -1046,4 +1502,24 @@ func schemaChildren(schema *huma.Schema) []*huma.Schema {
 	children = append(children, schema.AnyOf...)
 	children = append(children, schema.AllOf...)
 	return children
+}
+
+// nullableSchemaProperty keeps an always-present nullable property present in
+// the generated Go client: no omitempty, and validated as optional rather than
+// required, so a null timestamp round-trips instead of disappearing.
+func nullableSchemaProperty(schema *huma.Schema, propertyName string) {
+	if schema == nil {
+		return
+	}
+	property := schema.Properties[propertyName]
+	if property == nil {
+		return
+	}
+	if property.Extensions == nil {
+		property.Extensions = map[string]any{}
+	}
+	property.Extensions["x-omitempty"] = false
+	property.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
+		"validate": "omitempty",
+	}
 }

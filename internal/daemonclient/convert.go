@@ -1,7 +1,7 @@
 package daemonclient
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
 	"fmt"
 	"strings"
 	"time"
@@ -53,7 +53,7 @@ func storeStatsFromGenerated(stats generated.StatsResponse) *store.Stats {
 		SourceCount:        stats.TotalAccounts,
 		LabelCount:         stats.TotalLabels,
 		AttachmentCount:    stats.TotalAttachments,
-		DatabaseSize:       stats.DatabaseSizeBytes,
+		DatabaseSize:       int64Value(stats.DatabaseSizeBytes),
 	}
 }
 
@@ -109,6 +109,7 @@ func cliDeleteStagedPlanFromGenerated(resp *generated.PlanCLIDeleteStagedRespons
 		ScopeEscalationBodyLines:  append([]string(nil), resp.ScopeEscalationBodyLines...),
 		ScopeEscalationCancelHint: stringValue(resp.ScopeEscalationCancelHint),
 		ScopeEscalationAccount:    stringValue(resp.ScopeEscalationAccount),
+		ScopeEscalationSourceType: stringValue(resp.ScopeEscalationSourceType),
 		ScopeEscalationOAuthApp:   stringValue(resp.ScopeEscalationOauthApp),
 		BlockedError:              stringValue(resp.BlockedError),
 		RemoteDeleteEnvVar:        stringValue(resp.RemoteDeleteEnvVar),
@@ -140,7 +141,7 @@ func cliDeletionManifestToGenerated(manifest *deletion.Manifest) generated.Creat
 		Version:     int64(manifest.Version),
 	}
 	if len(manifest.RawFilter) > 0 {
-		rawFilter := append(json.RawMessage(nil), manifest.RawFilter...)
+		rawFilter := append(jsontext.Value(nil), manifest.RawFilter...)
 		out.RawFilter = &rawFilter
 	}
 	if manifest.Execution != nil {
@@ -240,6 +241,7 @@ func cliSearchFromGenerated(resp *generated.SearchCLIResponse) *CLISearch {
 	}
 	return &CLISearch{
 		Results:          results,
+		HybridAvailable:  boolValue(resp.HybridAvailable),
 		ScopeLabel:       stringValue(resp.ScopeLabel),
 		ScopeSourceCount: intValue(resp.ScopeSourceCount),
 		IndexBuilt:       boolValue(resp.IndexBuilt),
@@ -266,7 +268,14 @@ func cliHybridSearchFromGenerated(resp generated.HybridSearchResponse) (*CLIHybr
 			Fingerprint: resp.Generation.Fingerprint,
 			State:       resp.Generation.State,
 		},
+		TookMS: resp.TookMs,
+		Timings: CLIHybridSearchTimings{
+			QueryEmbeddingMS: resp.Timings.QueryEmbeddingMs,
+			RetrievalMS:      resp.Timings.RetrievalMs,
+			HydrationMS:      resp.Timings.HydrationMs,
+		},
 		PoolSaturated:    resp.PoolSaturated,
+		Accelerator:      stringValue(resp.Accelerator),
 		ReturnedCount:    int(resp.Returned),
 		ScopeLabel:       stringValue(resp.ScopeLabel),
 		ScopeSourceCount: intValue(resp.ScopeSourceCount),
@@ -299,6 +308,8 @@ func cliHybridSearchResultFromGenerated(item generated.HybridSearchItem) (CLIHyb
 			ConversationID:  int64Value(item.ConversationID),
 			Subject:         item.Subject,
 			Snippet:         item.Snippet,
+			AttachmentCount: intValue(item.AttachmentCount),
+			AttachmentNames: item.AttachmentNames,
 			FromEmail:       stringValue(item.FromEmail),
 			FromName:        stringValue(item.FromName),
 			FromPhone:       stringValue(item.FromPhone),
@@ -312,6 +323,7 @@ func cliHybridSearchResultFromGenerated(item generated.HybridSearchItem) (CLIHyb
 			DeletedAt:       deletedAt,
 			MessageType:     stringValue(item.MessageType),
 		},
+		AttachmentCount:  item.AttachmentCount,
 		ID:               item.ID,
 		Subject:          item.Subject,
 		FromEmail:        stringValue(item.FromEmail),
@@ -366,6 +378,8 @@ func queryMessageSummaryFromGenerated(msg generated.CLIQueryMessageSummary) quer
 		SourceConversationID: msg.SourceConversationID,
 		Subject:              msg.Subject,
 		Snippet:              msg.Snippet,
+		MatchSnippet:         stringValue(msg.MatchSnippet),
+		AttachmentNames:      msg.AttachmentNames,
 		FromEmail:            msg.FromEmail,
 		FromName:             msg.FromName,
 		FromPhone:            stringValue(msg.FromPhone),
@@ -409,6 +423,7 @@ func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query
 		InboxState:           providerStateFromEnum(resp.InboxState),
 		ReadState:            providerStateFromEnum(resp.ReadState),
 		SourceMessageID:      resp.SourceMessageID,
+		RFC822MessageID:      stringValue(resp.Rfc822MessageID),
 		ConversationID:       resp.ConversationID,
 		SourceConversationID: resp.SourceConversationID,
 		Subject:              resp.Subject,
@@ -480,6 +495,26 @@ func cliAccountsFromGenerated(resp *generated.ListCLIAccountsResponse) []CLIAcco
 			MessageCount:       account.MessageCount,
 			SourceDeletedCount: account.SourceDeletedCount,
 			LastSync:           account.LastSync,
+			VirtualAccounts:    virtualAccountsFromGenerated(account.VirtualAccounts),
+		}
+	}
+	return out
+}
+
+func virtualAccountsFromGenerated(accounts []generated.VirtualAccount) []store.VirtualAccount {
+	if len(accounts) == 0 {
+		return nil
+	}
+	out := make([]store.VirtualAccount, len(accounts))
+	for i, account := range accounts {
+		out[i] = store.VirtualAccount{
+			Key:                account.Key,
+			SourceID:           account.SourceID,
+			AccountAddress:     stringValue(account.AccountAddress),
+			Unattributed:       account.Unattributed != nil && *account.Unattributed,
+			MessageCount:       account.MessageCount,
+			SourceDeletedCount: account.SourceDeletedCount,
+			PendingCount:       int64Value(account.PendingCount),
 		}
 	}
 	return out

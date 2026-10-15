@@ -36,8 +36,8 @@ type PersonEnrichmentRun struct {
 	FailedCount           int64      `json:"failed_count"`
 	SuppressedCount       int64      `json:"suppressed_count"`
 	IdentityRejectedCount int64      `json:"identity_rejected_count"`
-	FailureClass          *string    `json:"failure_class,omitempty"`
-	SafeError             *string    `json:"safe_error,omitempty"`
+	FailureClass          *string    `json:"failure_class,omitzero" nullable:"false"`
+	SafeError             *string    `json:"safe_error,omitzero" nullable:"false"`
 }
 
 type personEnrichmentRunOutcome struct {
@@ -63,7 +63,7 @@ func derivePersonEnrichmentRunOutcomeTx(
 		SELECT COUNT(*), COUNT(*),
 		       COALESCE(SUM(CASE WHEN state = 'succeeded' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN state IN ('terminal','uncertain_start')
-		                         AND COALESCE(failure_class, '') <> 'policy' THEN 1 ELSE 0 END), 0),
+		                         AND COALESCE(failure_class, '') NOT IN ('policy', 'profile_unavailable') THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN state = 'suppressed' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN state = 'identity_rejected' THEN 1 ELSE 0 END), 0)
 		FROM person_enrichment_attempts WHERE run_id = ?`, runID).Scan(
@@ -148,8 +148,7 @@ func (s *Store) StartManualPersonEnrichmentRunContext(
 		var authorized bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
 			SELECT 1 FROM person_tracking pt
-			JOIN person_enrichment_consents c
-			  ON c.profile_fingerprint = ? AND c.revoked_at IS NULL
+			JOIN `+activeConsentsSQL(ConsentPersonEnrichment)+` c ON c.fingerprint = ?
 			WHERE pt.person_id = ?)`, profileFingerprint, personID).Scan(&authorized); err != nil {
 			return fmt.Errorf("authorize manual person enrichment run: %w", err)
 		}

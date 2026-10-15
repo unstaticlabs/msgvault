@@ -1,108 +1,66 @@
 <script lang="ts">
   import {
-    createSavedView as generatedCreateSavedView,
     deleteSavedView as generatedDeleteSavedView,
     listSavedViews as generatedListSavedViews,
     patchSavedView as generatedPatchSavedView,
   } from '../../api/generated/api/api';
-  import { Button, Card, EmptyState, Modal, TextInput } from '@kenn-io/kit-ui';
+  import { Button, EmptyState, Modal, TextInput } from '@kenn-io/kit-ui';
   import { onMount } from 'svelte';
+  import PageHeader from '../shell/PageHeader.svelte';
   import type { APIClient } from '../../api/client';
-  import type {
-    SavedView as GeneratedSavedView,
-    SavedViewStateEnvelope as GeneratedSavedViewStateEnvelope,
-  } from '../../api/generated/models';
+  import type { SavedView } from '../../api/generated/models';
+  import type { ExploreURLState } from '../../explore/models';
+  import { ExploreSelectionState } from '../../explore/state.svelte';
+  import SelectionCheckbox from '../common/SelectionCheckbox.svelte';
   import {
-    DEFAULT_EXPLORE_COLUMNS,
-    isFilterDimension,
-    isValidFilterID,
-    type ExploreColumn,
-    type ExploreURLState,
-  } from '../../explore/models';
+    CURRENT_SCHEMA_VERSION,
+    exploreStateFromSavedView,
+    savedViewSummary,
+    type CanonicalState,
+  } from '../../saved-views/canonical';
+  import { isFilterDimension, isValidFilterID, type ExploreColumn } from '../../explore/models';
+  import { defaultExploreURLState } from '../../explore/state.svelte';
+  import { canonicalSavedViewState } from '../../saved-views/canonical';
   import { emailWorkFilterProblem } from '../../explore/email-work';
   import { filterCaption } from '../../explore/mailbox-state';
   import { isGroupingDimension } from '../../grouping/catalog';
-  type SavedView = GeneratedSavedView;
-  type CanonicalState = GeneratedSavedViewStateEnvelope;
-  const CURRENT_SCHEMA_VERSION = 1;
-  /** Persisted v1 field names that predate the current filter dimension vocabulary. */
-  const FILTER_ALIASES = new Map<string, ExploreURLState['filters'][number]['dimension']>([
-    ['source_id', 'source'],
-    ['participant_id', 'participant'],
-  ]);
+  const FILTER_ALIASES = new Map<string, ExploreURLState['filters'][number]['dimension']>([['source_id','source'], ['participant_id','participant']]);
   let {
     client,
-    currentState,
-    selection = undefined,
+    currentState = defaultExploreURLState,
     onOpen = () => undefined,
   }: {
     client: APIClient;
-    currentState: ExploreURLState;
-    selection?: unknown;
+    currentState?: ExploreURLState;
     onOpen?: (state: Partial<ExploreURLState>) => void;
   } = $props();
   let views = $state<SavedView[]>([]);
   let loading = $state(true);
   let saving = $state(false);
   let error = $state('');
-  let name = $state('');
-  let description = $state('');
   let editing = $state<SavedView>();
   let repairingFilters = $state(false);
   let editName = $state('');
   let editDescription = $state('');
-  let deleting = $state<SavedView>();
+  let deleting = $state<SavedView[]>([]);
+  const selection = new ExploreSelectionState();
+  const orderedKeys = $derived(views.map((view) => String(view.id)));
+  const selectedViews = $derived(views.filter((view) => selection.isSelected(String(view.id))));
+  const allSelected = $derived(orderedKeys.length > 0 && orderedKeys.every((key) => selection.isSelected(key)));
+  const someSelected = $derived(orderedKeys.some((key) => selection.isSelected(key)));
   onMount(() => void load());
   async function load(): Promise<void> {
     loading = true;
     error = '';
     try {
       const { data, error: responseError } = await generatedListSavedViews(client);
-      if (!data) throw new Error(messageFor(responseError, 'Unable to load Saved Views.'));
+      if (!data) throw new Error(messageFor(responseError, 'Unable to load saved views.'));
       views = data.saved_views ?? [];
+      selection.clear();
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Unable to load Saved Views.';
+      error = cause instanceof Error ? cause.message : 'Unable to load saved views.';
     } finally {
       loading = false;
-    }
-  }
-  function canonicalState(): CanonicalState {
-    return {
-      ...(currentState.query ? { query: currentState.query } : {}),
-      search_mode: currentState.searchMode,
-      filters: currentState.filters.map((filter) => ({
-        field: filter.dimension,
-        operator: 'in',
-        values: [...filter.values],
-      })),
-      grouping: [...currentState.groupingChain],
-      presentation: currentState.presentation,
-      sort: currentState.sort.map((sort) => ({ field: sort.field, direction: sort.direction })),
-      columns: [...currentState.columns],
-    };
-  }
-  async function createView(): Promise<void> {
-    if (!name.trim()) return;
-    saving = true;
-    error = '';
-    try {
-      const { data, error: responseError } = await generatedCreateSavedView(
-        {
-          name: name.trim(),
-          ...(description.trim() ? { description: description.trim() } : {}),
-          canonical_state: canonicalState(),
-          schema_version: CURRENT_SCHEMA_VERSION,
-        },
-        client,
-      );
-      if (!data) throw new Error(messageFor(responseError, 'Unable to save this view.'));
-      views = [...views, data].sort((left, right) => left.name.localeCompare(right.name));
-      name = '';
-      description = '';
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Unable to save this view.';
-    } finally {
-      saving = false;
     }
   }
   function beginEdit(view: SavedView): void {
@@ -115,99 +73,10 @@
     beginEdit(view);
     repairingFilters = true;
   }
-  function canRepairFilters(view: SavedView): boolean {
-    return view.schema_version === CURRENT_SCHEMA_VERSION && !incompatibilityFor({
-      ...view, canonical_state: { ...view.canonical_state, filters: canonicalState().filters }
-    });
-  }
-  async function saveEdit(): Promise<void> {
-    if (!editing || !editName.trim()) return;
-    saving = true;
-    error = '';
-    const target = editing;
-    try {
-      const {
-        data,
-        error: responseError,
-        response,
-      } = await generatedPatchSavedView(
-        { id: target.id },
-        {
-          name: editName.trim(),
-          description: editDescription.trim(),
-          ...(repairingFilters ? { canonical_state: { ...target.canonical_state, filters: canonicalState().filters } } : {}),
-        },
-        {
-          ...client,
-          headers: { 'If-Match': `"saved-view-${target.id}-r${target.revision}"` },
-        },
-      );
-      if (!data) {
-        if (response.status === 409)
-          throw new Error('This Saved View changed in another session. Reload and review the latest revision.');
-        throw new Error(messageFor(responseError, 'Unable to update this view.'));
-      }
-      views = views.map((view) => (view.id === data.id ? data : view));
-      editing = undefined;
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Unable to update this view.';
-    } finally {
-      saving = false;
-    }
-  }
-  async function confirmDelete(): Promise<void> {
-    if (!deleting) return;
-    const target = deleting;
-    saving = true;
-    error = '';
-    try {
-      const { response, error: responseError } = await generatedDeleteSavedView(
-        { id: target.id },
-        {
-          ...client,
-          headers: { 'If-Match': `"saved-view-${target.id}-r${target.revision}"` },
-        },
-      );
-      if (!response.ok) throw new Error(messageFor(responseError, 'Unable to delete this view.'));
-      views = views.filter((view) => view.id !== target.id);
-      deleting = undefined;
-    } catch (cause) {
-      error = cause instanceof Error ? cause.message : 'Unable to delete this view.';
-    } finally {
-      saving = false;
-    }
-  }
-  function open(view: SavedView): void {
-    const incompatibility = incompatibilityFor(view);
-    if (incompatibility) return;
-    const saved = view.canonical_state;
-    const filters = (saved.filters ?? []).map((filter) => ({
-      dimension:
-        FILTER_ALIASES.get(filter.field) ??
-        (filter.field as ExploreURLState['filters'][number]['dimension']),
-      values: [...filter.values],
-    }));
-    onOpen({
-      workspace: 'everything',
-      savedViewID: view.id, savedViewRevision: view.revision,
-      query: saved.query ?? '',
-      searchMode: saved.search_mode === 'semantic' || saved.search_mode === 'hybrid' ? saved.search_mode : 'full_text',
-      filters,
-      groupingChain: [...(saved.grouping ?? [])] as ExploreURLState['groupingChain'],
-      presentation: saved.presentation ?? 'table',
-      sort: (saved.sort ?? [{ field: 'occurred_at', direction: 'desc' }]) as ExploreURLState['sort'],
-      columns: (saved.columns ?? DEFAULT_EXPLORE_COLUMNS) as ExploreURLState['columns'],
-      activeRow: null,
-      selectedRow: null,
-      conversationAnchor: null,
-      scrollAnchor: null,
-    });
-  }
-  function incompatibilityFor(view: SavedView): string {
-    if (view.schema_version !== CURRENT_SCHEMA_VERSION) {
-      return `This view uses schema version ${view.schema_version}. Automatic migration is not supported; remove it and save the current view again.`;
-    }
-    const saved = view.canonical_state;
+  function canonicalState(): CanonicalState { return canonicalSavedViewState(currentState); }
+  function localIncompatibilityFor(view: SavedView): string {
+    if (!view.canonical_state || typeof view.canonical_state !== "object" || Array.isArray(view.canonical_state)) return "This saved definition cannot be opened. Create a new view from Explore.";
+    const saved = view.canonical_state as CanonicalState;
     const seen = new Set<string>();
     let sourceValues: string[] | undefined;
     let identityValues: string[] | undefined;
@@ -223,7 +92,7 @@
         typeof value !== 'string' || (!value.trim() && !(dimension === 'identity' && index === 2 && value === '')))) {
         return `This view has an unsupported v1 filter value for ${filter.field}.`;
       }
-      if (!['participant', 'domain', 'mailing_list'].includes(dimension)) {
+      if (!['account', 'participant', 'domain', 'mailing_list'].includes(dimension)) {
         if (seen.has(dimension)) return `This view repeats its ${dimension} filter. Select the filters again in Explore and save a new view. Your saved definition is unchanged.`;
         seen.add(dimension);
       }
@@ -274,6 +143,105 @@
     }
     return '';
   }
+  function repairFilterState(view: SavedView): Record<string, unknown> {
+    const state = view.canonical_state;
+    return { ...(state && typeof state === "object" && !Array.isArray(state) ? state : {}), filters: canonicalState().filters };
+  }
+  function canRepairFilters(view: SavedView): boolean {
+    if (!view.canonical_state || typeof view.canonical_state !== "object" || Array.isArray(view.canonical_state)) return false;
+    return view.schema_version === CURRENT_SCHEMA_VERSION && !localIncompatibilityFor({
+      ...view, canonical_state: repairFilterState(view)
+    });
+  }
+  async function saveEdit(): Promise<void> {
+    if (!editing || !editName.trim()) return;
+    saving = true;
+    error = '';
+    const target = editing;
+    try {
+      const {
+        data,
+        error: responseError,
+        response,
+      } = await generatedPatchSavedView(
+        { id: target.id },
+        {
+          name: editName.trim(),
+          description: editDescription.trim(),
+          ...(repairingFilters ? { canonical_state: repairFilterState(target) } : {}),
+        },
+        {
+          ...client,
+          headers: { 'If-Match': `"saved-view-${target.id}-r${target.revision}"` },
+        },
+      );
+      if (!data) {
+        if (response.status === 409)
+          throw new Error('This saved view changed in another session. Reload and review the latest revision.');
+        throw new Error(messageFor(responseError, 'Unable to update this view.'));
+      }
+      views = views.map((view) => (view.id === data.id ? data : view));
+      editing = undefined;
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : 'Unable to update this view.';
+    } finally {
+      saving = false;
+    }
+  }
+  function toggleSelection(view: SavedView, index: number, range: boolean): void {
+    selection.toggle(String(view.id), index, orderedKeys, range);
+  }
+  function toggleAll(): void {
+    if (allSelected) selection.clear();
+    else selection.selectVisible(orderedKeys);
+  }
+  function beginBulkDelete(): void {
+    if (selectedViews.length === 0 || saving) return;
+    deleting = [...selectedViews];
+  }
+  async function confirmDelete(): Promise<void> {
+    if (deleting.length === 0) return;
+    const targets = [...deleting];
+    saving = true;
+    error = '';
+    const deletedIDs = new Set<number>();
+    const failures: string[] = [];
+    for (const target of targets) {
+      try {
+        const { response, error: responseError } = await generatedDeleteSavedView(
+          { id: target.id },
+          {
+            ...client,
+            headers: { 'If-Match': `"saved-view-${target.id}-r${target.revision}"` },
+          },
+        );
+        if (!response.ok) throw new Error(messageFor(responseError, `Unable to delete ${target.name}.`));
+        deletedIDs.add(target.id);
+      } catch (cause) {
+        failures.push(cause instanceof Error ? cause.message : `Unable to delete ${target.name}.`);
+      }
+    }
+    views = views.filter((view) => !deletedIDs.has(view.id));
+    for (const id of deletedIDs) selection.explicitKeys.delete(String(id));
+    deleting = [];
+    saving = false;
+    if (failures.length > 0) {
+      error = `${deletedIDs.size.toLocaleString()} deleted; ${failures.length.toLocaleString()} could not be deleted. ${failures[0]}`;
+    } else {
+      selection.clear();
+    }
+  }
+  function open(view: SavedView): void {
+    const incompatibility = incompatibilityFor(view);
+    if (incompatibility) return;
+    onOpen({ ...exploreStateFromSavedView(view.canonical_state as CanonicalState), savedViewID: view.id, savedViewRevision: view.revision });
+  }
+  function incompatibilityFor(view: SavedView): string {
+    if (view.schema_version !== CURRENT_SCHEMA_VERSION) {
+      return `This view uses schema version ${view.schema_version}. Automatic migration is not supported; remove it and save the current view again.`;
+    }
+    return view.incompatibility_reason || localIncompatibilityFor(view);
+  }
   function rfc3339Timestamp(value: string): boolean {
     // Match the native time.Parse(RFC3339) contract, including fractional
     // seconds and its accepted numeric zone range, without Date.parse's
@@ -294,45 +262,52 @@
   }
 </script>
 
-<main class="saved-views" aria-label="Saved Views">
-  <header>
-    <div>
-      <p>Archive workspace</p>
-      <h1>Saved Views</h1>
-    </div>
-  </header>
+<main class="saved-views" aria-label="Saved views">
+  <PageHeader title="Saved views" description="Searches and layouts you've saved to reuse." />
 
   {#if error}<p class="notice notice--error" role="alert">{error}</p>{/if}
 
-  <Card padding="sm" title="Save this view" meta="Shared across sessions">
-    <form
-      class="create"
-      onsubmit={(event) => {
-        event.preventDefault();
-        void createView();
-      }}
-    >
-      <TextInput ariaLabel="Name" placeholder="View name" bind:value={name} autocomplete="off" block />
-      <TextInput
-        ariaLabel="Description"
-        placeholder="Description (optional)"
-        bind:value={description}
-        autocomplete="off"
-        block
-      />
-      <Button type="submit" tone="workflow" surface="solid" label="Save" disabled={saving || !name.trim()} />
-    </form>
-  </Card>
-
   {#if loading}
-    <p role="status">Loading Saved Views…</p>
+    <p role="status">Loading saved views…</p>
   {:else if views.length === 0}
-    <EmptyState title="No Saved Views yet" description="Save the current archive context to reuse it later." />
+    <EmptyState
+      title="No saved views yet"
+      description="Use Save view… in Everything or Files to keep a search and layout you want to return to."
+    />
   {:else}
-    <section class="view-list" aria-label="Saved View library">
-      {#each views as view (view.id)}
+    <div class="selection-toolbar" aria-label="Saved view selection">
+      <SelectionCheckbox
+        checked={allSelected}
+        mixed={!allSelected && someSelected}
+        label={allSelected ? 'Unselect all saved views' : 'Select all saved views'}
+        disabled={saving}
+        onToggle={toggleAll}
+      />
+      <span class="selection-count">{selection.count > 0 ? `${selection.count.toLocaleString()} selected` : 'Select all'}</span>
+      {#if selection.count > 0}
+        <Button
+          size="sm"
+          tone="danger"
+          surface="soft"
+          label="Delete selected…"
+          disabled={saving}
+          onclick={beginBulkDelete}
+        />
+        <Button size="sm" surface="soft" label="Clear" disabled={saving} onclick={() => selection.clear()} />
+      {/if}
+    </div>
+    <section class="view-list" aria-label="Saved view library">
+      {#each views as view, index (view.id)}
         {@const incompatibility = incompatibilityFor(view)}
-        <article class:needs-attention={Boolean(incompatibility)} class:repairing={editing?.id === view.id && repairingFilters}>
+        <article class:selected={selection.isSelected(String(view.id))} class:needs-attention={Boolean(incompatibility)} class:repairing={editing?.id === view.id && repairingFilters}>
+          <span class="row-checkbox">
+            <SelectionCheckbox
+              checked={selection.isSelected(String(view.id))}
+              label={`${selection.isSelected(String(view.id)) ? 'Unselect' : 'Select'} ${view.name}`}
+              disabled={saving}
+              onToggle={(range) => toggleSelection(view, index, range)}
+            />
+          </span>
           {#if editing?.id === view.id}
             <label>Edit name<TextInput ariaLabel="Edit name" bind:value={editName} /></label>
             <label>Edit description<TextInput ariaLabel="Edit description" bind:value={editDescription} /></label>
@@ -364,6 +339,13 @@
             <div class="view-copy">
               <h2>{view.name}</h2>
               <p>{view.description ?? 'No description'}</p>
+              {#if !incompatibility}
+                <ul class="summary" aria-label={`${view.name} summary`}>
+                  {#each savedViewSummary(view.canonical_state as CanonicalState) as part, index (index)}
+                    <li>{part}</li>
+                  {/each}
+                </ul>
+              {/if}
             </div>
             {#if incompatibility}
               <p class="notice" role="alert">{incompatibility}</p>
@@ -385,7 +367,7 @@
                   surface="soft"
                   label={`Delete ${view.name}`}
                   onclick={() => {
-                    deleting = view;
+                    deleting = [view];
                   }}
                 />
               {:else}
@@ -398,7 +380,7 @@
                   surface="soft"
                   label={`Remove incompatible ${view.name}`}
                   onclick={() => {
-                    deleting = view;
+                    deleting = [view];
                   }}
                 />
               {/if}
@@ -410,27 +392,32 @@
   {/if}
 </main>
 
-{#if deleting}
+{#if deleting.length > 0}
   <Modal
-    title="Delete Saved View?"
+    title={deleting.length === 1 ? 'Delete saved view?' : `Delete ${deleting.length.toLocaleString()} saved views?`}
     tone="danger"
     onclose={() => {
-      deleting = undefined;
+      if (!saving) deleting = [];
     }}
   >
-    <p>Delete “{deleting.name}” from every authenticated browser session?</p>
+    <p>
+      {deleting.length === 1
+        ? `Delete “${deleting[0]!.name}” from every authenticated browser session?`
+        : `Delete these ${deleting.length.toLocaleString()} saved views from every authenticated browser session?`}
+    </p>
     {#snippet footer()}
       <Button
         surface="soft"
         label="Cancel"
+        disabled={saving}
         onclick={() => {
-          deleting = undefined;
+          deleting = [];
         }}
       />
       <Button
         tone="danger"
         surface="solid"
-        label="Confirm delete"
+        label={saving ? 'Deleting…' : 'Confirm delete'}
         disabled={saving}
         onclick={() => void confirmDelete()}
       />
@@ -442,43 +429,40 @@
   .saved-views {
     display: flex;
     width: 100%;
-    max-width: 1080px;
     min-height: 0;
     flex: 1;
     flex-direction: column;
     gap: var(--space-4);
-    margin-inline: auto;
-    padding: var(--space-5) var(--space-6);
+    padding: var(--space-5) var(--page-gutter) var(--space-4);
+    background: var(--bg-primary);
   }
-  header,
   article,
   .actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-3);
   }
-  header p,
-  h1,
+  .selection-toolbar {
+    display: flex;
+    min-height: 28px;
+    align-items: center;
+    gap: var(--space-2);
+    padding-inline: var(--space-2);
+    color: var(--text-muted);
+    font-size: var(--font-size-xs);
+  }
+  .selection-count {
+    min-width: 0;
+    flex: 1;
+  }
   h2,
   article p {
     margin: 0;
   }
-  header p {
-    color: var(--status-warning-ink);
-    font-size: var(--font-size-2xs);
-    font-weight: 800;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-  }
   article p {
     color: var(--text-muted);
     font-size: var(--font-size-xs);
-  }
-  .create {
-    display: grid;
-    grid-template-columns: minmax(11rem, 0.8fr) minmax(15rem, 1.2fr) auto;
-    align-items: center;
-    gap: var(--space-2);
   }
   label {
     display: grid;
@@ -488,11 +472,17 @@
   }
   .view-list {
     display: grid;
-    gap: var(--space-2);
+    width: 100%;
+    overflow: hidden;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    box-shadow: var(--shadow-sm);
   }
   article {
     justify-content: space-between;
-    padding: var(--space-3);
+    min-height: 64px;
+    padding: var(--space-3) var(--space-4);
     border-bottom: 1px solid var(--border-muted);
   }
   article.needs-attention { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
@@ -500,10 +490,43 @@
   article.repairing .notice, article.repairing ul, article.repairing .actions { grid-column: 1 / -1; }
   article.repairing ul { margin: 0; padding-left: var(--space-5); }
   .actions { flex-wrap: wrap; }
+  article:last-child {
+    border-bottom: 0;
+  }
+  article:hover {
+    background: var(--bg-surface-hover);
+  }
+  article.selected {
+    background: var(--selected-bg);
+  }
+  .row-checkbox {
+    display: grid;
+    width: 24px;
+    height: 24px;
+    flex: none;
+    place-items: center;
+  }
   .view-copy {
     display: grid;
-    min-width: 12rem;
+    min-width: min(12rem, 100%);
+    flex: 1;
     gap: var(--space-1);
+  }
+  .summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .summary li {
+    padding: 0 var(--space-2);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+    color: var(--text-secondary);
+    font-size: var(--font-size-xs);
   }
   .notice {
     padding: var(--space-2) var(--space-3);
@@ -516,12 +539,15 @@
     color: var(--text-danger);
   }
   @media (max-width: 760px) {
-    .create, article.repairing {
+    article.repairing {
       grid-template-columns: 1fr;
     }
     article {
-      align-items: stretch;
-      flex-direction: column;
+      align-items: flex-start;
+    }
+    article .actions {
+      flex-basis: 100%;
+      padding-left: calc(24px + var(--space-3));
     }
   }
 </style>

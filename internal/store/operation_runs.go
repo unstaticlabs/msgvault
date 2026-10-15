@@ -38,7 +38,9 @@ var durableOperationKinds = []operations.Kind{
 const (
 	sourceOperationRunColumns = `id, started_at, completed_at, status,
 		messages_processed, messages_added, messages_updated, errors_count`
-	cardDAVOperationRunColumns = `id, trigger, state, started_at, finished_at,
+	cardDAVOperationRunColumns = `id, account_id,
+		COALESCE((SELECT connection_name FROM carddav_accounts WHERE carddav_accounts.id = carddav_sync_runs.account_id),
+		 CASE WHEN account_id = 1 THEN 'default' ELSE '' END), trigger, state, started_at, finished_at,
 		books, created, updated, removed,
 		CASE WHEN state IN ('failed', 'cancelled', 'partial') THEN error_code ELSE '' END`
 	operationSQLiteTimestampLayout = "2006-01-02 15:04:05.999999999"
@@ -230,6 +232,8 @@ func sourceOperationStateCondition(states []operations.State) string {
 			conditions = append(conditions, `(status = 'failed' AND messages_added = 0 AND messages_updated = 0)`)
 		case operations.StateCancelled:
 			conditions = append(conditions, `status = 'cancelled'`)
+		case operations.StatePaused:
+			conditions = append(conditions, `status = 'paused'`)
 		case operations.StateQueued:
 			// Source sync has no durable queued rows.
 		}
@@ -485,8 +489,8 @@ func personSweepOperationStateCondition(states []operations.State) string {
 			conditions = append(conditions, `r.status = 'partial'`)
 		case operations.StateFailed:
 			conditions = append(conditions, `r.status = 'failed'`)
-		case operations.StateQueued, operations.StateCancelled:
-			// Person sweep has no durable queued or cancelled run state.
+		case operations.StateQueued, operations.StateCancelled, operations.StatePaused:
+			// Person sweep has no durable queued, cancelled or paused run state.
 		}
 	}
 	if len(conditions) == 0 {
@@ -746,8 +750,8 @@ func cardDAVOperationStateCondition(states []operations.State) string {
 			conditions = append(conditions, `state = 'failed'`)
 		case operations.StateCancelled:
 			conditions = append(conditions, `state = 'cancelled'`)
-		case operations.StateQueued:
-			// CardDAV has no durable queued rows.
+		case operations.StateQueued, operations.StatePaused:
+			// CardDAV has no durable queued or paused rows.
 		}
 	}
 	if len(conditions) == 0 {
@@ -809,6 +813,8 @@ func cardDAVOperationStatusRun(
 func scanCardDAVOperationRun(sc scanner) (operations.Run, error) {
 	var (
 		runID          int64
+		accountID      int64
+		connection     string
 		durableTrigger string
 		durableState   string
 		startedAt      requiredTimestamp
@@ -820,7 +826,7 @@ func scanCardDAVOperationRun(sc scanner) (operations.Run, error) {
 		errorCode      string
 	)
 	if err := sc.Scan(
-		&runID, &durableTrigger, &durableState, &startedAt, &finishedAt,
+		&runID, &accountID, &connection, &durableTrigger, &durableState, &startedAt, &finishedAt,
 		&books, &created, &updated, &removed, &errorCode,
 	); err != nil {
 		return operations.Run{}, err
@@ -840,6 +846,7 @@ func scanCardDAVOperationRun(sc scanner) (operations.Run, error) {
 	}
 	run := operations.Run{
 		ID:        id,
+		AccountID: accountID, Connection: connection,
 		Lane:      operations.LaneContacts,
 		State:     state,
 		Trigger:   &trigger,

@@ -1,11 +1,3 @@
-<script lang="ts" module>
-  function formatBytes(value: number): string {
-    if (value < 1024) return `${value} B`;
-    if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
-    return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-  }
-</script>
-
 <script lang="ts">
   import { getFile as generatedGetFile, getFileContent as generatedGetFileContent } from '../../api/generated/api/api';
   import { Button, Modal, appShortcuts } from '@kenn-io/kit-ui';
@@ -14,6 +6,8 @@
   import type { FileMetadata, FileViewerTarget } from '../../explore/models';
   import type { PDFRenderHandle } from './FileViewer.browser.svelte';
   import { isSupportedImageMIME, readBoundedStream, validatedImageBlob } from './preview-bytes';
+  import { formatBytes } from '../../util/format';
+  import KataFileIssueAction from '../kata/KataFileIssueAction.svelte';
   interface Props {
     client: APIClient;
     file: FileViewerTarget;
@@ -273,6 +267,7 @@
   </div>
   {#snippet footer()}
     <div class="viewer-footer">
+      {#if metadata}<KataFileIssueAction {client} attachmentID={metadata.id} messageID={metadata.message_id} filename={metadata.filename || 'File'} />{/if}
       <div class="metadata">
         <span>{metadata?.mime_type || file.mime_type || 'Unknown type'}</span>
         <span>{formatBytes(metadata?.size_bytes ?? file.size_bytes ?? 0)}</span>

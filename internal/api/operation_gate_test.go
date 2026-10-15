@@ -9,15 +9,18 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/personenrichment"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/query/querytest"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 type recordingOperationGate struct {
@@ -59,6 +62,7 @@ func (g *recordingOperationGate) counts() (int, int) {
 }
 
 func TestOperationGateMiddlewareSkipsReadMethods(t *testing.T) {
+	t.Parallel()
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {
 		t.Run(method, func(t *testing.T) {
 			assert := assert.New(t)
@@ -83,6 +87,7 @@ func TestOperationGateMiddlewareSkipsReadMethods(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareBypassesUnauthenticatedRequests(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	gate := &recordingOperationGate{allow: false}
@@ -114,6 +119,7 @@ func TestOperationGateMiddlewareBypassesUnauthenticatedRequests(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareGatesMutatingMethods(t *testing.T) {
+	t.Parallel()
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
 			gate := &recordingOperationGate{allow: true}
@@ -133,7 +139,44 @@ func TestOperationGateMiddlewareGatesMutatingMethods(t *testing.T) {
 	}
 }
 
+func TestOperationGateMiddlewareSkipsUnauthorizedDelegatedCLIRun(t *testing.T) {
+	t.Parallel()
+	grant := &agentgrant.Grant{Permissions: []agentgrant.Permission{agentgrant.PermissionDraftCreate}}
+	for _, tc := range []struct {
+		name    string
+		grant   *agentgrant.Grant
+		command string
+		calls   int
+	}{
+		{name: "draft.create", grant: grant, command: CLIRunDraftReplyCommand, calls: 1},
+		{name: "missing permission", grant: &agentgrant.Grant{}, command: CLIRunDraftReplyCommand},
+		{name: "nil grant", command: CLIRunDraftReplyCommand},
+		{name: "owner command", grant: grant, command: "remove-account"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			gate := &recordingOperationGate{allow: true}
+			handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			body, err := json.Marshal(CLIRunRequest{Args: []string{tc.command, "42"}})
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", strings.NewReader(string(body)))
+			req = req.WithContext(context.WithValue(req.Context(), requestSecurityContextKey{}, requestSecurity{
+				auth: requestAuthentication{Mode: AuthModeDelegated, Grant: tc.grant},
+			}))
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			assert.Equal(http.StatusNoContent, resp.Code)
+			begin, done := gate.counts()
+			assert.Equal(tc.calls, begin)
+			assert.Equal(tc.calls, done)
+		})
+	}
+}
+
 func TestOperationGateMiddlewareSkipsDaemonShutdown(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	gate := &recordingOperationGate{allow: true}
@@ -154,6 +197,7 @@ func TestOperationGateMiddlewareSkipsDaemonShutdown(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareSkipsLogCLIRunAndRestoresBody(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	gate := &recordingOperationGate{allow: false}
 	handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -177,6 +221,7 @@ func TestOperationGateMiddlewareSkipsLogCLIRunAndRestoresBody(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareRejectsOversizedCLIRunInspectionBody(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	gate := &recordingOperationGate{allow: false}
 	handlerCalled := false
@@ -203,6 +248,7 @@ func TestOperationGateMiddlewareRejectsOversizedCLIRunInspectionBody(t *testing.
 }
 
 func TestOperationGateMiddlewareStillGatesMutatingCLIRun(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	gate := &recordingOperationGate{allow: true}
 	handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -220,6 +266,7 @@ func TestOperationGateMiddlewareStillGatesMutatingCLIRun(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareStillGatesMutatingDocumentCommands(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body string
@@ -228,6 +275,8 @@ func TestOperationGateMiddlewareStillGatesMutatingDocumentCommands(t *testing.T)
 		{"consent", `{"args":["documents","consent-mistral","--yes"]}`},
 		{"retry", `{"args":["documents","retry","--hash","abc"]}`},
 		{"retire", `{"args":["documents","retire","profile","--yes"]}`},
+		// Status reconciles the occurrence index, which writes.
+		{"status", `{"args":["documents","status","--json"]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -249,6 +298,7 @@ func TestOperationGateMiddlewareStillGatesMutatingDocumentCommands(t *testing.T)
 }
 
 func TestOperationGateMiddlewareGatesMessageExport(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	gate := &recordingOperationGate{allow: true}
 	handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -270,6 +320,7 @@ func TestOperationGateMiddlewareGatesMessageExport(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareRejectsUnavailableGate(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 
 	gate := &recordingOperationGate{allow: false}
@@ -296,6 +347,7 @@ func TestOperationGateMiddlewareRejectsUnavailableGate(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareStopsWaitingWhenRequestContextCancels(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	gate := NewSerialOperationGate()
@@ -320,7 +372,7 @@ func TestOperationGateMiddlewareStopsWaitingWhenRequestContextCancels(t *testing
 	cancel()
 	select {
 	case <-done:
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		release()
 		require.FailNow("handler did not return after request cancellation")
 	}
@@ -355,7 +407,84 @@ func waitForParkedContext(t *testing.T, parked <-chan struct{}, work string) {
 	}
 }
 
+func TestServerEmbeddingsOptimizeHoldsOperationGateUntilRunnerReturns(t *testing.T) {
+	t.Parallel()
+	for _, ending := range []string{"complete", "cancel"} {
+		t.Run(ending, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				gate := NewSerialOperationGate()
+				requestCtx, cancelRequest := context.WithCancel(t.Context())
+				defer cancelRequest()
+				cleanupCtx, finishCleanup := context.WithCancel(t.Context())
+				defer finishCleanup()
+				commandFinished := make(chan struct{})
+				started := make(chan []string, 1)
+				srv := NewServerWithOptions(ServerOptions{
+					Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+					Store: &mockStore{runFunc: func(ctx context.Context, req CLIRunRequest, _ func(CLIRunEvent) error) error {
+						started <- req.Args
+						select {
+						case <-commandFinished:
+						case <-ctx.Done():
+						}
+						// The subprocess boundary returns only after worker cleanup.
+						<-cleanupCtx.Done()
+						return ctx.Err()
+					}},
+					Logger:        testLogger(),
+					OperationGate: gate,
+				})
+				defer func() {
+					cancelRequest()
+					finishCleanup()
+					synctest.Wait()
+					require.NoError(t, srv.Shutdown(context.Background()))
+				}()
+				req := httptest.NewRequestWithContext(requestCtx, http.MethodPost, "/api/v1/cli/run",
+					strings.NewReader(`{"args":["embeddings","optimize"]}`))
+				req.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				requestDone := make(chan struct{})
+				go func() {
+					srv.Router().ServeHTTP(response, req)
+					close(requestDone)
+				}()
+				synctest.Wait()
+				require.Len(t, started, 1, "optimize reaches the subprocess runner")
+				assert.Equal(t, []string{"embeddings", "optimize"}, <-started)
+
+				backgroundCtx, cancelBackground := context.WithCancel(t.Context())
+				defer cancelBackground()
+				backgroundStarted := make(chan bool, 1)
+				go func() {
+					release, ok := gate.BeginWorkContext(backgroundCtx)
+					defer release()
+					backgroundStarted <- ok
+				}()
+				synctest.Wait()
+				assert.Empty(t, backgroundStarted, "background embedding work waits during optimize")
+
+				if ending == "cancel" {
+					cancelRequest()
+				} else {
+					close(commandFinished)
+				}
+				synctest.Wait()
+				assert.Empty(t, backgroundStarted, "the gate stays held until the runner finishes cleanup")
+
+				finishCleanup()
+				synctest.Wait()
+				require.Len(t, backgroundStarted, 1, "runner return releases background work")
+				assert.True(t, <-backgroundStarted)
+				<-requestDone
+				assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			})
+		})
+	}
+}
+
 func TestServerBackgroundOperationGateStopsWhenContextCancelsBehindRequest(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -413,6 +542,7 @@ func TestServerBackgroundOperationGateStopsWhenContextCancelsBehindRequest(t *te
 }
 
 func TestServerBackgroundOperationGateStopsWhenDrainStartsBehindRequest(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		startDrain func(*SerialOperationGate) <-chan error
@@ -501,6 +631,7 @@ func TestServerBackgroundOperationGateStopsWhenDrainStartsBehindRequest(t *testi
 }
 
 func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	gate := NewSerialOperationGate()
@@ -520,7 +651,7 @@ func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T
 	select {
 	case queuedOK := <-queuedDone:
 		assert.Fail("queued work returned before drain", "ok=%v", queuedOK)
-	case <-time.After(25 * time.Millisecond):
+	case <-time.After(25 * time.Millisecond): //nolint:kennlint // absence check: active work keeps queued work waiting
 	}
 
 	drainDone := make(chan error, 1)
@@ -531,7 +662,7 @@ func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T
 	select {
 	case queuedOK := <-queuedDone:
 		assert.False(queuedOK, "queued work should be rejected by drain")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		releaseActive()
 		require.FailNow("queued work did not return after drain started")
 	}
@@ -539,14 +670,14 @@ func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T
 	select {
 	case err := <-drainDone:
 		assert.Fail("drain returned before active work released", "err=%v", err)
-	case <-time.After(25 * time.Millisecond):
+	case <-time.After(25 * time.Millisecond): //nolint:kennlint // absence check: unreleased active work keeps the drain waiting
 	}
 
 	releaseActive()
 	select {
 	case err := <-drainDone:
 		require.NoError(err, "drain")
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		require.FailNow("drain did not finish after active work released")
 	}
 
@@ -558,6 +689,7 @@ func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T
 }
 
 func TestServerOperationGateWrapsMutatingRequests(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	gate := &recordingOperationGate{allow: true}
@@ -583,13 +715,13 @@ func TestServerOperationGateWrapsMutatingRequests(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareSkipsReadOnlyCLIRunCommands(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body string
 	}{
 		{"embeddings list", `{"args":["embeddings","list"]}`},
 		{"documents search", `{"args":["documents","search","shipping damage"]}`},
-		{"documents status", `{"args":["documents","status","--capabilities","manifest.json"]}`},
 		{"list-deletions", `{"args":["list-deletions"]}`},
 		{"show-deletion with id", `{"args":["show-deletion","batch-123"]}`},
 	}
@@ -616,6 +748,7 @@ func TestOperationGateMiddlewareSkipsReadOnlyCLIRunCommands(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareSkipsSelfGatedCLIRunCommands(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	gate := &recordingOperationGate{allow: false}
 	called := false
@@ -635,8 +768,10 @@ func TestOperationGateMiddlewareSkipsSelfGatedCLIRunCommands(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareSkipsReadOnlyPaths(t *testing.T) {
+	t.Parallel()
 	paths := []string{
 		"/api/v1/query",
+		"/api/v1/query/archive",
 		"/api/v1/cli/add-calendar/plan",
 		"/api/v1/cli/delete-staged/plan",
 		"/api/v1/cli/embeddings/plan",
@@ -664,6 +799,7 @@ func TestOperationGateMiddlewareSkipsReadOnlyPaths(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareSkipsReadOnlyAnalyticalPosts(t *testing.T) {
+	t.Parallel()
 	paths := []string{
 		"/api/v1/explore",
 		"/api/v1/explore/groups",
@@ -708,7 +844,33 @@ func TestOperationGateMiddlewareSkipsReadOnlyAnalyticalPosts(t *testing.T) {
 	}
 }
 
-func TestOperationGateMiddlewareSkipsCardDAVAccountTestWhileGateHeld(t *testing.T) {
+func TestOperationGateMessageTagsExactRoute(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path       string
+		wantStatus int
+	}{
+		{"/api/v1/messages/7/tags", http.StatusNoContent},
+		{"/api/v1/messages/7/attachments/tags", http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			assert := assert.New(t)
+			gate := &recordingOperationGate{allow: false}
+			called := false
+			handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{}`))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			assert.Equal(tc.wantStatus, response.Code)
+			assert.Equal(tc.wantStatus == http.StatusNoContent, called)
+		})
+	}
+}
+
+func TestOperationGateMiddlewareSkipsCardDAVAccountTestWhileGateHeld(t *testing.T) { //nolint:paralleltest // swaps the package-level operationGateWaitLimit
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -739,10 +901,11 @@ func TestOperationGateMiddlewareSkipsCardDAVAccountTestWhileGateHeld(t *testing.
 // operation tagged "Exploration" (registerExploreRoute and the search
 // coverage route) must be classified read-only, and the table must not
 // carry stale entries for routes that no longer exist. The remote-image proxy,
-// CardDAV account test, and participant completion endpoint are the pinned
-// non-Exploration entries. All three must remain registered POST routes for
-// their table entries to stay valid.
+// CardDAV account test, participant completion, evidence preparation, Saved View
+// run, and message tag endpoints are pinned non-Exploration entries. Message tags
+// acquire the gate in their handler for writes. Each entry must remain a POST route.
 func TestReadOnlyPostRoutePatternsMatchExplorationRoutes(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	doc := OpenAPIDocument()
 	remoteImage := doc.Paths[remoteImagePath]
@@ -758,7 +921,12 @@ func TestReadOnlyPostRoutePatternsMatchExplorationRoutes(t *testing.T) {
 	require.NotNil(completion, "participant completion route must exist")
 	require.NotNil(completion.Post, "participant completion must be registered as POST")
 
-	expected := []string{remoteImagePath, cardDAVAccountTestPath, completionPath}
+	messageTagsPath := "/api/v1/messages/{id}/tags"
+	messageTags := doc.Paths[messageTagsPath]
+	require.NotNil(messageTags, "message tags route must exist")
+	require.NotNil(messageTags.Post, "message tags must be registered as POST")
+
+	expected := []string{remoteImagePath, cardDAVAccountTestPath, completionPath, kataEvidencePreparePath, "/api/v1/saved-views/{id}/run", messageTagsPath}
 	for path, item := range doc.Paths {
 		if item.Post != nil && slices.Contains(item.Post.Tags, "Exploration") {
 			expected = append(expected, path)
@@ -769,7 +937,7 @@ func TestReadOnlyPostRoutePatternsMatchExplorationRoutes(t *testing.T) {
 	slices.Sort(table)
 	assert.Equal(t, expected, table,
 		"readOnlyPostRoutePatterns must match the POST routes tagged Exploration plus the "+
-			"pinned read-only POST routes; classify new analytical routes consciously in "+
+			"pinned POST routes that bypass the middleware gate; classify new analytical routes consciously in "+
 			"operation_gate.go")
 }
 
@@ -870,7 +1038,7 @@ func (s *gateFilesStore) GetFileMetadataBatch(context.Context, []int64) (map[int
 // long operation holds the gate, representative analytical endpoints must
 // answer immediately instead of returning operation_in_progress, and a
 // mutating POST must still be turned away naming the holder.
-func TestServerReadOnlyAnalyticalPostsBypassHeldOperationGate(t *testing.T) {
+func TestServerReadOnlyAnalyticalPostsBypassHeldOperationGate(t *testing.T) { //nolint:paralleltest // swaps the package-level operationGateWaitLimit
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -883,12 +1051,15 @@ func TestServerReadOnlyAnalyticalPostsBypassHeldOperationGate(t *testing.T) {
 	require.True(ok, "occupy gate")
 	defer release()
 
+	st := testutil.NewSQLiteTestStore(t)
+	view := createRunTestView(t, st, "Everything", `{}`)
 	srv := NewServerWithOptions(ServerOptions{
-		Config:        &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-		Store:         &gateFilesStore{mockStore: &mockStore{}},
-		Engine:        &gateAnalyticsEngine{MockEngine: &querytest.MockEngine{}},
-		Logger:        testLogger(),
-		OperationGate: gate,
+		Config:         &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+		Store:          &gateFilesStore{mockStore: &mockStore{}},
+		Engine:         &gateAnalyticsEngine{MockEngine: &querytest.MockEngine{}},
+		Logger:         testLogger(),
+		OperationGate:  gate,
+		SavedViewStore: st,
 	})
 
 	readOnly := []string{
@@ -906,6 +1077,10 @@ func TestServerReadOnlyAnalyticalPostsBypassHeldOperationGate(t *testing.T) {
 		assert.Equal(http.StatusOK, resp.Code, "%s must succeed while the gate is held: %s", path, resp.Body.String())
 	}
 
+	run, page := runSavedView(t, srv, view.ID, `{}`)
+	assert.Equal(http.StatusOK, run.Code, run.Body.String())
+	assert.Equal(view.ID, page.SavedView.ID)
+
 	mutating := httptest.NewRequest(http.MethodPost, "/api/v1/deletions", strings.NewReader(`{}`))
 	mutating.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
@@ -918,6 +1093,7 @@ func TestServerReadOnlyAnalyticalPostsBypassHeldOperationGate(t *testing.T) {
 }
 
 func TestServerParticipantInboxesBypassesHeldOperationGate(t *testing.T) {
+	t.Parallel()
 	gate := NewSerialOperationGate()
 	release, ok := gate.BeginLabeledWorkContext(context.Background(), "msgvault embeddings build")
 	require.True(t, ok, "occupy gate")
@@ -937,7 +1113,7 @@ func TestServerParticipantInboxesBypassesHeldOperationGate(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
 }
 
-func TestOperationGateMiddlewareNamesHolderWhenBusy(t *testing.T) {
+func TestOperationGateMiddlewareNamesHolderWhenBusy(t *testing.T) { //nolint:paralleltest // swaps the package-level operationGateWaitLimit
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -965,6 +1141,7 @@ func TestOperationGateMiddlewareNamesHolderWhenBusy(t *testing.T) {
 }
 
 func TestOperationGateMiddlewareReportsShutdownWhenDraining(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -985,6 +1162,7 @@ func TestOperationGateMiddlewareReportsShutdownWhenDraining(t *testing.T) {
 }
 
 func TestSerialOperationGateHolderTracksLabel(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1005,131 +1183,157 @@ func TestSerialOperationGateHolderTracksLabel(t *testing.T) {
 }
 
 func TestSerialOperationGateCountsRequestWaiters(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 
-	gate := NewSerialOperationGate()
-	release, ok := gate.BeginLabeledWorkContext(context.Background(), "a scheduled sync")
-	require.True(ok, "occupy gate")
-	assert.False(gate.HasRequestWaiters(), "no waiters yet")
+		gate := NewSerialOperationGate()
+		release, ok := gate.BeginLabeledWorkContext(context.Background(), "a scheduled sync")
+		require.True(ok, "occupy gate")
+		defer release()
+		assert.False(gate.HasRequestWaiters(), "no waiters yet")
 
-	acquired := make(chan bool, 1)
-	go func() {
-		waiterRelease, waiterOK := gate.BeginRequestWorkContext(context.Background(), "msgvault sync")
-		if waiterOK {
-			waiterRelease()
-		}
-		acquired <- waiterOK
-	}()
+		acquired := make(chan bool, 1)
+		go func() {
+			waiterRelease, waiterOK := gate.BeginRequestWorkContext(context.Background(), "msgvault sync")
+			if waiterOK {
+				waiterRelease()
+			}
+			acquired <- waiterOK
+		}()
 
-	require.Eventually(gate.HasRequestWaiters, time.Second, time.Millisecond,
-		"queued request counts as waiter")
+		synctest.Wait()
+		assert.True(gate.HasRequestWaiters(), "queued request counts as waiter")
 
-	release()
-	select {
-	case waiterOK := <-acquired:
-		assert.True(waiterOK, "waiter acquires after release")
-	case <-time.After(time.Second):
-		require.FailNow("waiter did not acquire gate")
-	}
-	assert.False(gate.HasRequestWaiters(), "waiter count returns to zero")
+		release()
+		synctest.Wait()
+		assert.True(<-acquired, "waiter acquires after release")
+		assert.False(gate.HasRequestWaiters(), "waiter count returns to zero")
+	})
 }
 
 func TestSerialOperationGatePrioritizesQueuedRequestOverBackgroundWork(t *testing.T) {
-	require := require.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
 
-	gate := NewSerialOperationGate()
-	releaseActive, ok := gate.BeginLabeledWorkContext(context.Background(), "first scheduled sync")
-	require.True(ok, "occupy gate")
-	t.Cleanup(releaseActive)
+		gate := NewSerialOperationGate()
+		releaseActive, ok := gate.BeginLabeledWorkContext(context.Background(), "first scheduled sync")
+		require.True(ok, "occupy gate")
+		defer releaseActive()
 
-	type acquisition struct {
-		release func()
-		ok      bool
-	}
-	requestAcquired := make(chan acquisition, 1)
-	go func() {
-		release, acquired := gate.BeginRequestWorkContext(context.Background(), "meeting import")
-		requestAcquired <- acquisition{release: release, ok: acquired}
-	}()
-	require.Eventually(gate.HasRequestWaiters, time.Second, time.Millisecond,
-		"request must register before the next background admission")
-
-	backgroundAcquired := make(chan acquisition, 1)
-	go func() {
-		release, acquired := gate.BeginLabeledWorkContext(context.Background(), "manual sync")
-		backgroundAcquired <- acquisition{release: release, ok: acquired}
-	}()
-
-	select {
-	case result := <-backgroundAcquired:
-		if result.ok {
-			result.release()
+		type acquisition struct {
+			release func()
+			ok      bool
 		}
-		require.FailNow("background work returned while the gate was held", "ok=%v", result.ok)
-	case <-time.After(25 * time.Millisecond):
-	}
+		requestAcquired := make(chan acquisition, 1)
+		backgroundAcquired := make(chan acquisition, 1)
+		var request acquisition
+		var background acquisition
+		defer func() {
+			releaseActive()
+			synctest.Wait()
+			if request.release == nil {
+				select {
+				case request = <-requestAcquired:
+				default:
+				}
+			}
+			if request.release != nil {
+				request.release()
+			}
+			synctest.Wait()
+			if background.release == nil {
+				select {
+				case background = <-backgroundAcquired:
+				default:
+				}
+			}
+			if background.release != nil {
+				background.release()
+			}
+			synctest.Wait()
+		}()
+		go func() {
+			release, acquired := gate.BeginRequestWorkContext(context.Background(), "meeting import")
+			requestAcquired <- acquisition{release: release, ok: acquired}
+		}()
+		synctest.Wait()
+		require.True(gate.HasRequestWaiters(),
+			"request must register before the next background admission")
 
-	releaseActive()
-	var request acquisition
-	select {
-	case request = <-requestAcquired:
+		go func() {
+			release, acquired := gate.BeginLabeledWorkContext(context.Background(), "manual sync")
+			backgroundAcquired <- acquisition{release: release, ok: acquired}
+		}()
+		synctest.Wait()
+		select {
+		case result := <-backgroundAcquired:
+			if result.ok {
+				result.release()
+			}
+			require.FailNow("background work returned while the gate was held", "ok=%v", result.ok)
+		default:
+		}
+
+		releaseActive()
+		synctest.Wait()
+		request = <-requestAcquired
 		require.True(request.ok, "queued request must acquire after active work releases")
-	case <-time.After(time.Second):
-		require.FailNow("queued request did not acquire after active work released")
-	}
-	select {
-	case result := <-backgroundAcquired:
-		if result.ok {
-			result.release()
+		synctest.Wait()
+		select {
+		case result := <-backgroundAcquired:
+			if result.ok {
+				result.release()
+			}
+			require.FailNow("background work acquired before the request released", "ok=%v", result.ok)
+		default:
 		}
-		require.FailNow("background work acquired before the request released", "ok=%v", result.ok)
-	case <-time.After(25 * time.Millisecond):
-	}
 
-	request.release()
-	select {
-	case background := <-backgroundAcquired:
+		request.release()
+		synctest.Wait()
+		background = <-backgroundAcquired
 		require.True(background.ok, "background work waits and then acquires")
 		background.release()
-	case <-time.After(time.Second):
-		require.FailNow("background work did not acquire after the request released")
-	}
-	require.False(gate.HasRequestWaiters(), "request waiter drains")
+		require.False(gate.HasRequestWaiters(), "request waiter drains")
+	})
 }
 
 func TestBeginLabeledOperationGateWorkCountsAsRequestWaiter(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		require := require.New(t)
+		assert := assert.New(t)
 
-	gate := NewSerialOperationGate()
-	srv := &Server{operationGate: gate}
+		gate := NewSerialOperationGate()
+		srv := &Server{operationGate: gate}
 
-	holderRelease, ok := gate.BeginLabeledWorkContext(context.Background(), "a scheduled sync")
-	require.True(ok, "occupy gate")
+		holderRelease, ok := gate.BeginLabeledWorkContext(context.Background(), "a scheduled sync")
+		require.True(ok, "occupy gate")
+		defer holderRelease()
 
-	acquired := make(chan bool, 1)
-	go func() {
-		release, workOK := srv.beginLabeledOperationGateWork(context.Background(), "a search index build")
-		if workOK {
-			release()
-		}
-		acquired <- workOK
-	}()
+		acquired := make(chan bool, 1)
+		go func() {
+			release, workOK := srv.beginLabeledOperationGateWork(context.Background(), "a search index build")
+			if workOK {
+				release()
+			}
+			acquired <- workOK
+		}()
 
-	require.Eventually(gate.HasRequestWaiters, time.Second, time.Millisecond,
-		"in-handler gate work must count as a request waiter so scheduled jobs yield")
+		synctest.Wait()
+		assert.True(gate.HasRequestWaiters(),
+			"in-handler gate work must count as a request waiter so scheduled jobs yield")
 
-	holderRelease()
-	select {
-	case workOK := <-acquired:
-		assert.True(workOK, "handler work acquires after release")
-	case <-time.After(time.Second):
-		require.FailNow("handler work did not acquire gate")
-	}
+		holderRelease()
+		synctest.Wait()
+		assert.True(<-acquired, "handler work acquires after release")
+	})
 }
 
 func TestCLIRunEnvAllowedPermitsConfiguredAPIKeyEnv(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	srv := &Server{cfg: &config.Config{}}
 	srv.cfg.Vector.Embeddings.APIKeyEnv = "MSGVAULT_EMBED_API_KEY"
@@ -1174,6 +1378,7 @@ func newOperationHealthTestServer(gate OperationGate) *Server {
 }
 
 func TestHealthReportsActiveOperation(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	gate := NewSerialOperationGate()
@@ -1197,6 +1402,7 @@ func TestHealthReportsActiveOperation(t *testing.T) {
 }
 
 func TestAuthenticatedHealthReportsActiveOperationDetails(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	gate := NewSerialOperationGate()
@@ -1225,6 +1431,7 @@ func TestAuthenticatedHealthReportsActiveOperationDetails(t *testing.T) {
 }
 
 func TestHealthLabelsUnlabeledGateHolder(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	gate := NewSerialOperationGate()
 	srv := newOperationHealthTestServer(gate)
@@ -1241,6 +1448,7 @@ func TestHealthLabelsUnlabeledGateHolder(t *testing.T) {
 }
 
 func TestHealthOmitsOperationWhenGateIdle(t *testing.T) {
+	t.Parallel()
 	srv := newOperationHealthTestServer(NewSerialOperationGate())
 
 	body := healthResponseForServer(t, srv)
@@ -1251,6 +1459,7 @@ func TestHealthOmitsOperationWhenGateIdle(t *testing.T) {
 // activity (which can carry live progress) wins over the gate holder's static
 // label, and that health falls back to the gate label once the activity ends.
 func TestOperationHealthPrefersActivityOverGateLabel(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	gate := NewSerialOperationGate()
@@ -1278,6 +1487,7 @@ func TestOperationHealthPrefersActivityOverGateLabel(t *testing.T) {
 // share one label (first begin wins, last end clears) and that calling an end
 // func twice does not clear a newer activity.
 func TestBeginActivityNestingAndIdempotentEnd(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	srv := newOperationHealthTestServer(nil)
 

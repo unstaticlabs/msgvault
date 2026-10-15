@@ -1,6 +1,8 @@
 package store
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"database/sql"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/sqliteutil"
 	"go.kenn.io/msgvault/internal/vcard"
 )
 
@@ -1124,7 +1127,7 @@ func createTestSourceDB(t *testing.T, dir string, msgCount int) string {
 	require.NoError(st.InitSchema(), "InitSchema")
 	_ = st.Close()
 
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), dbPath+"?_foreign_keys=OFF")
 	require.NoError(err, "open db")
 	defer func() { _ = db.Close() }()
 
@@ -1270,7 +1273,7 @@ func TestCopySubset_Basic(t *testing.T) {
 
 	assert.Equal(int64(5), result.Messages, "Messages")
 
-	db, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	db, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = db.Close() }()
 
@@ -1319,7 +1322,7 @@ func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := filepath.Join(t.TempDir(), "dst")
 	srcDB := createTestSourceDB(t, srcDir, 1)
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=ON")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=ON")
 	require.NoError(err)
 	fingerprint := strings.Repeat("a", 64)
 	_, err = db.Exec(`
@@ -1346,9 +1349,9 @@ func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
 		VALUES (?, 'openai_compatible', 'https://api.example.test/v1',
 		        'gpt-test', 'TEST_KEY', 'zero_retention', 'no_training',
 		        '["conversation_text"]', '2025-01-01', '{}');
-		INSERT INTO person_inference_consents
-			(profile_fingerprint, granted_by)
-		VALUES (?, 'cli');
+		INSERT INTO provider_consents
+			(purpose, id, fingerprint, granted_by)
+		VALUES ('people_inference', 1, ?, 'cli');
 		INSERT INTO person_semantic_embedding_profiles
 			(fingerprint, purpose, destination, api_format, model, api_key_env,
 			 retention_posture, training_posture, renderer_policy,
@@ -1357,9 +1360,9 @@ func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
 		        'openai', 'synthetic-model', 'TEST_KEY', 'zero_data_retention',
 		        'no_training', 'person-semantic-v1', '["person_display_name"]',
 		        'all_durable_people', '{}');
-		INSERT INTO person_semantic_embedding_consents
-			(profile_fingerprint, granted_by)
-		VALUES (?, 'cli')`,
+		INSERT INTO provider_consents
+			(purpose, id, fingerprint, granted_by)
+		VALUES ('person_semantic_embedding', 1, ?, 'cli')`,
 		fingerprint, fingerprint, strings.Repeat("b", 64), strings.Repeat("c", 64), strings.Repeat("d", 64),
 		strings.Repeat("e", 64), strings.Repeat("e", 64),
 		strings.Repeat("f", 64), strings.Repeat("f", 64),
@@ -1369,7 +1372,7 @@ func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
 
 	_, err = CopySubset(srcDB, dstDir, 1, false)
 	require.NoError(err)
-	destination, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	destination, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = destination.Close() }()
 	for _, table := range []string{
@@ -1377,8 +1380,7 @@ func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
 		"document_extraction_rebuilds", "document_extraction_rebuild_targets",
 		"document_extraction_heads", "document_units", "document_chunks", "document_chunk_spans",
 		"document_occurrences", "document_extraction_claims",
-		"person_inference_profiles", "person_inference_consents",
-		"person_semantic_embedding_profiles", "person_semantic_embedding_consents",
+		"person_inference_profiles", "person_semantic_embedding_profiles", "provider_consents",
 	} {
 		var count int
 		require.NoError(destination.QueryRow(`SELECT COUNT(*) FROM `+table).Scan(&count), table)
@@ -1410,8 +1412,8 @@ func TestCopySubsetExcludesPersonEnrichmentSuppressionAndOperations(t *testing.T
 			 endpoint, api_key_env, policy_json)
 		 VALUES (?, 'subset-provider', 'exa', 'https://provider.example.test',
 			 'https://provider.example.test/search', 'SUBSET_PROVIDER_KEY', '{}')`, []any{fingerprint}},
-		{`INSERT INTO person_enrichment_consents
-			(profile_fingerprint, granted_by) VALUES (?, 'subset-test')`, []any{fingerprint}},
+		{`INSERT INTO provider_consents
+			(purpose, id, fingerprint, granted_by) VALUES ('person_enrichment', 1, ?, 'subset-test')`, []any{fingerprint}},
 		{`INSERT INTO person_enrichment_suppressions
 			(provider_namespace, identifier_class, normalization_version, key_id,
 			 digest, reason, actor)
@@ -1485,7 +1487,7 @@ func TestCopySubsetExcludesPersonEnrichmentSuppressionAndOperations(t *testing.T
 
 	tables := []string{
 		"person_enrichment_profiles",
-		"person_enrichment_consents",
+		"provider_consents",
 		"person_enrichment_suppressions",
 		"person_enrichment_runs",
 		"person_enrichment_manual_run_targets",
@@ -1501,7 +1503,7 @@ func TestCopySubsetExcludesPersonEnrichmentSuppressionAndOperations(t *testing.T
 		"person_enrichment_day_counters",
 		"person_enrichment_profile_accounting",
 	}
-	sourceDB, err := sql.Open("sqlite3", srcDB)
+	sourceDB, err := sql.Open(sqliteutil.DriverName(), srcDB)
 	require.NoError(err)
 	for _, table := range tables {
 		var count int
@@ -1515,7 +1517,7 @@ func TestCopySubsetExcludesPersonEnrichmentSuppressionAndOperations(t *testing.T
 		IncludeProfiles: true, IncludeAttributes: true,
 	})
 	require.NoError(err)
-	destination, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	destination, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { require.NoError(destination.Close()) }()
 	for _, table := range tables {
@@ -1534,16 +1536,17 @@ func TestCopySubset_UpgradedMessageColumnOrder(t *testing.T) {
 
 	st, err := Open(srcDB)
 	require.NoError(err, "open source for upgrade")
-	// A pre-attribution archive also predates the activity queue trigger, which
-	// names source_is_from_me and would otherwise block the DROP COLUMN; the
-	// upgrade below reinstalls it through its own migration.
+	// A pre-attribution archive predates both triggers that name source_is_from_me.
+	// The upgrade below reinstalls them through their migrations.
 	_, err = st.DB().Exec(`
 		DROP TRIGGER trg_activity_queue_messages_update;
+		DROP TRIGGER trg_cache_message_facts_update;
 		ALTER TABLE messages DROP COLUMN identity_is_from_me;
 		ALTER TABLE messages DROP COLUMN source_is_from_me;
 		DELETE FROM applied_migrations
 		WHERE name IN ('message_attribution_provenance_v3',
-		               'activity_projection_triggers_v4');
+		               'activity_projection_triggers_v4',
+		               'cache_message_source_attribution');
 	`)
 	require.NoError(err, "simulate pre-attribution schema")
 	require.NoError(st.InitSchema(), "upgrade source schema")
@@ -1563,7 +1566,7 @@ func TestCopySubset_UpgradedMessageColumnOrder(t *testing.T) {
 	require.NoError(err, "CopySubset from upgraded schema")
 	assert.Equal(int64(1), result.Messages)
 
-	db, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	db, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open copied database")
 	defer func() { _ = db.Close() }()
 
@@ -1602,7 +1605,7 @@ func TestCopySubset_UpgradedAttachmentColumnOrder(t *testing.T) {
 	srcDB := createTestSourceDB(t, t.TempDir(), 1)
 	dstDir := filepath.Join(t.TempDir(), "dst")
 
-	legacy, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	legacy, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = legacy.Exec(`
 		DROP TRIGGER IF EXISTS trg_attachment_message_live_change;
@@ -1651,7 +1654,7 @@ func TestCopySubset_UpgradedAttachmentColumnOrder(t *testing.T) {
 	require.NoError(err, "copy subset from upgraded attachment schema")
 	assert.Equal(int64(1), result.Messages)
 
-	destination, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	destination, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = destination.Close() }()
 	var (
@@ -1760,7 +1763,7 @@ func TestCopySubset_LegacyParticipantIdentifiersCopyByColumnName(t *testing.T) {
 	assert := assert.New(t)
 	srcDB := createTestSourceDB(t, t.TempDir(), 1)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = db.Exec(`
 		DROP INDEX IF EXISTS idx_participant_identifiers_service_scope;
@@ -1789,7 +1792,7 @@ func TestCopySubset_LegacyParticipantIdentifiersCopyByColumnName(t *testing.T) {
 	dstDir := filepath.Join(t.TempDir(), "dst")
 	_, err = CopySubset(srcDB, dstDir, 1, false)
 	require.NoError(err, "copy legacy participant identifiers")
-	destination, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	destination, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	t.Cleanup(func() { _ = destination.Close() })
 
@@ -2485,7 +2488,7 @@ func TestCopySubsetResolvesCombinedRawSeedIdentityCollision(t *testing.T) {
 func TestCopySubset_AttributesDefaultLegacySensitivityToFalse(t *testing.T) {
 	require := require.New(t)
 	srcDB := createTestSourceDB(t, t.TempDir(), 3)
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = db.Exec(`ALTER TABLE attribute_definitions DROP COLUMN is_sensitive`)
 	require.NoError(err)
@@ -2640,7 +2643,7 @@ func TestCopySubset_DefaultExcludesOffMessageIdentities(t *testing.T) {
 	dstDir := filepath.Join(t.TempDir(), "dst")
 	_, err = CopySubset(srcDB, dstDir, 5, false)
 	require.NoError(err)
-	db, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	db, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	t.Cleanup(func() { _ = db.Close() })
 
@@ -2698,7 +2701,7 @@ func TestCopySubset_FTSPopulated(t *testing.T) {
 	_, err := CopySubset(srcDB, dstDir, 5, false)
 	require.NoError(t, err, "CopySubset")
 
-	db, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	db, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 
@@ -2720,7 +2723,7 @@ func TestCopySubset_ConversationCounts(t *testing.T) {
 	_, err := CopySubset(srcDB, dstDir, 5, false)
 	require.NoError(err, "CopySubset")
 
-	db, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	db, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = db.Close() }()
 
@@ -2809,7 +2812,7 @@ func TestCopySubset_TimestampFallback(t *testing.T) {
 	require.NoError(st.InitSchema(), "InitSchema")
 	_ = st.Close()
 
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), dbPath+"?_foreign_keys=OFF")
 	require.NoError(err)
 
 	_, err = db.Exec(`
@@ -2869,7 +2872,7 @@ func TestCopySubset_TimestampFallback(t *testing.T) {
 	require.NoError(err, "CopySubset")
 	assert.Equal(int64(2), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -2910,7 +2913,7 @@ func TestCopySubset_TieBreaker(t *testing.T) {
 	require.NoError(st.InitSchema(), "InitSchema")
 	_ = st.Close()
 
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), dbPath+"?_foreign_keys=OFF")
 	require.NoError(err)
 
 	_, err = db.Exec(`
@@ -2952,7 +2955,7 @@ func TestCopySubset_TieBreaker(t *testing.T) {
 	require.NoError(err, "CopySubset")
 	assert.Equal(int64(2), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -2984,7 +2987,7 @@ func TestCopySubset_ReplyToOrphanNulled(t *testing.T) {
 	require.NoError(st.InitSchema(), "InitSchema")
 	_ = st.Close()
 
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), dbPath+"?_foreign_keys=OFF")
 	require.NoError(err)
 
 	_, err = db.Exec(`
@@ -3035,7 +3038,7 @@ func TestCopySubset_ReplyToOrphanNulled(t *testing.T) {
 	require.NoError(err, "CopySubset")
 	assert.Equal(int64(1), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -3068,7 +3071,7 @@ func TestCopySubset_ExcludesSoftDeleted(t *testing.T) {
 	srcDB := createTestSourceDB(t, srcDir, 10)
 
 	// Soft-delete the 5 most recent messages
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = db.Exec(`
 		UPDATE messages SET deleted_from_source_at = '2025-01-01'
@@ -3083,7 +3086,7 @@ func TestCopySubset_ExcludesSoftDeleted(t *testing.T) {
 	require.NoError(err, "CopySubset")
 	assert.Equal(int64(5), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -3106,7 +3109,7 @@ func TestCopySubset_ReactionParticipants(t *testing.T) {
 	srcDB := createTestSourceDB(t, srcDir, 5)
 
 	// Add a reactor participant who is neither sender nor recipient
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = db.Exec(`
 		INSERT INTO participants
@@ -3119,13 +3122,20 @@ func TestCopySubset_ReactionParticipants(t *testing.T) {
 			 reaction_type, reaction_value)
 		VALUES (1, 1, 100, 'emoji', 'thumbsup')`)
 	require.NoError(err, "insert reaction")
+	_, err = db.Exec(`
+		INSERT INTO reaction_source_events (source_id, source_reaction_id, reaction_id)
+		SELECT source_id, '$reaction', 1 FROM messages WHERE id = 1`)
+	require.NoError(err, "insert reaction source event")
+	_, err = db.Exec(`UPDATE sources SET source_type = 'matrix', sync_cursor = '{"rooms":{"!private":{"deferred_relations":["secret"]}}}'
+		WHERE id = (SELECT source_id FROM messages WHERE id = 1)`)
+	require.NoError(err, "seed Matrix cursor")
 	_ = db.Close()
 
 	result, err := CopySubset(srcDB, dstDir, 5, false)
 	require.NoError(err, "CopySubset")
 	assert.Equal(int64(5), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -3143,6 +3153,14 @@ func TestCopySubset_ReactionParticipants(t *testing.T) {
 	require.NoError(dstDB.QueryRow(
 		"SELECT COUNT(*) FROM reactions",
 	).Scan(&rxnCount))
+	var sourceEventCount int64
+	require.NoError(dstDB.QueryRow(
+		"SELECT COUNT(*) FROM reaction_source_events WHERE source_reaction_id = '$reaction'",
+	).Scan(&sourceEventCount))
+	assert.Equal(int64(1), sourceEventCount, "reaction source events")
+	var cursor sql.NullString
+	require.NoError(dstDB.QueryRow("SELECT sync_cursor FROM sources WHERE source_type = 'matrix'").Scan(&cursor))
+	assert.False(cursor.Valid, "Matrix cursors stay out of subsets")
 	assert.Equal(int64(1), rxnCount, "reactions count")
 
 	// FK integrity
@@ -3166,7 +3184,7 @@ func TestCopySubset_NullSourceIDLabels(t *testing.T) {
 
 	// Add a user-created label with NULL source_id and attach it
 	// to message 1.
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = db.Exec(`
 		INSERT INTO labels (id, source_id, name, label_type)
@@ -3184,7 +3202,7 @@ func TestCopySubset_NullSourceIDLabels(t *testing.T) {
 	// The 3 source-scoped labels + 1 user-created label
 	assert.Equal(int64(4), result.Labels, "Labels")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -3224,7 +3242,7 @@ func TestCopySubset_SourceFKViolationIgnored(t *testing.T) {
 
 	// Inject an FK violation in the source: a message_labels row
 	// referencing a non-existent label_id.
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	_, err = db.Exec(`
 		INSERT INTO message_labels (message_id, label_id)
@@ -3269,7 +3287,7 @@ func TestCopySubset_MultiSourceScoping(t *testing.T) {
 	require.NoError(st.InitSchema(), "InitSchema")
 	_ = st.Close()
 
-	db, err := sql.Open("sqlite3", dbPath+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), dbPath+"?_foreign_keys=OFF")
 	require.NoError(err, "open db")
 
 	// Two sources: only source 1 will have recent messages
@@ -3352,7 +3370,7 @@ func TestCopySubset_MultiSourceScoping(t *testing.T) {
 	assert.Equal(int64(1), result.Sources, "Sources (only Alice's)")
 	assert.Equal(int64(3), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -3403,7 +3421,7 @@ func TestCopySubset_LegacySourceWithoutOAuthApp(t *testing.T) {
 	// a pre-oauth_app database.
 	srcDB := createTestSourceDB(t, srcDir, 3)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err)
 	// SQLite doesn't support DROP COLUMN before 3.35. Rebuild the
 	// table without oauth_app to simulate an old schema.
@@ -3425,7 +3443,7 @@ func TestCopySubset_LegacySourceWithoutOAuthApp(t *testing.T) {
 	assert.Equal(int64(3), result.Messages, "Messages")
 
 	// Verify oauth_app is NULL in the destination
-	dstDB, err := sql.Open("sqlite3",
+	dstDB, err := sql.Open(sqliteutil.DriverName(),
 		filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err)
 	defer func() { _ = dstDB.Close() }()
@@ -3471,10 +3489,8 @@ func TestCopySubset_ControlCharInPath(t *testing.T) {
 // update messages, which resolves to main.messages, so the rename back — ALTER
 // TABLE ... RENAME TO messages — fails its schema reparse with "error in
 // trigger trg_message_bodies_last_modified_upd: no such table: main.messages".
-// Neither attribution column is indexed, and the only trigger naming one
-// (trg_activity_queue_messages_update, on source_is_from_me) postdates such
-// archives, so it is dropped first and ALTER TABLE ... DROP COLUMN works
-// directly.
+// Neither attribution column is indexed. The activity and cache triggers that
+// name source_is_from_me postdate such archives, so drop them before the column.
 func TestCopySubset_LegacySourceMissingAttributionColumns(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -3483,11 +3499,12 @@ func TestCopySubset_LegacySourceMissingAttributionColumns(t *testing.T) {
 
 	srcDB := createTestSourceDB(t, srcDir, 3)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source db")
 
-	_, err = db.Exec(`DROP TRIGGER trg_activity_queue_messages_update`)
-	require.NoError(err, "drop the activity trigger that names source_is_from_me")
+	_, err = db.Exec(`DROP TRIGGER trg_activity_queue_messages_update;
+		DROP TRIGGER trg_cache_message_facts_update`)
+	require.NoError(err, "drop triggers that name source_is_from_me")
 
 	for _, col := range []string{"source_is_from_me", "identity_is_from_me"} {
 		_, err = db.Exec(
@@ -3506,7 +3523,7 @@ func TestCopySubset_LegacySourceMissingAttributionColumns(t *testing.T) {
 	require.NoError(err, "CopySubset from a source missing attribution columns")
 	assert.Equal(int64(srcCount), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination db")
 	defer func() { _ = dstDB.Close() }()
 
@@ -3546,7 +3563,7 @@ func TestCopySubset_SourceOnlyColumnWithQuoteInName(t *testing.T) {
 
 	srcDB := createTestSourceDB(t, srcDir, 3)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source db")
 	_, err = db.Exec(`ALTER TABLE messages ADD COLUMN "we""ird" TEXT`)
 	require.NoError(err, `add messages."we""ird"`)
@@ -3556,7 +3573,7 @@ func TestCopySubset_SourceOnlyColumnWithQuoteInName(t *testing.T) {
 	require.NoError(err, "CopySubset from a source with a quoted column name")
 	assert.Equal(int64(3), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination db")
 	defer func() { _ = dstDB.Close() }()
 
@@ -3586,20 +3603,20 @@ func TestCopySubset_CommonColumnWithQuoteIsEscapedAndCopied(t *testing.T) {
 	quoted := `"` + strings.ReplaceAll(hostile, `"`, `""`) + `"`
 
 	for _, path := range []string{srcPath, dstPath} {
-		db, err := sql.Open("sqlite3", path)
+		db, err := sql.Open(sqliteutil.DriverName(), path)
 		require.NoError(err, "open %s", path)
 		_, err = db.Exec(`CREATE TABLE t (id INTEGER, ` + quoted + ` TEXT)`)
 		require.NoError(err, "create t in %s", path)
 		require.NoError(db.Close(), "close %s", path)
 	}
 
-	srcDB, err := sql.Open("sqlite3", srcPath)
+	srcDB, err := sql.Open(sqliteutil.DriverName(), srcPath)
 	require.NoError(err, "open source db")
 	_, err = srcDB.Exec(`INSERT INTO t (id, ` + quoted + `) VALUES (1, 'carried')`)
 	require.NoError(err, "seed source row")
 	require.NoError(srcDB.Close(), "close source db")
 
-	db, err := sql.Open("sqlite3", dstPath)
+	db, err := sql.Open(sqliteutil.DriverName(), dstPath)
 	require.NoError(err, "open destination db")
 	defer func() { _ = db.Close() }()
 	_, err = db.Exec(fmt.Sprintf("ATTACH DATABASE '%s' AS src", srcPath))
@@ -3644,7 +3661,7 @@ func TestCopySubset_SourceColumnCaseDiffers(t *testing.T) {
 
 	srcDB := createTestSourceDB(t, srcDir, 3)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source db")
 	_, err = db.Exec(`ALTER TABLE messages DROP COLUMN identity_is_from_me`)
 	require.NoError(err, "drop messages.identity_is_from_me")
@@ -3658,7 +3675,7 @@ func TestCopySubset_SourceColumnCaseDiffers(t *testing.T) {
 	require.NoError(err, "CopySubset from a source whose column case differs")
 	assert.Equal(int64(3), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination db")
 	defer func() { _ = dstDB.Close() }()
 
@@ -3695,7 +3712,7 @@ func TestCopySubset_SourceOnlyColumnUnicodeLookalike(t *testing.T) {
 
 	srcDB := createTestSourceDB(t, srcDir, 3)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source db")
 	_, err = db.Exec(`ALTER TABLE messages DROP COLUMN identity_is_from_me`)
 	require.NoError(err, "drop messages.identity_is_from_me")
@@ -3709,7 +3726,7 @@ func TestCopySubset_SourceOnlyColumnUnicodeLookalike(t *testing.T) {
 	require.NoError(err, "CopySubset from a source with a Unicode-lookalike column")
 	assert.Equal(int64(3), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination db")
 	defer func() { _ = dstDB.Close() }()
 
@@ -3752,7 +3769,7 @@ func TestCopySubset_NullWatermarkIsRestamped(t *testing.T) {
 	dstDir := filepath.Join(t.TempDir(), "dst")
 
 	srcPath := createTestSourceDB(t, srcDir, 4)
-	srcDB, err := sql.Open("sqlite3", srcPath+"?_foreign_keys=OFF")
+	srcDB, err := sql.Open(sqliteutil.DriverName(), srcPath+"?_foreign_keys=OFF")
 	require.NoError(err, "open source")
 	_, err = srcDB.Exec(`
 		INSERT INTO messages
@@ -3772,7 +3789,7 @@ func TestCopySubset_NullWatermarkIsRestamped(t *testing.T) {
 	_, err = CopySubset(srcPath, dstDir, 100, false)
 	require.NoError(err, "CopySubset")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination")
 	defer func() { _ = dstDB.Close() }()
 
@@ -3829,7 +3846,7 @@ func TestCopySubset_LegacySourceWithoutContentChangedAt(t *testing.T) {
 	dstDir := filepath.Join(t.TempDir(), "dst")
 
 	srcPath := createTestSourceDB(t, srcDir, 3)
-	srcDB, err := sql.Open("sqlite3", srcPath+"?_foreign_keys=OFF")
+	srcDB, err := sql.Open(sqliteutil.DriverName(), srcPath+"?_foreign_keys=OFF")
 	require.NoError(err, "open source")
 
 	// Remove every schema object that references the column, then the column
@@ -3860,7 +3877,7 @@ func TestCopySubset_LegacySourceWithoutContentChangedAt(t *testing.T) {
 	require.NoError(err, "CopySubset from a source without content_changed_at")
 	assert.Equal(int64(3), result.Messages, "Messages")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination")
 	defer func() { _ = dstDB.Close() }()
 
@@ -3927,7 +3944,7 @@ func TestCopySubset_BodyTriggersRestampWatermarks(t *testing.T) {
 	)
 
 	srcPath := createTestSourceDB(t, srcDir, messagesWithBodyLast)
-	srcDB, err := sql.Open("sqlite3", srcPath+"?_foreign_keys=OFF")
+	srcDB, err := sql.Open(sqliteutil.DriverName(), srcPath+"?_foreign_keys=OFF")
 	require.NoError(err, "open source")
 
 	// createTestSourceDB gives every message a body. Add one without, because
@@ -3949,7 +3966,7 @@ func TestCopySubset_BodyTriggersRestampWatermarks(t *testing.T) {
 	_, err = CopySubset(srcPath, dstDir, 100, false)
 	require.NoError(err, "CopySubset")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination")
 	defer func() { _ = dstDB.Close() }()
 
@@ -4019,7 +4036,7 @@ func TestCopySubset_UpgradedAuxiliaryColumnOrder(t *testing.T) {
 	dstDir := filepath.Join(t.TempDir(), "dst")
 	srcDB := createTestSourceDB(t, srcDir, 2)
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source db")
 	// This fixture starts from today's schema and reverses column migrations to
 	// reproduce an upgraded archive's physical order. Real upgrades add these
@@ -4041,6 +4058,9 @@ func TestCopySubset_UpgradedAuxiliaryColumnOrder(t *testing.T) {
 		`DROP INDEX IF EXISTS idx_participants_phone`,
 		`DROP INDEX IF EXISTS idx_participants_canonical`,
 		`DROP TRIGGER IF EXISTS trg_embedding_changes_participant_display_name`,
+		`DROP TRIGGER IF EXISTS participants_metadata_fts_insert`,
+		`DROP TRIGGER IF EXISTS participants_metadata_fts_update`,
+		`DROP TRIGGER IF EXISTS participants_metadata_fts_delete`,
 		`ALTER TABLE participants DROP COLUMN phone_number`,
 		`ALTER TABLE participants DROP COLUMN canonical_id`,
 		`ALTER TABLE participants ADD COLUMN phone_number TEXT`,
@@ -4084,11 +4104,17 @@ func TestCopySubset_UpgradedAuxiliaryColumnOrder(t *testing.T) {
 		SET title = 'Thread 1', conversation_type = 'email_thread'`)
 	require.NoError(err, "seed upgraded conversation columns")
 	require.NoError(db.Close(), "close source db")
+	// Restore current index maintenance through the real setup path after
+	// reconstructing the historical column order.
+	upgraded, err := Open(srcDB)
+	require.NoError(err)
+	require.NoError(upgraded.InitSchema())
+	require.NoError(upgraded.Close())
 
 	_, err = CopySubset(srcDB, dstDir, 100, false)
 	require.NoError(err, "CopySubset from upgraded column order")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination db")
 	defer func() { _ = dstDB.Close() }()
 
@@ -4138,7 +4164,7 @@ func TestCopySubset_UpgradedParticipantLinkColumnOrder(t *testing.T) {
 	require.NoError(st.Close(), "close upgraded source")
 
 	candidateID := seedAcceptedSubsetParticipantLink(t, srcDB)
-	sourceDB, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	sourceDB, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source for timestamp check")
 	var sourceCreatedAt string
 	require.NoError(sourceDB.QueryRow(`
@@ -4152,7 +4178,7 @@ func TestCopySubset_UpgradedParticipantLinkColumnOrder(t *testing.T) {
 	})
 	require.NoError(err, "copy upgraded participant links")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open copied database")
 	defer func() { _ = dstDB.Close() }()
 
@@ -4178,7 +4204,7 @@ func TestCopySubset_ExcludesParticipantLinkOwnershipWithoutProfiles(t *testing.T
 	_, err := CopySubsetWithOptions(srcDB, dstDir, 5, CopySubsetOptions{})
 	require.NoError(err, "copy without profiles")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open copied database")
 	defer func() { _ = dstDB.Close() }()
 
@@ -4209,7 +4235,7 @@ func TestCopySubset_PreservesParticipantLinkOwnershipWithProfiles(t *testing.T) 
 	})
 	require.NoError(err, "copy with profiles")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open copied database")
 	defer func() { _ = dstDB.Close() }()
 
@@ -4237,7 +4263,7 @@ func TestCopySubset_LegacyMessageRecipientsWithoutEnvelopeAddress(t *testing.T) 
 	srcDB := createTestSourceDB(t, t.TempDir(), 2)
 	dstDir := filepath.Join(t.TempDir(), "dst")
 
-	db, err := sql.Open("sqlite3", srcDB+"?_foreign_keys=OFF")
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
 	require.NoError(err, "open source db")
 	// A source old enough to lack the envelope column predates person-sweep
 	// triggers. The fixture is constructed backwards from today's schema, so
@@ -4274,7 +4300,7 @@ func TestCopySubset_LegacyMessageRecipientsWithoutEnvelopeAddress(t *testing.T) 
 	_, err = CopySubset(srcDB, dstDir, 100, false)
 	require.NoError(err, "CopySubset from source without email_address")
 
-	dstDB, err := sql.Open("sqlite3", filepath.Join(dstDir, "msgvault.db"))
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
 	require.NoError(err, "open destination db")
 	defer func() { _ = dstDB.Close() }()
 
@@ -4963,4 +4989,104 @@ func TestCopySubsetReleasesReviewMappingsWhoseAcceptedEdgeWasFiltered(t *testing
 			"next projection")
 	require.Len(copied.Residue, 2)
 	assert.Equal("RELATED", copied.Residue[1].Property.Name)
+}
+
+func TestCopySubsetKeepsAccountAttributionConsistent(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	srcDB := createTestSourceDB(t, t.TempDir(), 3)
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB)
+	require.NoError(err)
+	for _, stmt := range []string{
+		// Message 1 (alice to bob) stays in source 1; messages 2 and 3 (bob
+		// to charlie) move to source 2, so only source 2 uses charlie.
+		`INSERT INTO sources (id, source_type, identifier) VALUES (2, 'gmail', 'other@example.com')`,
+		`UPDATE messages SET source_id = 2 WHERE id IN (2, 3)`,
+		`UPDATE messages SET account_address = 'work@example.org', account_path = 'inbound'`,
+		// Message 1 predates attribution: pending, with an alias named only
+		// in its stored delivery headers.
+		`UPDATE messages SET account_address = NULL, account_path = NULL WHERE id = 1`,
+		`INSERT INTO account_identities (source_id, address, address_key, source_signal) VALUES
+			(1, 'hidden@example.org', 'hidden@example.org', 'manual'),
+			(1, 'charlie@example.com', 'charlie@example.com', 'manual'),
+			(1, 'unused@example.org', 'unused@example.org', 'manual'),
+			(2, 'work@example.org', 'work@example.org', 'manual')`,
+	} {
+		_, err = db.Exec(stmt)
+		require.NoError(err, stmt)
+	}
+	var raw bytes.Buffer
+	zw := zlib.NewWriter(&raw)
+	_, err = zw.Write([]byte("X-Delivered-To: hidden@example.org\r\n\r\nbody"))
+	require.NoError(err)
+	require.NoError(zw.Close())
+	_, err = db.Exec(`INSERT INTO message_raw (message_id, raw_data, raw_format, compression)
+		VALUES (1, ?, 'mime', 'zlib')`, raw.Bytes())
+	require.NoError(err)
+	require.NoError(db.Close())
+
+	copiedIdentities := func(includeIdentity bool) []string {
+		dstDir := filepath.Join(t.TempDir(), "dst")
+		_, err := CopySubset(srcDB, dstDir, 3, includeIdentity)
+		require.NoError(err)
+		dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
+		require.NoError(err)
+		t.Cleanup(func() { _ = dst.Close() })
+		require.NoError(dst.InitSchema())
+		rows, err := dst.DB().Query(`SELECT source_id || ':' || address_key FROM account_identities
+			ORDER BY source_id, address_key`)
+		require.NoError(err)
+		defer func() { _ = rows.Close() }()
+		var keys []string
+		for rows.Next() {
+			var key string
+			require.NoError(rows.Scan(&key))
+			keys = append(keys, key)
+		}
+		require.NoError(rows.Err())
+		return keys
+	}
+	assert.Equal([]string{"1:hidden@example.org", "2:work@example.org"}, copiedIdentities(false),
+		"each source keeps only the addresses its own messages use, including a pending message's headers")
+	assert.Equal([]string{
+		"1:charlie@example.com", "1:hidden@example.org", "1:unused@example.org", "2:work@example.org",
+	}, copiedIdentities(true), "--include-identity copies every confirmed address of an included source")
+}
+
+func TestCopySubsetKeepsPendingDraftOutOfReceived(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	srcDB := createTestSourceDB(t, t.TempDir(), 3)
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB)
+	require.NoError(err)
+	// Message 1 (alice to bob) is a draft archived before attribution: its
+	// only draft evidence is an IMAP \Draft flag, which subsets do not copy.
+	for _, stmt := range []string{
+		`UPDATE messages SET account_address = NULL, account_path = NULL, draft_authored = FALSE`,
+		`INSERT INTO imap_message_memberships (source_id, mailbox, uidvalidity, uid, message_id, flags)
+		 VALUES (1, 'Scratch', 7, 1, 1, '["\\Draft"]')`,
+		`INSERT INTO account_identities (source_id, address, address_key, source_signal)
+		 VALUES (1, 'bob@example.com', 'bob@example.com', 'manual')`,
+	} {
+		_, err = db.Exec(stmt)
+		require.NoError(err, stmt)
+	}
+	require.NoError(db.Close())
+
+	dstDir := filepath.Join(t.TempDir(), "dst")
+	_, err = CopySubset(srcDB, dstDir, 3, false)
+	require.NoError(err)
+	dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { _ = dst.Close() })
+	require.NoError(dst.InitSchema())
+	_, err = dst.RepairAccountAttributionContext(t.Context(), 1, nil)
+	require.NoError(err)
+
+	var authored bool
+	var path sql.NullString
+	require.NoError(dst.DB().QueryRow(`SELECT draft_authored, account_path FROM messages WHERE id = 1`).
+		Scan(&authored, &path))
+	assert.True(authored, "the subset keeps the draft mark its IMAP flag gave it")
+	assert.Equal(accountPathSent, path.String, "a copied draft is written, not received")
 }

@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -35,7 +36,7 @@ type SavedViewStateEnvelope struct {
 	Presentation    string            `json:"presentation,omitempty"`
 	Sort            []SavedViewSort   `json:"sort,omitempty"`
 	Columns         []string          `json:"columns,omitempty"`
-	InspectorPinned bool              `json:"inspector_pinned,omitempty"`
+	InspectorPinned *bool             `json:"inspector_pinned,omitzero" nullable:"false"`
 }
 
 // SavedViewFilter is a normalized version-1 analytical predicate. Values are
@@ -50,24 +51,26 @@ type SavedViewFilter struct {
 
 type SavedViewSort struct {
 	Field     string `json:"field"`
-	Direction string `json:"direction" enum:"asc,desc"`
+	Direction string `json:"direction"`
 }
 
 type SavedView struct {
-	ID             int64           `json:"id"`
-	Name           string          `json:"name"`
-	Description    *string         `json:"description,omitempty"`
-	CanonicalState json.RawMessage `json:"canonical_state"`
-	SchemaVersion  int             `json:"schema_version"`
-	Revision       int64           `json:"revision"`
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	// IncompatibilityReason is supplied by the daemon, not persisted in the store.
+	IncompatibilityReason string         `json:"incompatibility_reason,omitempty"`
+	ID                    int64          `json:"id"`
+	Name                  string         `json:"name"`
+	Description           *string        `json:"description,omitzero" nullable:"false"`
+	CanonicalState        jsontext.Value `json:"canonical_state"`
+	SchemaVersion         int            `json:"schema_version"`
+	Revision              int64          `json:"revision"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 }
 
 type SavedViewInput struct {
 	Name           string
 	Description    *string
-	CanonicalState json.RawMessage
+	CanonicalState jsontext.Value
 	SchemaVersion  int
 }
 
@@ -202,57 +205,24 @@ func validateSavedViewInput(input SavedViewInput) (SavedViewInput, error) {
 		return SavedViewInput{}, fmt.Errorf("%w: got %d, support %d",
 			ErrSavedViewUnsupportedSchemaVersion, input.SchemaVersion, CurrentSavedViewSchemaVersion)
 	}
-
 	trimmedState := bytes.TrimSpace(input.CanonicalState)
-	if len(trimmedState) == 0 || bytes.Equal(trimmedState, []byte("null")) {
-		return SavedViewInput{}, fmt.Errorf("%w: canonical state must be a JSON object", ErrSavedViewInvalidState)
-	}
-	if err := jsonexact.Validate(trimmedState, SavedViewStateEnvelope{}); err != nil {
-		return SavedViewInput{}, fmt.Errorf("%w: %w", ErrSavedViewInvalidState, err)
+	if err := ValidateSavedViewStateJSON(trimmedState); err != nil {
+		return SavedViewInput{}, err
 	}
 
-	decoder := json.NewDecoder(bytes.NewReader(trimmedState))
-	decoder.DisallowUnknownFields()
-	decoder.UseNumber()
+	decoder := jsontext.NewDecoder(bytes.NewReader(trimmedState), json.RejectUnknownMembers(true), jsonexact.PreserveNumbers)
+
 	var envelope SavedViewStateEnvelope
-	if err := decoder.Decode(&envelope); err != nil {
+	if err := json.UnmarshalDecode(decoder, &envelope); err != nil {
 		return SavedViewInput{}, fmt.Errorf("%w: %w", ErrSavedViewInvalidState, err)
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+	if err := json.UnmarshalDecode(decoder, &struct{}{}); !errors.Is(err, io.EOF) {
 		return SavedViewInput{}, fmt.Errorf("%w: canonical state must contain one JSON object", ErrSavedViewInvalidState)
 	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(trimmedState, &fields); err != nil || fields == nil {
-		return SavedViewInput{}, fmt.Errorf("%w: canonical state must be a JSON object", ErrSavedViewInvalidState)
+	if err := ValidateSavedViewState(envelope); err != nil {
+		return SavedViewInput{}, err
 	}
-	for _, name := range []string{
-		"query", "search_mode", "filters", "grouping", "presentation", "sort", "columns", "inspector_pinned",
-	} {
-		if value, present := fields[name]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-			return SavedViewInput{}, fmt.Errorf("%w: %s must not be null", ErrSavedViewInvalidState, name)
-		}
-	}
-	if rawFilters, present := fields["filters"]; present {
-		var filters []struct {
-			Values []json.RawMessage `json:"values"`
-		}
-		if err := json.Unmarshal(rawFilters, &filters); err == nil {
-			for filterIndex, filter := range filters {
-				for valueIndex, value := range filter.Values {
-					if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
-						return SavedViewInput{}, fmt.Errorf(
-							"%w: filters[%d].values[%d] must not be null",
-							ErrSavedViewInvalidState, filterIndex, valueIndex,
-						)
-					}
-				}
-			}
-		}
-	}
-	if err := validateSavedViewEnvelope(envelope); err != nil {
-		return SavedViewInput{}, fmt.Errorf("%w: %w", ErrSavedViewInvalidState, err)
-	}
-	canonical, err := json.Marshal(envelope)
+	canonical, err := json.Marshal(envelope, json.Deterministic(true))
 	if err != nil {
 		return SavedViewInput{}, fmt.Errorf("%w: %w", ErrSavedViewInvalidState, err)
 	}
@@ -279,6 +249,6 @@ func scanSavedView(row scanner) (*SavedView, error) {
 	if description.Valid {
 		view.Description = &description.String
 	}
-	view.CanonicalState = json.RawMessage(append([]byte(nil), state...))
+	view.CanonicalState = jsontext.Value(append([]byte(nil), state...))
 	return &view, nil
 }

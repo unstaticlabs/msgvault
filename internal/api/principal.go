@@ -28,11 +28,11 @@ func (s *Server) loadNamedAPIKeys() {
 	for _, warning := range warnings {
 		s.warn(warning)
 	}
-	serverDigest := sha256.Sum256([]byte(s.cfg.Server.APIKey))
+	serverDigest := sha256.Sum256([]byte(s.cfg.Server.AuthenticationKey()))
 	keys := make([]namedAPIKey, 0, len(resolved))
 	for _, key := range resolved {
 		digest := sha256.Sum256([]byte(key.Key))
-		if s.cfg.Server.APIKey != "" && digest == serverDigest {
+		if s.cfg.Server.AuthenticationKey() != "" && digest == serverDigest {
 			s.warn("[[auth.api_keys]] " + key.Name + ": same value as [server].api_key; the named key is ignored")
 			continue
 		}
@@ -72,7 +72,7 @@ func (s *Server) keyPrincipal(credential string) (authz.Principal, bool, bool) {
 	if credential == "" {
 		return authz.Principal{}, false, false
 	}
-	if s.cfg.Server.APIKey != "" && constantTimeAPIKeyEqual(credential, s.cfg.Server.APIKey) {
+	if s.cfg.Server.AuthenticationKey() != "" && constantTimeAPIKeyEqual(credential, s.cfg.Server.AuthenticationKey()) {
 		return authz.ServerKey(), false, true
 	}
 	supplied := sha256.Sum256([]byte(credential))

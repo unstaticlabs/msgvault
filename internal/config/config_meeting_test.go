@@ -45,6 +45,7 @@ enabled = true
 identifier = "notion-work"
 account_email = " Notion.User@Example.COM "
 token = "ntn_test"
+users_token = "ntn-example"
 schedule = "15 */6 * * *"
 enabled = true
 `)
@@ -72,6 +73,7 @@ enabled = true
 	require.NotNil(notion)
 	assert.Equal("notion.user@example.com", notion.AccountEmail)
 	assert.Equal("ntn_test", notion.Token)
+	assert.Equal("ntn-example", notion.UsersToken)
 	require.Len(cfg.ScheduledNotionMeetingsSources(), 1)
 }
 
@@ -206,8 +208,9 @@ token = "ntn_b"
 }
 
 func TestLoadMeetingSourceDuplicateIdentifiersRejected(t *testing.T) {
-	require := require.New(t)
-	configPath := writeMeetingConfig(t, `
+	twilio := "account_email='user@example.com'\naccount_sid='AC00000000000000000000000000000001'\nauth_token='synthetic'\n"
+	for name, body := range map[string]string{
+		"granola": `
 [[granola]]
 identifier = "same"
 api_key = "grn_a"
@@ -215,11 +218,14 @@ api_key = "grn_a"
 [[granola]]
 identifier = "SAME"
 api_key = "grn_b"
-`)
-
-	_, err := Load(configPath, "")
-	require.Error(err)
-	require.Contains(err.Error(), "duplicate identifier")
+`,
+		"twilio": "[[twilio]]\nidentifier='work'\n" + twilio + "[[twilio]]\nidentifier='WORK'\n" + twilio,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeMeetingConfig(t, body), "")
+			require.ErrorContains(t, err, "duplicate identifier")
+		})
+	}
 }
 
 func TestLoadMeetingSourceMissingIdentifierRejected(t *testing.T) {
@@ -235,4 +241,112 @@ identifier = "second"
 	_, err := Load(configPath, "")
 	require.Error(err)
 	require.Contains(err.Error(), "identifier")
+}
+
+func TestLoadMuesliSourceDefaultsAndPaths(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	configPath := writeMeetingConfig(t, `
+[[muesli]]
+account_email = " You@Example.com "
+db_path = "~/muesli/muesli.db"
+schedule = "*/30 * * * *"
+enabled = true
+`)
+
+	cfg, err := Load(configPath, "")
+	require.NoError(err, "Load()")
+
+	require.Len(cfg.Muesli, 1)
+	src := cfg.Muesli[0]
+	assert.Equal("default", src.Identifier)
+	assert.Equal("you@example.com", src.AccountEmail)
+	home, err := os.UserHomeDir()
+	require.NoError(err)
+	assert.Equal(filepath.Join(home, "muesli", "muesli.db"), src.EffectiveDBPath())
+	assert.Len(cfg.ScheduledMuesliSources(), 1)
+	found := cfg.GetMuesliSource("DEFAULT")
+	require.NotNil(found, "lookup is case-insensitive")
+	assert.Equal("you@example.com", found.AccountEmail)
+	assert.Nil(cfg.GetMuesliSource("nope"))
+}
+
+func TestMuesliSourceEffectiveDBPathDefaultsToMuesliSupportFolder(t *testing.T) {
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	assert.Equal(t,
+		filepath.Join(home, "Library", "Application Support", "Muesli", "muesli.db"),
+		MuesliSource{}.EffectiveDBPath())
+}
+
+func TestLoadMuesliSourceRejectsInvalidEntries(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name: "duplicate identifiers",
+			content: `
+[[muesli]]
+identifier = "mac"
+account_email = "a@example.com"
+[[muesli]]
+identifier = "MAC"
+account_email = "b@example.com"
+`,
+			want: `[[muesli]]: duplicate identifier "MAC"`,
+		},
+		{
+			name: "missing account email",
+			content: `
+[[muesli]]
+identifier = "mac"
+`,
+			want: `[[muesli]] identifier "mac" requires account_email`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeMeetingConfig(t, tt.content), "")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestLoadMuesliContactsSettings(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	home, err := os.UserHomeDir()
+	require.NoError(err)
+
+	defaults, err := Load(writeMeetingConfig(t, `
+[[muesli]]
+account_email = "you@example.com"
+`), "")
+	require.NoError(err)
+	assert.True(defaults.Muesli[0].ContactsEnabled(), "Contacts enrichment is on by default")
+	assert.Equal(filepath.Join(home, "Library", "Application Support", "AddressBook"),
+		defaults.Muesli[0].EffectiveContactsPath())
+
+	custom, err := Load(writeMeetingConfig(t, `
+[[muesli]]
+account_email = "you@example.com"
+contacts = false
+contacts_path = "~/contacts-copy"
+phone_country_code = "+44"
+`), "")
+	require.NoError(err)
+	assert.False(custom.Muesli[0].ContactsEnabled())
+	assert.Equal(filepath.Join(home, "contacts-copy"), custom.Muesli[0].EffectiveContactsPath())
+	assert.Equal("44", custom.Muesli[0].PhoneCountryCode, "a leading + is accepted and removed")
+
+	_, err = Load(writeMeetingConfig(t, `
+[[muesli]]
+account_email = "you@example.com"
+phone_country_code = "UK"
+`), "")
+	require.Error(err)
+	assert.Contains(err.Error(), "phone_country_code")
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/apiprotocol"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/pkg/client/generated"
@@ -346,7 +347,9 @@ func TestEngineListAccountsUsesSourceBackedCLIAccounts(t *testing.T) {
 
 	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal("/api/v1/cli/accounts", r.URL.Path, "path")
+		assert.Equal("true", r.Header.Get(apiprotocol.AllowPendingCountsHeader), "allow pending counts")
 		writeJSONResponse(t, w, map[string]any{
+			"counts_pending": true,
 			"accounts": []map[string]any{
 				{
 					"id":            42,
@@ -462,6 +465,7 @@ func TestEngineTextMethodsUseGeneratedClientAdapter(t *testing.T) {
 	require.NoError(err, "ListConversationMessages")
 	require.Len(timeline, 1, "timeline")
 	assert.Equal("timeline body", timeline[0].BodyText)
+	assert.Equal(store.baseURL+"/messages/99", timeline[0].WebURL)
 	assert.Equal("Family", timeline[0].ConversationTitle)
 	assert.Equal("+15555550123", timeline[0].FromPhone)
 
@@ -469,6 +473,7 @@ func TestEngineTextMethodsUseGeneratedClientAdapter(t *testing.T) {
 	require.NoError(err, "TextSearch")
 	require.Len(searchResults, 1, "searchResults")
 	assert.Equal("search body", searchResults[0].BodyText)
+	assert.Equal(store.baseURL+"/messages/99", searchResults[0].WebURL)
 
 	stats, err := textEngine.GetTextStats(context.Background(), query.TextStatsOptions{SearchQuery: "family"})
 	require.NoError(err, "GetTextStats")
@@ -547,22 +552,23 @@ func TestEngineGetMessagePreservesGeneratedDetailMetadata(t *testing.T) {
 	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal("/api/v1/messages/42", r.URL.Path, "path")
 		writeJSONResponse(t, w, map[string]any{
-			"id":                42,
-			"source_message_id": "msg-42",
-			"conversation_id":   7,
-			"subject":           "Generated detail",
-			"message_type":      "sms",
-			"from":              "Alice <alice@example.com>",
-			"from_email":        "alice@example.com",
-			"from_name":         "Alice",
-			"to":                []string{"bob@example.com"},
-			"sent_at":           "2024-01-15T10:30:00Z",
-			"deleted_at":        deletedAt,
-			"snippet":           "preview",
-			"labels":            []string{"INBOX"},
-			"has_attachments":   true,
-			"size_bytes":        2048,
-			"body":              "Hello, generated world!",
+			"id":                 42,
+			"source_message_id":  "msg-42",
+			"conversation_id":    7,
+			"subject":            "Generated detail",
+			"conversation_title": "Team chat",
+			"message_type":       "sms",
+			"from":               "Alice <alice@example.com>",
+			"from_email":         "alice@example.com",
+			"from_name":          "Alice",
+			"to":                 []string{"bob@example.com"},
+			"sent_at":            "2024-01-15T10:30:00Z",
+			"deleted_at":         deletedAt,
+			"snippet":            "preview",
+			"labels":             []string{"INBOX"},
+			"has_attachments":    true,
+			"size_bytes":         2048,
+			"body":               "Hello, generated world!",
 			"attachments": []map[string]any{{
 				"id":           52,
 				"filename":     "doc.pdf",
@@ -580,6 +586,8 @@ func TestEngineGetMessagePreservesGeneratedDetailMetadata(t *testing.T) {
 	require.NoError(err, "GetMessage")
 	require.NotNil(msg, "GetMessage returned nil")
 	assert.Equal("msg-42", msg.SourceMessageID, "SourceMessageID")
+	assert.Equal("Team chat", msg.ConversationTitle, "ConversationTitle")
+	assert.Equal(store.baseURL+"/messages/42", msg.WebURL)
 	assert.Equal("sms", msg.MessageType, "MessageType")
 	require.NotNil(msg.DeletedAt, "DeletedAt")
 	assert.Equal(deletedAt, msg.DeletedAt.UTC().Format(time.RFC3339), "DeletedAt")
@@ -794,25 +802,6 @@ func TestEngineGetMessagePreservesPhoneOnlyGeneratedSender(t *testing.T) {
 	require.Len(msg.From, 1, "len(From)")
 	assert.Equal("+15555550123", msg.From[0].Email, "From[0].Email")
 	assert.Equal("Alice", msg.From[0].Name, "From[0].Name")
-}
-
-func TestEngineGetMessageRawUsesGeneratedCLIEndpoint(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	raw := []byte("From: alice@example.com\r\nSubject: Raw\r\n\r\nBody")
-
-	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal("/api/v1/cli/message/raw", r.URL.Path, "path")
-		assert.Equal("42", r.URL.Query().Get("id"), "id")
-		w.Header().Set("Content-Type", "message/rfc822")
-		_, _ = w.Write(raw)
-	})
-
-	engine := NewEngineAdapter(store)
-
-	got, err := engine.GetMessageRaw(context.Background(), 42)
-	require.NoError(err, "GetMessageRaw")
-	assert.Equal(raw, got, "raw")
 }
 
 func TestEngineGetAttachmentUsesGeneratedClientAdapter(t *testing.T) {
@@ -1157,6 +1146,7 @@ func TestEngineSearchByDomainsUsesGeneratedClientAdapter(t *testing.T) {
 		assert.Equal(before.Format(time.RFC3339), r.URL.Query().Get("before"), "before")
 		assert.Equal("25", r.URL.Query().Get("limit"), "limit")
 		assert.Equal("50", r.URL.Query().Get("offset"), "offset")
+		assert.Equal([]string{"4", "7"}, r.URL.Query()["source_ids"], "source scope")
 		writeJSONResponse(t, w, map[string]any{
 			"count":    1,
 			"has_more": false,
@@ -1187,6 +1177,7 @@ func TestEngineSearchByDomainsUsesGeneratedClientAdapter(t *testing.T) {
 		&before,
 		25,
 		50,
+		[]int64{4, 7},
 	)
 	require.NoError(err, "SearchByDomains")
 	require.Len(results, 1, "results")
@@ -1229,7 +1220,7 @@ func TestEngineTimeFiltersPreserveUTCNanoseconds(t *testing.T) {
 		After: &after, Before: &before,
 	})
 	require.NoError(err)
-	_, err = engine.SearchByDomains(context.Background(), []string{"example.com"}, &after, &before, 10, 0)
+	_, err = engine.SearchByDomains(context.Background(), []string{"example.com"}, &after, &before, 10, 0, nil)
 	require.NoError(err)
 	assert.True(seen["/api/v1/aggregates"])
 	assert.True(seen["/api/v1/search/domains"])
@@ -1981,7 +1972,11 @@ func TestEngineDeepSearchExplicitEmptyScopeSkipsHTTP(t *testing.T) {
 		{
 			name: "body search",
 			run: func(engine *Engine, q *search.Query) ([]query.MessageSummary, error) {
-				return engine.SearchMessageBodies(context.Background(), q, 10, 0)
+				result, err := engine.SearchMessageBodies(context.Background(), q, 10, 0)
+				if err != nil {
+					return nil, err
+				}
+				return result.Messages, nil
 			},
 		},
 	}
@@ -2133,12 +2128,13 @@ func TestEngineSearchMessageBodiesForwardsAndRequiresScopeEcho(t *testing.T) {
 		assert.Equal("bodyneedle", r.URL.Query().Get("q"), "q")
 		assert.Equal("7", r.URL.Query().Get("source_id"), "source_id")
 		writeJSONResponse(t, w, map[string]any{
-			"query":    "bodyneedle",
-			"scope":    "body",
-			"count":    1,
-			"has_more": false,
-			"offset":   2,
-			"limit":    5,
+			"query":       "bodyneedle",
+			"scope":       "body",
+			"index_state": "unverified",
+			"count":       1,
+			"has_more":    false,
+			"offset":      2,
+			"limit":       5,
 			"messages": []map[string]any{{
 				"id":         42,
 				"subject":    "body hit",
@@ -2162,10 +2158,11 @@ func TestEngineSearchMessageBodiesForwardsAndRequiresScopeEcho(t *testing.T) {
 		AccountIDs: []int64{7},
 	}, 5, 2)
 	require.NoError(t, err, "SearchMessageBodies")
-	require.Len(t, messages, 1)
-	assert.Equal(int64(42), messages[0].ID, "body hit ID")
-	assert.Equal([]string{"exact daemon context"}, messages[0].BodyContextSnippets)
-	assert.True(messages[0].BodyContextSnippetsTruncated)
+	require.Len(t, messages.Messages, 1)
+	assert.Equal("unverified", messages.IndexState)
+	assert.Equal(int64(42), messages.Messages[0].ID, "body hit ID")
+	assert.Equal([]string{"exact daemon context"}, messages.Messages[0].BodyContextSnippets)
+	assert.True(messages.Messages[0].BodyContextSnippetsTruncated)
 }
 
 func TestBodySearchSummariesFromGeneratedRejectsInvalidCompanions(t *testing.T) {
@@ -2698,6 +2695,42 @@ func TestEngineTextSearchRejectsUnconfirmedAccount(t *testing.T) {
 			assert.Empty(t, messages)
 		})
 	}
+}
+
+func TestEngineListVirtualAccountsFailsWhenCatalogUnavailable(t *testing.T) {
+	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONResponse(t, w, map[string]any{
+			"accounts":                     []map[string]any{{"id": 42, "email": "a@example.com", "type": "gmail", "message_count": 1}},
+			"virtual_accounts_unavailable": true,
+		})
+	})
+	_, err := NewEngineAdapter(store).ListVirtualAccounts(context.Background())
+	require.ErrorIs(t, err, errVirtualAccountsUnavailable, "an unread catalog is not an empty one")
+}
+
+func TestEngineGetMessageRawUsesGeneratedCLIEndpoint(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	raw := []byte("From: alice@example.com\r\nSubject: Raw\r\n\r\nBody")
+
+	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/health" {
+			writeJSONResponse(t, w, map[string]any{"status": "ok", "api_schema_version": "3.18.0"})
+			return
+		}
+		assert.Equal("/api/v1/cli/message/original", r.URL.Path, "path")
+		assert.Equal("42", r.URL.Query().Get("id"), "id")
+		writeJSONResponse(t, w, map[string]any{
+			"message": map[string]any{"message_id": 42, "source_id": 1, "conversation_id": 1, "source_conversation_id": "qa-thread", "account": "qa@example.test", "source_type": "gmail"},
+			"mime":    raw,
+		})
+	})
+
+	engine := NewEngineAdapter(store)
+
+	got, err := engine.GetMessageRaw(context.Background(), 42)
+	require.NoError(err, "GetMessageRaw")
+	assert.Equal(raw, got, "raw")
 }
 
 // TestEngineGetDeletionTargetsBySearchSendsTheAccountScope: search.Format

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"go.kenn.io/msgvault/internal/textutil"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -14,6 +15,12 @@ func (m Model) settingsIsNarrow() bool {
 }
 
 func (m Model) handleSettingsKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.settings.peopleControls.active {
+		return m.handlePeopleInferenceControlKey(msg)
+	}
+	if m.settings.codex.active {
+		return m.handleCodexSettingsKey(msg)
+	}
 	if msg.String() == keyNameCtrlC {
 		m.quitting = true
 		return m, tea.Quit
@@ -41,6 +48,10 @@ func (m Model) handleSettingsKeyPress(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	}
 
 	switch msg.String() {
+	case "p":
+		return m.openCodexSettings()
+	case "i":
+		return m.openPeopleInferenceControls()
 	case "ctrl+s":
 		return m.saveSettings()
 	case keyNameEsc:
@@ -317,8 +328,14 @@ func (m Model) secretSettingDisplay(field SettingField) string {
 	if field.Secret == nil || !field.Secret.Configured {
 		return "not configured"
 	}
-	if source := strings.TrimSpace(field.Secret.Source); source != "" {
-		return "configured (" + source + ")"
+	// The daemon's masked hint names which key is set; without one, only
+	// that a key is set.
+	display := "configured"
+	if hint := strings.TrimSpace(field.Secret.Hint); hint != "" {
+		display = textutil.SanitizeTerminal(hint)
 	}
-	return "configured"
+	if source := strings.TrimSpace(field.Secret.Source); source != "" {
+		return display + " (" + source + ")"
+	}
+	return display
 }

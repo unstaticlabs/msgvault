@@ -16,10 +16,10 @@
   }
 </script>
 
-<main class="login" aria-label="Authentication">
+<main class="boot-screen" aria-label="Authentication">
   {#if session.oidc}
     <section class="provider" aria-label="Single sign-on">
-      <p class="eyebrow">msgvault</p>
+      <p class="boot-screen__brand">msgvault</p>
       <h1>Log in</h1>
       <Button
         tone="info"
@@ -33,7 +33,7 @@
   {#if session.loginMethods.includes('api_key')}
     <form aria-label="Log in" onsubmit={submit}>
       {#if !session.oidc}
-        <p class="eyebrow">msgvault</p>
+        <p class="boot-screen__brand">msgvault</p>
         <h1>Log in</h1>
       {/if}
       <p>Enter the API key configured for this daemon.</p>
@@ -72,3 +72,17 @@
     </section>
   {/if}
 </main>
+
+<style>
+  form {
+    align-self: stretch;
+  }
+
+  form > :global(*) {
+    align-self: stretch;
+  }
+
+  form > :global(button) {
+    align-self: flex-start;
+  }
+</style>

@@ -26,8 +26,9 @@ type SettingsBackend interface {
 type SettingsConflictScope string
 
 const (
-	SettingsConflictConfig      SettingsConflictScope = "config"
-	SettingsConflictCredentials SettingsConflictScope = "credentials"
+	SettingsConflictConfig            SettingsConflictScope = "config"
+	SettingsConflictCredentials       SettingsConflictScope = "credentials"
+	SettingsConflictPeopleCredentials SettingsConflictScope = "people_credentials"
 )
 
 // SettingsConflictError reports an optimistic-concurrency conflict. The TUI
@@ -100,10 +101,12 @@ type SettingValidation struct {
 }
 
 // SecretSettingState is the only secret state that may be loaded or rendered.
-// Secret values themselves are write-only.
+// Secret values themselves are write-only; Hint is the daemon's masked
+// "sk-…x9Q" form of a set key, empty when it gives none.
 type SecretSettingState struct {
 	Configured bool
 	Source     string
+	Hint       string
 }
 
 // SettingValue mirrors the daemon's explicit scalar union without importing a
@@ -176,11 +179,14 @@ type SettingsSaveRequest struct {
 }
 
 type settingsState struct {
-	active         bool
-	loading        bool
-	saving         bool
-	confirmDiscard bool
-	narrowFields   bool
+	active                bool
+	codex                 codexSettingsState
+	peopleControls        peopleInferenceControlState
+	peopleInferenceStatus *PeopleInferenceStatus
+	loading               bool
+	saving                bool
+	confirmDiscard        bool
+	narrowFields          bool
 
 	groups             []SettingsGroup
 	fields             []SettingField

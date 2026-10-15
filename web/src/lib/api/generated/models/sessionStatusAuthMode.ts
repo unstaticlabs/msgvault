@@ -11,4 +11,7 @@ export const SessionStatusAuthMode = {
   session: "session",
   token: "token",
   required: "required",
+  delegated: "delegated",
+  remote_client: "remote_client",
+  caller: "caller",
 } as const;
