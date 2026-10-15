@@ -256,7 +256,11 @@ Ungrouped Everything and Files listings page a scalar message or attachment
 population before resolving participant lists for the returned rows. Exact
 totals use separate narrow scans. This page-before-enrichment boundary keeps
 multi-million-message listings inside the daemon's interactive DuckDB memory
-budget without changing cache format or query semantics.
+budget without changing cache format or query semantics. Domain-filtered
+Everything listings share their filtered message population between page
+selection, participant enrichment, and total counting. This avoids building the
+same recipient and conversation-roster membership joins three times under the
+interactive memory limit; unfiltered listings retain scalar rescans.
 
 The Parquet cache is disposable and can be rebuilt at any time. The daemon
 starts HTTP health and API routing before analytics cache maintenance, and
