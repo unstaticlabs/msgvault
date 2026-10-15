@@ -124,3 +124,7 @@ func withStoreLock(tokenDir string, fn func() error) error {
 	defer unix.Flock(fd, unix.LOCK_UN) //nolint:errcheck // closing also releases the lock
 	return fn()
 }
+
+func createCredentialCandidate(tokenDir string) (*os.File, error) {
+	return os.CreateTemp(tokenDir, ".provider-credentials-*.json")
+}
