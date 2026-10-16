@@ -1647,6 +1647,7 @@ func lineNumberAt(body string, byteOffset int) int {
 }
 
 type getMessageResponse struct {
+	RelatedMessageID     *int64                    `json:"related_message_id,omitempty"`
 	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
 	SourceID             int64                     `json:"source_id,omitempty"`
 	InboxState           string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
@@ -1757,6 +1758,7 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 		SourceConversationID: msg.SourceConversationID,
 		Subject:              msg.Subject,
 		MessageType:          msg.MessageType,
+		RelatedMessageID:     msg.RelatedMessageID,
 		Snippet:              msg.Snippet,
 		SentAt:               msg.SentAt,
 		ReceivedAt:           msg.ReceivedAt,

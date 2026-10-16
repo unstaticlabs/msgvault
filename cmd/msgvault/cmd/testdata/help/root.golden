@@ -1,24 +1,24 @@
-Archive and search email, chat, and meeting records offline.
-Commands start or reuse a daemon, or use [remote].url in config.toml.
-Use --local for the local daemon.
+Archive email, chat, and meetings for offline search.
+Commands use a local daemon or [remote].url in config.toml.
+--local forces the local daemon.
 
 Start here:
   msgvault list-accounts --json    # id, email, type, counts
   msgvault search 'from:alice@example.com newer_than:30d' --json
-  # Use the returned "id" below
-  msgvault show-message <id> --json  # body_text, attachments
-  msgvault export-eml <id> -o msg.eml  # export-attachments <id> -o DIR
+  # Open a returned id
+  msgvault show-message <id> --json  # body, files
+  msgvault export-eml <id> -o msg.eml
   msgvault export-messages --start 2026-09-01T00:00:00Z --end 2026-10-01T00:00:00Z
   msgvault list-senders -n 20 --json  # list-domains, list-labels
   msgvault stats
   msgvault person --help  # contacts
   msgvault daemon status
-  msgvault setup status --json  # next steps
+  msgvault setup status --json
 
 Output and exit status:
-  --json prints JSON on stdout (export-messages prints JSON Lines). Progress and
-  logs go to stderr; --log-level=warn quiets routine logs. Exit 0 success, 1 error,
-  130 interrupted. 'msgvault quickstart' has a longer agent guide.
+  --json writes JSON to stdout (export-messages uses JSON Lines).
+  Progress/logs go to stderr; --log-level=warn quiets routine logs.
+  Exit: 0 success, 1 error, 130 interrupted. More: 'msgvault quickstart'.
 
 Usage:
   msgvault [command]
@@ -60,6 +60,7 @@ Add and sync sources:
   add-beeper             Add Beeper Desktop as an archive source
   add-calendar           Authorize Google Calendar and register its calendars
   add-carddav            Discover and configure a CardDAV account
+  add-chatwoot           Register Chatwoot inboxes
   add-circleback         Authorize a Circleback account (browser OAuth)
   add-discord            Register Discord guilds for bot-based archival
   add-granola            Register a Granola account and validate its API key
@@ -87,6 +88,7 @@ Add and sync sources:
   sync-beeper            Sync chats from Beeper Desktop (all connected networks)
   sync-calendar          Sync Google Calendar events for an account
   sync-carddav           Synchronize enabled CardDAV connections
+  sync-chatwoot          Sync Chatwoot inboxes
   sync-circleback        Sync Circleback meetings, notes, and transcripts
   sync-discord           Sync registered Discord guild history
   sync-full              Perform a full sync of Gmail accounts

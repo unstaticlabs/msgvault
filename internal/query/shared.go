@@ -551,6 +551,12 @@ func getMessageByQueryShared(ctx context.Context, db store.SQLReader, rebind reb
 	}
 
 	msg.CalendarState = store.ParseCalendarEventState(msg.MessageType, metadata)
+	msg.RelatedMessageID = store.RelatedMessageCandidate(msg.ID, msg.MessageType, metadata.String)
+	related := []store.APIMessage{{SourceID: msg.SourceID, MessageType: msg.MessageType, RelatedMessageID: msg.RelatedMessageID}}
+	if err := store.PopulateRelatedMessagesContext(ctx, db, rebind, tablePrefix, related); err != nil {
+		return nil, err
+	}
+	msg.RelatedMessageID = related[0].RelatedMessageID
 	if sentAt.Valid {
 		msg.SentAt = sentAt.Time
 	}

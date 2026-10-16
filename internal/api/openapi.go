@@ -366,7 +366,8 @@ import (
 // 3.16.0 adds authenticated implementation-only MCP capability discovery.
 // 3.17.0 adds bounded opt-in filename suggestions, including person scope.
 // 3.18.0 combines upstream operations with scoped mailbox and email-work contracts.
-const APISchemaVersion = "3.18.0"
+// 3.19.0 adds same-source call/conversation links while retaining scoped mailbox and calendar contracts.
+const APISchemaVersion = "3.19.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

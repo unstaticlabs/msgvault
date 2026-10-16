@@ -51,6 +51,7 @@ type APIMessage struct {
 	CalendarState        *CalendarEventState
 	InboxState           string
 	ReadState            string
+	RelatedMessageID     *int64
 	ConversationTitle    string
 	ID                   int64
 	SourceID             int64
@@ -280,6 +281,12 @@ func (s *Store) GetMessageContext(ctx context.Context, id int64) (*APIMessage, e
 		return nil, err
 	}
 	m.CalendarState = ParseCalendarEventState(m.MessageType, metadata)
+	m.RelatedMessageID = RelatedMessageCandidate(m.ID, m.MessageType, metadata.String)
+	messages := []APIMessage{m}
+	if err := s.populateRelatedMessages(ctx, messages); err != nil {
+		return nil, err
+	}
+	m.RelatedMessageID = messages[0].RelatedMessageID
 	m.IsFromMe = isFromMe.Bool
 	if sentAt.Valid {
 		m.SentAt = sentAt.Time
