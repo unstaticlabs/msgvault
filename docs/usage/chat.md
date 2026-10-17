@@ -409,7 +409,7 @@ The MCP server exposes the following tools to connected AI clients:
 | `update_saved_view` | Patch supplied Saved View fields using optimistic revision checking. Write-class. | `id` (int, required), `revision` (int, required), at least one of `name`, `description`, `canonical_state`, `schema_version` |
 | `delete_saved_view` | Delete a Saved View definition, not archive messages. Write-class and destructive. | `id` (int, required), `revision` (int, required) |
 | `stage_deletion` | Stage messages for deletion (creates manifest only) | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string) |
-| `archive_from_inbox` | Remove messages from your inbox at the mail provider. Disabled unless both opt-ins are set. `confirm=true` archives; without `confirm` it returns a plan and changes nothing. `confirmation_token` with `confirm=true` archives that plan and needs no selection. | `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string), `confirm` (bool), `confirmation_token` (string) |
+| `archive_from_inbox` | Remove messages from your inbox at the mail provider. Disabled unless both opt-ins are set. `confirm=true` archives; without `confirm` it returns a plan and changes nothing. `confirmation_token` with `confirm=true` archives that plan and needs no selection. | `message_ids` (array of local IDs, without account/query/filters) OR `query` (string) OR structured filters: `from` (string), `domain` (string), `label` (string), `after` (string), `before` (string), `has_attachment` (bool); optional: `account` (string), `confirm` (bool), `confirmation_token` (string) |
 | `get_person_profile` | One durable person's overview from local derived state: display name, tracking, contact state (first/last contact, last inbound and outbound, interaction count, inferred channel), the curated `primary_channel`, non-sensitive attributes, current employment, typed relationships, contact points, dates, and categories. Excludes sensitive attributes, private Notes, addresses, and media; makes no provider calls. | `person_id` (int, required) |
 | `search_people` | Find observed contacts and saved profiles by name or identity. Saved-profile rows include `vcard_uid` and `carddav_bindings`; older daemons return no CardDAV binding entries. This is a local lookup, not semantic profile search. | `query` (string), `limit` (int, default 20), `cursor` (string) |
 | `get_person_notes` | Read a saved person's private Notes, including provenance and current value ID. | `person_id` (int, required) |
@@ -903,6 +903,37 @@ all, so a backlog is worked through by repeating until `has_more` is false
 rather than by guessing. Interrupting a run is safe — messages already archived
 drop out of an inbox-scoped selection, so the next call picks up where the last
 one stopped.
+
+### Archive exactly the messages you selected
+
+When an agent has reviewed individual messages in a Saved View or related-email
+work item, pass their **local message IDs** directly. This avoids reconstructing
+a query that could select different mail:
+
+```json
+{"message_ids": [101, 103], "confirm": true}
+```
+
+These are MsgVault message IDs, not provider IDs, thread IDs or work-item IDs.
+Send between 1 and 1000 IDs, all from one source. Repeated IDs are counted and
+archived once. Omit `account`, `query` and all filters: the records already
+identify the source. For an exchange spanning accounts, make one call for each
+source's exact set. A mixed-source set is refused without archiving a subset.
+
+If any ID is missing, inaccessible, deleted at the provider or lacks the provider
+ID needed to archive it, refresh the selected messages before trying again.
+MsgVault does not replace that selection with a search or silently skip an
+unavailable ID. An optional plan works the same way: omit `confirm`, inspect the
+plan, then send its token with `confirm=true`.
+
+Existing mailbox permissions and provider support still apply. A successful
+archive removes only Inbox state; messages, bodies, attachments and other
+labels remain. `failed_ids` names **provider message IDs**, not local IDs. Read
+`archived`, `failed`, `remaining` and `next_step` before reporting completion.
+A partial result does not mean every selected message moved. Repeating the same
+exact set is safe, including messages already archived. If a transport or
+provider failure leaves the write outcome unknown, inspect current message
+state before reporting success; an error is not proof that nothing changed.
 
 ### Unattended and scheduled runs
 

@@ -1700,6 +1700,7 @@ func TestEngineGetMessageSummariesByIDs_CarriesFromAndAttachmentCount(t *testing
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":         42,
+			"deleted_at": "2024-01-16T10:30:00Z",
 			"subject":    "Hello",
 			"from":       "alice@example.com",
 			"to":         []string{"bob@example.com"},
@@ -1726,6 +1727,8 @@ func TestEngineGetMessageSummariesByIDs_CarriesFromAndAttachmentCount(t *testing
 	assert.Equal("alice@example.com", s.FromEmail, "FromEmail")
 	assert.Equal(2, s.AttachmentCount, "AttachmentCount")
 	assert.True(s.HasAttachments, "HasAttachments")
+	require.NotNil(s.DeletedAt)
+	assert.Equal("2024-01-16T10:30:00Z", s.DeletedAt.Format(time.RFC3339))
 }
 func TestEngineSearchSerializesMessageTypes(t *testing.T) {
 	require := require.New(t)
