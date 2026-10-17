@@ -907,6 +907,7 @@ func (e *Engine) GetMessageSummariesByIDs(ctx context.Context, ids []int64) ([]q
 		summary := query.MessageSummary{
 			ID:                   md.ID,
 			InboxState:           providerStateFromString(md.InboxState),
+			DeletedAt:            md.DeletedAt,
 			ReadState:            providerStateFromString(md.ReadState),
 			WebURL:               md.WebURL,
 			SourceID:             md.SourceID,

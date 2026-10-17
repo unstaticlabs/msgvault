@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -623,4 +624,140 @@ func TestArchiveFromInboxFallsBackWhenTheSizeIsUnknown(t *testing.T) {
 	assert.True(resp.Stale)
 	assert.Equal(2, resp.MessageCount)
 	assert.Nil(resp.TotalMatching, "an unknown total must be absent, not reported as zero")
+}
+
+func exactArchiveEngine() *querytest.MockEngine {
+	e := inboxArchiveEngine()
+	e.Messages = map[int64]*query.MessageDetail{
+		1: {ID: 1, SourceID: 1, SourceMessageID: "gmail-001"},
+		2: {ID: 2, SourceID: 1, SourceMessageID: "gmail-002"},
+		3: {ID: 3, SourceID: 2, SourceMessageID: "other-003"},
+	}
+	e.Accounts = append(e.Accounts, query.AccountInfo{ID: 2, SourceType: "gmail", Identifier: "other@example.com"})
+	return e
+}
+
+func TestArchiveFromInboxExactIDs(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	archiver := &fakeInboxArchiver{result: InboxArchiveResult{Archived: 2}}
+	h := &handlers{engine: exactArchiveEngine(), inboxArchiver: archiver}
+	args := map[string]any{"message_ids": []any{float64(2), float64(1), float64(2)}}
+	plan := runTool[inboxArchivePlanResponse](t, ToolArchiveFromInbox, h.archiveFromInbox, args)
+	assert.Equal(2, plan.MessageCount)
+	assert.False(plan.Stale)
+	assert.False(plan.HasMore)
+	assert.Empty(archiver.executeReqs)
+	require.Len(archiver.authorizeReqs, 1)
+	assert.Equal([]string{"gmail-002", "gmail-001"}, archiver.authorizeReqs[0].SourceMessageIDs)
+	args["confirm"] = true
+	result := runTool[inboxArchiveExecuteResponse](t, ToolArchiveFromInbox, h.archiveFromInbox, args)
+	assert.Equal(2, result.Archived)
+	require.NotNil(result.TotalMatching)
+	assert.Equal(2, *result.TotalMatching)
+	require.Len(archiver.executeReqs, 1)
+	assert.Equal([]string{"gmail-002", "gmail-001"}, archiver.executeReqs[0].SourceMessageIDs)
+}
+
+func TestArchiveFromInboxExactIDsRejectsIncompleteSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"missing", map[string]any{"message_ids": []any{float64(1), float64(999)}}, "unavailable"},
+		{"mixed sources", map[string]any{"message_ids": []any{float64(1), float64(3)}}, "multiple sources"},
+		{"empty", map[string]any{"message_ids": []any{}}, "between 1"},
+		{"invalid", map[string]any{"message_ids": []any{float64(-1)}}, "positive"},
+		{"fraction", map[string]any{"message_ids": []any{1.5}}, "positive"},
+		{"unsafe integer", map[string]any{"message_ids": []any{float64(9007199254740992)}}, "safe integer"},
+		{"wrong type", map[string]any{"message_ids": "1"}, "array"},
+		{"token and IDs", map[string]any{"message_ids": []any{float64(1)}, "confirmation_token": "token"}, "cannot be combined"},
+	}
+	for _, key := range []string{"account", "query", "from", "domain", "label", "after", "before", "has_attachment"} {
+		tests = append(tests, struct {
+			name string
+			args map[string]any
+			want string
+		}{key, map[string]any{"message_ids": []any{float64(1)}, key: "x"}, "cannot be combined"})
+	}
+	ids := make([]any, maxArchiveFromInboxResults+1)
+	for i := range ids {
+		ids[i] = float64(i + 1)
+	}
+	tests = append(tests, struct {
+		name string
+		args map[string]any
+		want string
+	}{"too large", map[string]any{"message_ids": ids}, "between 1"})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archiver := &fakeInboxArchiver{}
+			h := &handlers{engine: exactArchiveEngine(), inboxArchiver: archiver}
+			tt.args["confirm"] = true
+			result := runToolExpectError(t, ToolArchiveFromInbox, h.archiveFromInbox, tt.args)
+			assert.Contains(t, result.text, tt.want)
+			assert.Empty(t, archiver.authorizeReqs)
+			assert.Empty(t, archiver.executeReqs)
+		})
+	}
+}
+
+func TestArchiveExactIDsUnavailableMetadataChangesNothing(t *testing.T) {
+	for _, state := range []string{"deleted", "missing provider ID", "source unavailable", "read failed"} {
+		t.Run(state, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			e := exactArchiveEngine()
+			archiver := &fakeInboxArchiver{}
+			e.GetMessageSummariesByIDsFunc = func(context.Context, []int64) ([]query.MessageSummary, error) {
+				if state == "read failed" {
+					return nil, errors.New("synthetic source read failure")
+				}
+				m := query.MessageSummary{ID: 1, SourceID: 1, SourceMessageID: "gmail-001"}
+				if state == "deleted" {
+					now := time.Now()
+					m.DeletedAt = &now
+				}
+				if state == "missing provider ID" {
+					m.SourceMessageID = ""
+				}
+				if state == "source unavailable" {
+					m.SourceID = 999
+				}
+				return []query.MessageSummary{m}, nil
+			}
+			h := &handlers{engine: e, inboxArchiver: archiver}
+			result, err := h.archiveFromInbox(t.Context(), toolRequest{arguments: map[string]any{"message_ids": []any{float64(1)}, "confirm": true}})
+			if state == "read failed" {
+				require.Error(err)
+			} else {
+				require.NoError(err)
+				require.True(result.isError)
+			}
+			assert.Empty(archiver.authorizeReqs)
+			assert.Empty(archiver.executeReqs)
+		})
+	}
+}
+
+func TestArchiveExactIDsProviderFailureKeepsNativeRecovery(t *testing.T) {
+	for _, cause := range []error{ErrInboxArchiveUnsupported, ErrInboxArchiveScopeRequired, errors.New("provider write outcome unknown")} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			archiver := &fakeInboxArchiver{executeErr: cause}
+			h := &handlers{engine: exactArchiveEngine(), inboxArchiver: archiver}
+			result, err := h.archiveFromInbox(t.Context(), toolRequest{arguments: map[string]any{"message_ids": []any{float64(1)}, "confirm": true}})
+			if errors.Is(cause, ErrInboxArchiveUnsupported) || errors.Is(cause, ErrInboxArchiveScopeRequired) {
+				require.NoError(err)
+				require.True(result.isError)
+			} else {
+				require.Error(err)
+				assert.Nil(result)
+			}
+			require.Len(archiver.executeReqs, 1)
+			assert.Equal([]string{"gmail-001"}, archiver.executeReqs[0].SourceMessageIDs)
+		})
+	}
 }
