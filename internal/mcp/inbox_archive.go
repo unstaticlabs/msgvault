@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"go.kenn.io/msgvault/internal/deletion"
+	"go.kenn.io/msgvault/internal/query"
 )
 
 // maxArchiveFromInboxResults bounds how many messages one selection may resolve
@@ -167,11 +168,17 @@ func archiveFromInboxDefinition(_ *handlers) toolDefinition {
 			"selection is broad or you are not confident it matches what the user asked for. To archive a plan, "+
 			"send its confirmation_token back with confirm=true and nothing else: the token names the exact "+
 			"messages the plan covered, so the query does not have to be repeated. "+
-			"Use EITHER 'query' (Gmail-style search) OR structured filters, not both; add label:INBOX to the "+
+			"Select exact local message_ids OR use query/structured filters. With message_ids, omit account and all filters; "+
+			"IDs already identify their source. All IDs must belong to one source; split a multi-account work item into one call per source. "+
+			"Otherwise use EITHER query (Gmail-style search) OR structured filters, not both; add label:INBOX to the "+
 			"selection so the count reflects messages that are actually in the inbox. "+
 			"At most "+strconv.Itoa(maxArchiveFromInboxResults)+" messages move per call; the response reports "+
 			"total_matching and has_more, so repeat the call until has_more is false.",
 		closedObject(map[string]*jsonschema.Schema{
+			"message_ids": {
+				Type: "array", Description: "Exact local message IDs from search, Saved Views, or related-email work items. One source per call; omit account, query and filters. Repeated IDs are archived once. Existing confirm/plan behavior applies.",
+				Items: safeIDSchema("Local message ID"), MinItems: new(1), MaxItems: new(maxArchiveFromInboxResults),
+			},
 			toolArgAccount: accountProperty(),
 			toolArgQuery: stringSchema(
 				"Gmail-style search query (e.g. 'label:INBOX from:newsletter before:2024-01-01'). " +
@@ -210,6 +217,9 @@ func (h *handlers) archiveFromInbox(ctx context.Context, req toolRequest) (*tool
 	// selection here could only produce a different set, which is the drift
 	// the token exists to prevent.
 	if token != "" {
+		if _, found := args["message_ids"]; found {
+			return toolErrorResult("message_ids cannot be combined with confirmation_token; archive the exact IDs with confirm=true, or redeem the plan using only its token and confirm=true."), nil
+		}
 		if !confirm {
 			return toolErrorResult(
 				"confirmation_token was given without confirm=true; add confirm=true to archive the " +
@@ -218,11 +228,7 @@ func (h *handlers) archiveFromInbox(ctx context.Context, req toolRequest) (*tool
 		return h.redeemInboxArchivePlan(ctx, token)
 	}
 
-	selection, result, err := h.resolveMutationTargets(ctx, args, mutationResolveOptions{
-		limit:       maxArchiveFromInboxResults,
-		operation:   "inbox archive",
-		preferFresh: true,
-	})
+	selection, result, err := h.resolveInboxArchiveSelection(ctx, args)
 	if result != nil || err != nil {
 		return result, err
 	}
@@ -233,6 +239,9 @@ func (h *handlers) archiveFromInbox(ctx context.Context, req toolRequest) (*tool
 	source, sourceErr := deletion.SourceReferenceForTargets(selection.targets)
 	switch {
 	case errors.Is(sourceErr, deletion.ErrMultipleDeletionSources):
+		if _, exact := args["message_ids"]; exact {
+			return toolErrorResult("selected message_ids span multiple sources; split them into one exact-ID call per source. Nothing has been archived."), nil
+		}
 		return toolErrorResult(
 			"selected messages span multiple sources; set account or archive each source separately"), nil
 	case errors.Is(sourceErr, deletion.ErrIncompleteDeletionSource):
@@ -499,4 +508,66 @@ func translateInboxArchiveErr(err error) *toolResult {
 	default:
 		return nil
 	}
+}
+
+// resolveInboxArchiveSelection keeps exact IDs separate from query selection:
+// an absent ID must never turn into a broader search or a partial batch.
+func (h *handlers) resolveInboxArchiveSelection(ctx context.Context, args map[string]any) (*mutationSelection, *toolResult, error) {
+	if _, found := args["message_ids"]; !found {
+		return h.resolveMutationTargets(ctx, args, mutationResolveOptions{
+			limit: maxArchiveFromInboxResults, operation: "inbox archive", preferFresh: true,
+		})
+	}
+	for _, key := range []string{toolArgAccount, toolArgQuery, toolArgFrom, "domain", "label", toolArgAfter, toolArgBefore, "has_attachment"} {
+		if _, found := args[key]; found {
+			return nil, toolErrorResult("message_ids cannot be combined with account, query or filters; IDs already identify the source. Send one exact-ID call per source."), nil
+		}
+	}
+	ids, err := positiveInt64ArrayArg(args, "message_ids")
+	if err != nil {
+		return nil, toolErrorResult(err.Error()), nil
+	}
+	if len(ids) == 0 || len(ids) > maxArchiveFromInboxResults {
+		return nil, toolErrorResult(fmt.Sprintf("message_ids must contain between 1 and %d local message IDs", maxArchiveFromInboxResults)), nil
+	}
+	unique := make([]int64, 0, len(ids))
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if id > int64(maxJSONSafeInteger) {
+			return nil, toolErrorResult("message_ids must contain positive safe integers"), nil
+		}
+		if !seen[id] {
+			unique = append(unique, id)
+			seen[id] = true
+		}
+	}
+	messages, err := h.engine.GetMessageSummariesByIDs(ctx, unique)
+	if err != nil {
+		return nil, nil, newInternalError("resolve exact inbox archive messages", err)
+	}
+	byID := make(map[int64]query.MessageSummary, len(messages))
+	for _, message := range messages {
+		byID[message.ID] = message
+	}
+	accounts, err := h.engine.ListAccounts(ctx)
+	if err != nil {
+		return nil, nil, newInternalError("resolve inbox archive sources", err)
+	}
+	bySource := make(map[int64]query.AccountInfo, len(accounts))
+	for _, account := range accounts {
+		bySource[account.ID] = account
+	}
+	selection := &mutationSelection{description: fmt.Sprintf("%d exact local message IDs", len(unique)), totalMatching: len(unique), freshlyResolved: true}
+	for _, id := range unique {
+		message, found := byID[id]
+		if !found || message.DeletedAt != nil || strings.TrimSpace(message.SourceMessageID) == "" {
+			return nil, toolErrorResult("one or more message_ids are unavailable; refresh the selected messages and retry. Nothing has been archived."), nil
+		}
+		account := bySource[message.SourceID]
+		selection.targets = append(selection.targets, query.DeletionTarget{
+			MessageID: id, SourceID: message.SourceID, SourceType: account.SourceType,
+			SourceIdentifier: account.Identifier, SourceMessageID: message.SourceMessageID,
+		})
+	}
+	return selection, nil, nil
 }
