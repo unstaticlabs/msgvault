@@ -8,6 +8,10 @@ internal/web/dist/**/*.json text eol=lf
 internal/web/dist/**/*.mjs text eol=lf
 internal/web/dist/**/*.svg text eol=lf
 
+# The MCP listener's icons are embedded and served byte for byte. Never
+# rewrite them on Windows checkouts.
+internal/mcp/assets/** -text
+
 # vCard conformance fixtures intentionally retain wire-format CRLF bytes.
 cmd/msgvault/cmd/testdata/issue-769.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 internal/vcard/testdata/*.vcf -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
