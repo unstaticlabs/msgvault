@@ -59,7 +59,9 @@ func TestDocumentFailureDiagnosticsPersistAcrossRetryAndRebuild(t *testing.T) {
 		Claim: claim, ReasonCode: "spool_capacity_unavailable", Detail: "spool quota is exhausted", RetryAt: time.Now().Add(time.Minute),
 	}))
 	// Retry touches the old row too; diagnostic ordering follows creation, not retry timestamps.
-	_, err = f.Store.DB().Exec(f.Store.Rebind("UPDATE document_extractions SET created_at = ?, updated_at = ? WHERE id = ?"), time.Now().Add(-time.Hour), time.Now().Add(time.Hour), "failure-first")
+	// Match the UTC timestamps written by claims: SQLite orders their stored text.
+	now := time.Now().UTC()
+	_, err = f.Store.DB().Exec(f.Store.Rebind("UPDATE document_extractions SET created_at = ?, updated_at = ? WHERE id = ?"), now.Add(-time.Hour), now.Add(time.Hour), "failure-first")
 	require.NoError(err)
 	status, err = f.Store.GetDocumentIndexStatusForScope(t.Context(), profile.ID, "original", profile.AllowedMediaTypes, nil)
 	require.NoError(err)

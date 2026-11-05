@@ -100,13 +100,27 @@ func TestSourceMergePreservesLegacyAttachmentDownloads(t *testing.T) {
 			require.Equal(http.StatusOK, before.Code, before.Body.String())
 			require.Equal(content, before.Body.Bytes())
 			req := store.MergeSourcesRequest{FromSourceID: from.ID, IntoSourceID: into.ID, DryRun: true}
+			previewStarted := time.Now()
 			preview, err := st.MergeSourcesContext(t.Context(), req)
 			require.NoError(err)
+			require.NotNil(preview.AccessImpact)
+			assert.False(preview.AccessImpact.AssessedAt.Before(previewStarted))
+			assert.False(preview.AccessImpact.AssessedAt.After(time.Now()))
 			req.DryRun = false
+			applyStarted := time.Now()
 			result, err := st.MergeSourcesContext(t.Context(), req)
 			require.NoError(err)
+			require.NotNil(result.AccessImpact)
+			assert.False(result.AccessImpact.AssessedAt.Before(applyStarted), "execution freshly assesses current user access")
+			assert.False(result.AccessImpact.AssessedAt.After(time.Now()))
+			// Compare all predictive fields; only the assessment clock changes on execution.
+			preview.AccessImpact.AssessedAt = result.AccessImpact.AssessedAt
 			preview.DryRun = false
 			assert.Equal(preview, result)
+			replay, err := st.MergeSourcesContext(t.Context(), req)
+			require.NoError(err)
+			assert.True(replay.AlreadyMerged)
+			assert.Equal(result.AccessImpact, replay.AccessImpact, "retries return the recorded assessment, including its timestamp")
 			wantHidden := int64(0)
 			if scenario.hidden {
 				wantHidden = 1
