@@ -297,6 +297,10 @@ func TestMergeSourcesTransfersAndPreservesEvidence(t *testing.T) {
 	result, err := st.MergeSourcesContext(ctx, req)
 	require.NoError(err)
 	preview.DryRun = false
+	require.NotNil(preview.AccessImpact)
+	require.NotNil(result.AccessImpact)
+	assert.False(result.AccessImpact.AssessedAt.Before(preview.AccessImpact.AssessedAt), "execution reassesses current user access")
+	preview.AccessImpact.AssessedAt = result.AccessImpact.AssessedAt
 	assert.Equal(preview, result)
 	for _, id := range []int64{duplicate, unique, repeated} {
 		var providerID string

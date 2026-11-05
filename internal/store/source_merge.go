@@ -24,17 +24,18 @@ type MergeSourcesRequest struct {
 
 // SourceMergeResult reports only archive metadata, never message content.
 type SourceMergeResult struct {
-	FromSourceID        int64 `json:"from_source_id"`
-	IntoSourceID        int64 `json:"into_source_id"`
-	MessagesMoved       int64 `json:"messages_moved"`
-	DuplicatesHidden    int64 `json:"duplicates_hidden"`
-	AmbiguousMatches    int64 `json:"ambiguous_matches"`
-	ConversationsMoved  int64 `json:"conversations_moved"`
-	AttachmentsCopied   int64 `json:"attachments_copied"`
-	IdentitiesMerged    int64 `json:"identities_merged"`
-	CheckpointConflicts int64 `json:"checkpoint_conflicts"`
-	AlreadyMerged       bool  `json:"already_merged"`
-	DryRun              bool  `json:"dry_run"`
+	AccessImpact        *SourceMergeAccessImpact `json:"access_impact,omitempty" doc:"Source-access changes assessed for this preview or committed merge. Recorded retries retain the original assessment; current assignments may since have changed."`
+	FromSourceID        int64                    `json:"from_source_id"`
+	IntoSourceID        int64                    `json:"into_source_id"`
+	MessagesMoved       int64                    `json:"messages_moved"`
+	DuplicatesHidden    int64                    `json:"duplicates_hidden"`
+	AmbiguousMatches    int64                    `json:"ambiguous_matches"`
+	ConversationsMoved  int64                    `json:"conversations_moved"`
+	AttachmentsCopied   int64                    `json:"attachments_copied"`
+	IdentitiesMerged    int64                    `json:"identities_merged"`
+	CheckpointConflicts int64                    `json:"checkpoint_conflicts"`
+	AlreadyMerged       bool                     `json:"already_merged"`
+	DryRun              bool                     `json:"dry_run"`
 }
 
 func invalidSourceMerge(reason string) error {
@@ -166,6 +167,10 @@ func (s *Store) MergeSourcesContext(ctx context.Context, req MergeSourcesRequest
 		plan, err := buildSourceMergePlan(ctx, tx, req.FromSourceID, req.IntoSourceID, &result)
 		if err != nil {
 			return fmt.Errorf("plan source merge: %w", err)
+		}
+		result.AccessImpact, err = sourceMergeAccessImpact(ctx, tx, req.FromSourceID, req.IntoSourceID, result.MessagesMoved)
+		if err != nil {
+			return err
 		}
 		if req.DryRun {
 			return nil

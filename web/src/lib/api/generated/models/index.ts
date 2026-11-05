@@ -1000,6 +1000,8 @@ export * from "./source";
 export * from "./sourceCount";
 export * from "./sourceIdentitiesResponse";
 export * from "./sourceIdentityResponse";
+export * from "./sourceMergeAccessImpact";
+export * from "./sourceMergeAccessUser";
 export * from "./sourceMergeResult";
 export * from "./sourceReference";
 export * from "./sourcesRequest";

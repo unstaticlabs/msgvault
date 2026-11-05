@@ -39,6 +39,10 @@ func TestMergeSourcesKeepsConflictingLegacyAttachmentDetailsVisible(t *testing.T
 			result, err := st.MergeSourcesContext(t.Context(), req)
 			require.NoError(err)
 			preview.DryRun = false
+			require.NotNil(preview.AccessImpact)
+			require.NotNil(result.AccessImpact)
+			assert.False(result.AccessImpact.AssessedAt.Before(preview.AccessImpact.AssessedAt), "execution reassesses current user access")
+			preview.AccessImpact.AssessedAt = result.AccessImpact.AssessedAt
 			assert.Equal(preview, result)
 			wantHidden := int64(0)
 			if test.hidden {

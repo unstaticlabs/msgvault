@@ -16262,18 +16262,103 @@ func (s SourceIdentityResponse) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(s))
 }
 
+type SourceMergeAccessImpact struct {
+	// AdministratorsKeepAccess Administrators retain native all-source access regardless of assignments.
+	AdministratorsKeepAccess bool      `json:"administrators_keep_access"`
+	AssessedAt               time.Time `json:"assessed_at" validate:"required"`
+
+	// Basis The assessment uses current stored user roles and source assignments. Native message visibility and each credential's configured role still apply.
+	Basis string `json:"basis" validate:"required"`
+
+	// BindingsCopied The merge does not copy or rewrite user-source assignments.
+	BindingsCopied bool `json:"bindings_copied"`
+
+	// DisabledUsersRemainDisabled Disabled user accounts are not current access gains or losses; they remain disabled.
+	DisabledUsersRemainDisabled bool `json:"disabled_users_remain_disabled"`
+
+	// ExistingDestinationAccessUnchanged Access to history already owned by the destination keeps following its existing source bindings.
+	ExistingDestinationAccessUnchanged bool `json:"existing_destination_access_unchanged"`
+
+	// GainingUsers Enabled non-administrator user accounts bound to the destination but not the historical source. They gain source access to the moved history.
+	GainingUsers []SourceMergeAccessUser `json:"gaining_users" validate:"required"`
+
+	// LosingUsers Enabled non-administrator user accounts bound to the historical source but not the destination. They lose source access to the moved history.
+	LosingUsers []SourceMergeAccessUser `json:"losing_users" validate:"required"`
+}
+
+func (s SourceMergeAccessImpact) Validate() error {
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(s.AssessedAt, "required"); err != nil {
+		errors = errors.Append("AssessedAt", err)
+	}
+	if err := typesValidator.Var(s.Basis, "required"); err != nil {
+		errors = errors.Append("Basis", err)
+	}
+	if err := typesValidator.Var(s.GainingUsers, "required"); err != nil {
+		errors = errors.Append("GainingUsers", err)
+	}
+	for i, item := range s.GainingUsers {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("GainingUsers[%d]", i), err)
+			}
+		}
+	}
+	if err := typesValidator.Var(s.LosingUsers, "required"); err != nil {
+		errors = errors.Append("LosingUsers", err)
+	}
+	for i, item := range s.LosingUsers {
+		if v, ok := any(item).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append(fmt.Sprintf("LosingUsers[%d]", i), err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
+}
+
+type SourceMergeAccessUser struct {
+	DisplayName *string `json:"display_name,omitzero"`
+	Email       string  `json:"email" validate:"required"`
+	Role        string  `json:"role" validate:"required"`
+	UserID      int64   `json:"user_id"`
+}
+
+func (s SourceMergeAccessUser) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+}
+
 type SourceMergeResult struct {
-	AlreadyMerged       bool  `json:"already_merged"`
-	AmbiguousMatches    int64 `json:"ambiguous_matches"`
-	AttachmentsCopied   int64 `json:"attachments_copied"`
-	CheckpointConflicts int64 `json:"checkpoint_conflicts"`
-	ConversationsMoved  int64 `json:"conversations_moved"`
-	DryRun              bool  `json:"dry_run"`
-	DuplicatesHidden    int64 `json:"duplicates_hidden"`
-	FromSourceID        int64 `json:"from_source_id"`
-	IdentitiesMerged    int64 `json:"identities_merged"`
-	IntoSourceID        int64 `json:"into_source_id"`
-	MessagesMoved       int64 `json:"messages_moved"`
+	AccessImpact        *SourceMergeAccessImpact `json:"access_impact,omitempty"`
+	AlreadyMerged       bool                     `json:"already_merged"`
+	AmbiguousMatches    int64                    `json:"ambiguous_matches"`
+	AttachmentsCopied   int64                    `json:"attachments_copied"`
+	CheckpointConflicts int64                    `json:"checkpoint_conflicts"`
+	ConversationsMoved  int64                    `json:"conversations_moved"`
+	DryRun              bool                     `json:"dry_run"`
+	DuplicatesHidden    int64                    `json:"duplicates_hidden"`
+	FromSourceID        int64                    `json:"from_source_id"`
+	IdentitiesMerged    int64                    `json:"identities_merged"`
+	IntoSourceID        int64                    `json:"into_source_id"`
+	MessagesMoved       int64                    `json:"messages_moved"`
+}
+
+func (s SourceMergeResult) Validate() error {
+	var errors runtime.ValidationErrors
+	if s.AccessImpact != nil {
+		if v, ok := any(s.AccessImpact).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("AccessImpact", err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type SourceReference struct {

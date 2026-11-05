@@ -4,9 +4,11 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
 	"go.kenn.io/msgvault/internal/accountops"
+	"go.kenn.io/msgvault/internal/store"
 )
 
 func newMergeAccountCmd() *cobra.Command {
@@ -16,7 +18,7 @@ func newMergeAccountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "merge-account --from <account> --into <account>",
 		Short: "Merge archived accounts",
-		Long:  "Move archived messages into a compatible account, preserve original evidence, and hide only unambiguous duplicates. Use --dry-run to preview the checks and counts. A merge retires the historical source, so preview first, then repeat with --yes to apply it.",
+		Long:  "Move archived messages into a compatible account, preserve original evidence, and hide only unambiguous duplicates. Use --dry-run to preview the checks, counts and who gains or loses access to the moved history. A merge retires the historical source, so preview first, then repeat with --yes to apply it.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			request.DryRunSet = true
@@ -49,7 +51,7 @@ func newMergeAccountCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("write merge report: %w", err)
 			}
-			return nil
+			return writeSourceMergeAccessImpact(cmd.OutOrStdout(), result)
 		},
 	}
 	cmd.Flags().StringVar(&request.From, "from", "", "Historical account identifier or alias")
@@ -63,3 +65,44 @@ func newMergeAccountCmd() *cobra.Command {
 }
 
 func init() { rootCmd.AddCommand(newMergeAccountCmd()) }
+
+func writeSourceMergeAccessImpact(out io.Writer, result *store.SourceMergeResult) error {
+	impact := result.AccessImpact
+	if impact == nil {
+		_, err := fmt.Fprintln(out, "Access changes were not recorded in this older report. Moved history follows destination access; source assignments are not copied.")
+		if err != nil {
+			return fmt.Errorf("write historical access context: %w", err)
+		}
+		return nil
+	}
+	if result.AlreadyMerged {
+		if _, err := fmt.Fprintf(out, "Recorded source access impact (%s); current assignments may have changed.\n", impact.AssessedAt.Format("2006-01-02T15:04:05Z07:00")); err != nil {
+			return fmt.Errorf("write recorded access context: %w", err)
+		}
+	} else if _, err := fmt.Fprintf(out, "Source access impact at %s (current user-account roles and assignments):\n", impact.AssessedAt.Format("2006-01-02T15:04:05Z07:00")); err != nil {
+		return fmt.Errorf("write access assessment time: %w", err)
+	}
+	if _, err := fmt.Fprintln(out, "Moved history follows destination source access."); err != nil {
+		return fmt.Errorf("write merge access context: %w", err)
+	}
+	for _, group := range []struct {
+		label string
+		users []store.SourceMergeAccessUser
+	}{{"Gains source access to moved history", impact.GainingUsers}, {"Loses source access to moved history", impact.LosingUsers}} {
+		if len(group.users) == 0 {
+			if _, err := fmt.Fprintf(out, "%s: none.\n", group.label); err != nil {
+				return fmt.Errorf("write merge access users: %w", err)
+			}
+		}
+		for _, user := range group.users {
+			if _, err := fmt.Fprintf(out, "%s: %s (user %d, %s).\n", group.label, user.Email, user.UserID, user.Role); err != nil {
+				return fmt.Errorf("write merge access user: %w", err)
+			}
+		}
+	}
+	_, err := fmt.Fprintln(out, "Access to existing destination history is unchanged. Source assignments are not copied. Administrators keep all-source access; disabled users remain disabled. Native message rules and each credential's configured role still apply.")
+	if err != nil {
+		return fmt.Errorf("write merge access consequences: %w", err)
+	}
+	return nil
+}

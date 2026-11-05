@@ -16084,8 +16084,67 @@ components:
         - signals
         - confirmed_at
       type: object
+    SourceMergeAccessImpact:
+      properties:
+        administrators_keep_access:
+          description: Administrators retain native all-source access regardless of assignments.
+          type: boolean
+        assessed_at:
+          format: date-time
+          type: string
+        basis:
+          description: The assessment uses current stored user roles and source assignments. Native message visibility and each credential's configured role still apply.
+          type: string
+        bindings_copied:
+          description: The merge does not copy or rewrite user-source assignments.
+          type: boolean
+        disabled_users_remain_disabled:
+          description: Disabled user accounts are not current access gains or losses; they remain disabled.
+          type: boolean
+        existing_destination_access_unchanged:
+          description: Access to history already owned by the destination keeps following its existing source bindings.
+          type: boolean
+        gaining_users:
+          description: Enabled non-administrator user accounts bound to the destination but not the historical source. They gain source access to the moved history.
+          items:
+            $ref: "#/components/schemas/SourceMergeAccessUser"
+          type: array
+        losing_users:
+          description: Enabled non-administrator user accounts bound to the historical source but not the destination. They lose source access to the moved history.
+          items:
+            $ref: "#/components/schemas/SourceMergeAccessUser"
+          type: array
+      required:
+        - assessed_at
+        - gaining_users
+        - losing_users
+        - existing_destination_access_unchanged
+        - bindings_copied
+        - administrators_keep_access
+        - disabled_users_remain_disabled
+        - basis
+      type: object
+    SourceMergeAccessUser:
+      properties:
+        display_name:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        user_id:
+          format: int64
+          type: integer
+      required:
+        - user_id
+        - email
+        - role
+      type: object
     SourceMergeResult:
       properties:
+        access_impact:
+          $ref: "#/components/schemas/SourceMergeAccessImpact"
+          description: Source-access changes assessed for this preview or committed merge. Recorded retries retain the original assessment; current assignments may since have changed.
         already_merged:
           type: boolean
         ambiguous_matches:
