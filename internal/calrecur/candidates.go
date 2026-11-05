@@ -46,6 +46,19 @@ func civilTime(t time.Time) time.Time {
 	return time.Date(year, month, day, hour, minute, second, t.Nanosecond(), time.UTC)
 }
 
+// forwardZoneBounds preserves native offset intervals while ensuring their
+// nonzero end advances a forward scan. Go's POSIX time-zone extension can
+// report a synthetic 365-day year end during the final day of a leap year,
+// leaving end at or before the queried instant. Split that stale interval at
+// the next UTC year boundary, where ZoneBounds resumes the next year's rules.
+func forwardZoneBounds(instant time.Time) (start, end time.Time) {
+	start, end = instant.ZoneBounds()
+	if !end.IsZero() && !end.After(instant) {
+		end = time.Date(instant.UTC().Year()+1, time.January, 1, 0, 0, 0, 0, time.UTC).In(instant.Location())
+	}
+	return start, end
+}
+
 // civilHorizon includes wall times before a backward offset transition even
 // when they compare later than the horizon's local clock. The original
 // absolute horizon is checked again after resolving each candidate.
@@ -74,7 +87,7 @@ func firstLocalWallTime(anchor time.Time, loc *time.Location) (time.Time, bool) 
 	for cursor := searchStart; cursor < searchEnd; {
 		instant := time.Unix(cursor, 0).In(loc)
 		_, offset := instant.Zone()
-		_, zoneEnd := instant.ZoneBounds()
+		_, zoneEnd := forwardZoneBounds(instant)
 		intervalEnd := searchEnd
 		if !zoneEnd.IsZero() && zoneEnd.Unix() < intervalEnd {
 			intervalEnd = zoneEnd.Unix()

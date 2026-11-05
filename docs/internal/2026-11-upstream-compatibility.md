@@ -81,6 +81,10 @@ semantics and existing opt-ins.
   inherited ACL through an owner-verified security handle. Secret files remain
   protected, and native locks and exact owner checks stay in place. Provider
   and CardDAV publication both preserve subsequent OAuth writes and deletes.
+- Forward time-zone scans normalize Go's stale POSIX leap-year end boundary
+  to the next UTC year boundary. This keeps valid future RDATE/EXDATE values
+  and civil dates resolvable without looping during calendar projection.
+  Native offsets, fold/gap semantics and backward scans remain unchanged.
 
 ## Evidence and limits
 

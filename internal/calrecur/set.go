@@ -131,7 +131,7 @@ func CivilDateBoundary(date string, loc *time.Location) (time.Time, bool, error)
 	var boundary time.Time
 	foundBoundary, exists := false, false
 	for cursor := searchStart; cursor < searchEndExclusive; {
-		_, zoneEnd := time.Unix(cursor, 0).In(loc).ZoneBounds()
+		_, zoneEnd := forwardZoneBounds(time.Unix(cursor, 0).In(loc))
 		intervalEnd := searchEndExclusive
 		if !zoneEnd.IsZero() && zoneEnd.Unix() < intervalEnd {
 			intervalEnd = zoneEnd.Unix()
@@ -574,7 +574,7 @@ func parseLocalDateTime(layout, value string, loc *time.Location) (time.Time, er
 	}
 	// Explicit gap values use the offset before the forward transition.
 	for cursor := anchor.Add(-72 * time.Hour).In(loc); cursor.Before(anchor.Add(72 * time.Hour)); {
-		_, end := cursor.ZoneBounds()
+		_, end := forwardZoneBounds(cursor)
 		if end.IsZero() {
 			break
 		}
