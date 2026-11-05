@@ -641,10 +641,10 @@ func ownerParticipantsSelectSQL(primaryEmailPresence string) string {
 }
 
 // messageExportColumns is the messages Parquet column list through is_from_me.
-func messageExportColumns(source *cacheSourceSnapshot, ownerParticipant, attribution string) string {
+func messageExportColumns(source *cacheSourceSnapshot, ownerParticipant, attribution, messageLabelsRelation string) string {
 	inbox, read := "'unknown'", "'unknown'"
 	if source.hasProviderLabels {
-		inbox, read = store.MailboxStateExpressions("m", "sqlite_db.", "duckdb", source.hasIMAPMembership)
+		inbox, read = store.MailboxStateExpressions("m", "sqlite_db.", "duckdb", source.hasIMAPMembership, messageLabelsRelation)
 	}
 	return fmt.Sprintf(`
 			m.id,
@@ -1556,9 +1556,20 @@ func buildCacheLockedAttempt(
 		}
 	}
 
+	// Delivery facts cover the whole archive, while the source child-row
+	// export deliberately reads only the new slice on append. Reuse its
+	// committed and staged membership facts instead of reopening old rows.
+	messageLabelPaths := []string{filepath.Join(staging.root, "message_labels", "*.parquet")}
+	if publicationPlan.Append["message_labels"] {
+		messageLabelPaths = append(messageLabelPaths, filepath.Join(analyticsDir, "message_labels", "*.parquet"))
+	}
+	for i, path := range messageLabelPaths {
+		messageLabelPaths[i] = "'" + strings.ReplaceAll(filepath.ToSlash(path), "'", "''") + "'"
+	}
+	messageLabelsRelation := "read_parquet([" + strings.Join(messageLabelPaths, ",") + "], union_by_name=true)"
 	if err := exportEmailWorkDatasets(sourceSnapshot, func(name, statement string) error {
 		return runExport(name, func() error { _, err := exportDB.Exec(statement); return err })
-	}, staging.root, maxID); err != nil {
+	}, staging.root, maxID, messageLabelsRelation); err != nil {
 		return nil, err
 	}
 
@@ -1582,7 +1593,7 @@ func buildCacheLockedAttempt(
 		primaryEmailPresence,
 	)
 
-	columns := messageExportColumns(sourceSnapshot, messageOwnerParticipant, messageAttribution)
+	columns := messageExportColumns(sourceSnapshot, messageOwnerParticipant, messageAttribution, messageLabelsRelation)
 	if err := runExport(tableMessages, func() error {
 		_, err := exportDB.Exec(fmt.Sprintf(`
 	COPY (

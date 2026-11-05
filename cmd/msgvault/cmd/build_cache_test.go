@@ -1216,7 +1216,8 @@ func TestBuildCacheIncrementalReadsOnlyNewSliceAndMatchesFullBuild(t *testing.T)
 	require.NoError(err)
 	defer func() { require.NoError(db.Close()) }()
 	_, err = db.Exec(`INSERT INTO account_identities (source_id, address) VALUES (1, 'alice@example.com');
-		INSERT INTO attachments (message_id, filename, size) VALUES (1, 'old.txt', 42)`)
+		INSERT INTO attachments (message_id, filename, size) VALUES (1, 'old.txt', 42);
+		UPDATE labels SET source_label_id = 'SENT' WHERE id = 1`)
 	require.NoError(err)
 	_, err = buildCache(dbPath, incDir, true)
 	require.NoError(err)
@@ -1242,6 +1243,9 @@ func TestBuildCacheIncrementalReadsOnlyNewSliceAndMatchesFullBuild(t *testing.T)
 	require.NoError(err)
 	_, err = buildCache(dbPath, incDir, false)
 	require.NoError(err, "incremental exports must read only the new slice")
+	var oldNativeSent bool
+	require.NoError(duck.QueryRow("SELECT native_sent FROM read_parquet(?) WHERE message_id = 1", filepath.Join(incDir, query.DatasetEmailWorkDelivery, "*.parquet")).Scan(&oldNativeSent))
+	require.True(oldNativeSent, "old provider evidence comes from the committed membership, never the deliberately unreadable source row")
 	_, err = db.Exec(`UPDATE messages SET size_estimate = 1000 WHERE id = 1;
 		UPDATE message_recipients SET participant_id = 1 WHERE message_id = 1 AND participant_id = 'unreadable';
 		UPDATE message_labels SET label_id = 1 WHERE message_id = 1 AND label_id = 'unreadable';
@@ -1249,7 +1253,7 @@ func TestBuildCacheIncrementalReadsOnlyNewSliceAndMatchesFullBuild(t *testing.T)
 	require.NoError(err)
 	_, err = buildCache(dbPath, fullDir, true)
 	require.NoError(err)
-	assertCacheExportParity(t, tmp, incDir, fullDir, []string{"messages", "message_recipients", "message_labels", "attachments"})
+	assertCacheExportParity(t, tmp, incDir, fullDir, []string{"messages", "message_recipients", "message_labels", "attachments", query.DatasetEmailWorkDelivery})
 }
 
 // TestBuildCache_IncrementalExport tests that incremental exports only add new messages.

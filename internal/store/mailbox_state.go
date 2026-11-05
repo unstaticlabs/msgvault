@@ -12,18 +12,31 @@ const ProviderMailboxStateUnknown = "unknown"
 // MailboxStateExpressions projects provider state from stored labels and IMAP
 // flags. Local messages.is_read is deliberately separate. Aliases/prefixes and
 // driver are repository-owned SQL names, never caller-supplied filter values.
-// Missing membership metadata and unsupported sources remain unknown.
-func MailboxStateExpressions(alias, prefix, driver string, hasIMAP bool) (string, string) {
+// Missing membership metadata and unsupported sources remain unknown. A cache
+// publisher can supply its committed-plus-staged label membership relation so
+// an incremental build never reopens already-published source child rows.
+func MailboxStateExpressions(alias, prefix, driver string, hasIMAP bool, membershipRelation ...string) (string, string) {
+	labelMembership := prefix + "message_labels"
+	if len(membershipRelation) > 0 {
+		labelMembership = membershipRelation[0]
+	}
 	source := fmt.Sprintf("(SELECT LOWER(ms.source_type) FROM %ssources ms WHERE ms.id = %s.source_id)", prefix, alias)
 	eligible := fmt.Sprintf("%s.deleted_at IS NULL AND %s.deleted_from_source_at IS NULL AND COALESCE(%s.source_message_id, '') <> '' AND LOWER(COALESCE(%s.message_type, 'email')) IN ('', 'email')", alias, alias, alias, alias)
+	labelName := "ml.name"
+	if driver == "duckdb" {
+		// The SQLite scanner can expose invalid bytes as VARCHAR. Validate
+		// before case conversion: malformed metadata is unknown, never a
+		// repaired role name that could become provider evidence.
+		labelName = "TRY(decode(encode(ml.name)))"
+	}
 	role := func(name string) string {
-		return fmt.Sprintf("ml.source_id = %s.source_id AND (ml.source_label_id = '%s' OR (COALESCE(ml.source_label_id, '') = '' AND ml.label_type = 'system' AND UPPER(ml.name) = '%s'))", alias, name, name)
+		return fmt.Sprintf("ml.source_id = %s.source_id AND (ml.source_label_id = '%s' OR (COALESCE(ml.source_label_id, '') = '' AND ml.label_type = 'system' AND UPPER(%s) = '%s'))", alias, name, labelName, name)
 	}
 	known := func(name string) string {
 		return fmt.Sprintf("EXISTS (SELECT 1 FROM %slabels ml WHERE %s)", prefix, role(name))
 	}
 	carries := func(name string) string {
-		return fmt.Sprintf("EXISTS (SELECT 1 FROM %smessage_labels mlink JOIN %slabels ml ON ml.id = mlink.label_id WHERE mlink.message_id = %s.id AND %s)", prefix, prefix, alias, role(name))
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM %s mlink JOIN %slabels ml ON ml.id = mlink.label_id WHERE mlink.message_id = %s.id AND %s)", labelMembership, prefix, alias, role(name))
 	}
 	inbox := fmt.Sprintf("CASE WHEN NOT (%s) THEN 'unknown' WHEN %s = 'gmail' AND %s THEN CASE WHEN %s THEN 'inbox' ELSE 'outside' END ELSE 'unknown' END", eligible, source, known("INBOX"), carries("INBOX"))
 	read := fmt.Sprintf("CASE WHEN NOT (%s) THEN 'unknown' WHEN %s = 'gmail' AND %s THEN CASE WHEN %s THEN 'unread' ELSE 'read' END ELSE 'unknown' END", eligible, source, known("UNREAD"), carries("UNREAD"))
@@ -59,7 +72,7 @@ func MailboxStateExpressions(alias, prefix, driver string, hasIMAP bool) (string
 	}
 	// Labels are updated immediately after a confirmed provider archive; stale
 	// pre-move membership flags must not put that item back into Inbox.
-	imapInbox := fmt.Sprintf("EXISTS (SELECT 1 FROM %smessage_labels mlink JOIN %slabels ml ON ml.id = mlink.label_id WHERE mlink.message_id = %s.id AND ml.source_id = %s.source_id AND UPPER(ml.name) = 'INBOX')", prefix, prefix, alias, alias)
+	imapInbox := fmt.Sprintf("EXISTS (SELECT 1 FROM %s mlink JOIN %slabels ml ON ml.id = mlink.label_id WHERE mlink.message_id = %s.id AND ml.source_id = %s.source_id AND UPPER(%s) = 'INBOX')", labelMembership, prefix, alias, alias, labelName)
 	inbox = fmt.Sprintf("CASE WHEN NOT (%s) THEN 'unknown' WHEN %s = 'imap' AND (%s OR %s) THEN CASE WHEN %s THEN 'inbox' ELSE 'outside' END ELSE (%s) END", eligible, source, exists("TRUE"), imapInbox, imapInbox, inbox)
 	read = fmt.Sprintf("CASE WHEN NOT (%s) THEN 'unknown' WHEN %s = 'imap' AND %s THEN CASE WHEN %s THEN 'unknown' WHEN %s THEN 'unread' ELSE 'read' END ELSE (%s) END", eligible, source, exists("TRUE"), exists("NOT COALESCE(("+valid+"), FALSE)"), exists("NOT ("+seen+")"), read)
 	return inbox, read
