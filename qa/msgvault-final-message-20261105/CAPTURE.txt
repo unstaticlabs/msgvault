@@ -1,0 +1,4 @@
+Final message navigation, captured 5 November 2026.
+Synthetic Example Customer fixture; no production data or browser chrome.
+Source: 9017797071ab4405d25c3d74ef53feae409eb25d.
+The 11 browser journeys separately exercise links, Back, refresh, downloads and reader behavior.
