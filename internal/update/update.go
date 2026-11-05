@@ -186,7 +186,8 @@ func (u *Updater) installLinuxRelease(ctx context.Context, info *UpdateInfo, dst
 	if err != nil {
 		return fmt.Errorf("stage release: %w", err)
 	}
-	defer os.RemoveAll(staging)
+	// Cleanup does not change the outcome after the main executable is installed.
+	defer func() { _ = os.RemoveAll(staging) }()
 	client := u.client()
 	for _, name := range []string{binaryName, codexBridgeName} {
 		reporter.Stepf("Downloading and verifying %s...\n", name)

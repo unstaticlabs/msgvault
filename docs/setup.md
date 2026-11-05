@@ -54,6 +54,11 @@ removed. Use `darwin` for macOS, `linux` for Linux, and `windows` for Windows;
 architectures are `amd64` and `arm64`. macOS and Linux archives end in `.tar.gz`;
 Windows archives end in `.zip`, such as `msgvault_0.23.0_windows_arm64.zip`.
 
+For this first Linux upgrade from a release before 0.23, run the fork installer
+above once. The older `msgvault update` installs only the main executable and
+cannot install the new companion. Subsequent updates from this build keep both
+members matched. Container deployments already include both members.
+
 Linux archives also contain `msgvault-codex-bridge`. Keep it beside the main
 executable when installing an archive manually. The installer and `msgvault
 update` install this helper under its SHA-256 filename before replacing the main
@@ -112,7 +117,7 @@ conda install -c conda-forge msgvault
 
 ## Build From Source
 
-On macOS and Linux, source builds require Go 1.27+, Bun 1.3.14+, Node.js
+On macOS and Linux, source builds require Go 1.27+, Bun (the version pinned in `web/package.json`), Node.js
 (20.19+ on 20.x, 22.13+ on 22.x, or 24+), and a C/C++ compiler (GCC or Clang).
 Bun builds the browser application embedded in the binary, and Node runs the
 embed validator that `make install` invokes. CGO is required because msgvault
