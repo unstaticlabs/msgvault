@@ -292,9 +292,9 @@ func openCredentialLock(tokenDir string) (*os.File, error) {
 	return createOwnerOnlyFile(filepath.Join(tokenDir, ".provider-credentials.lock"), windows.OPEN_ALWAYS)
 }
 
-// secureExistingCredentialLock repairs legacy inherited or empty DACLs using
-// only security rights. An owner can restore those rights even when the file
-// no longer grants read/write access. The directory-identity mutex is held.
+// secureExistingCredentialLock verifies and protects a legacy lock after
+// parent inheritance has restored its access. Security rights are checked
+// before opening for data access. The directory-identity mutex is held.
 func secureExistingCredentialLock(tokenDir string) error {
 	handle, err := openSecurityHandle(filepath.Join(tokenDir, ".provider-credentials.lock"), false,
 		windows.READ_CONTROL|windows.WRITE_DAC)
@@ -361,13 +361,13 @@ func withStoreLock(tokenDir string, fn func() error) error {
 		return fmt.Errorf("unexpected provider credential mutex wait result: %d", status)
 	}
 	defer windows.ReleaseMutex(mutex) //nolint:errcheck // lock result is authoritative
-	// Repair the legacy lock before directory DACL propagation can strip its
-	// inherited access, and before OPEN_ALWAYS requests read/write rights.
-	if err := secureExistingCredentialLock(tokenDir); err != nil {
-		return err
-	}
+	// Restore owner inheritance first: a legacy unprotected lock can have
+	// already lost even the access needed to open its security handle.
 	if err := secureOwnerOnlyHandle(directory); err != nil {
 		return fmt.Errorf("secure provider credential directory: %w", err)
+	}
+	if err := secureExistingCredentialLock(tokenDir); err != nil {
+		return err
 	}
 
 	file, err := openCredentialLock(tokenDir)

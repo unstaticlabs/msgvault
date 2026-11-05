@@ -3,6 +3,7 @@ package store_test
 import (
 	"database/sql"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestUpstreamSearchPagesScopeBeforeRankCountAndLimit(t *testing.T) {
 			if j == 0 || i == 0 {
 				subject, body = "glacier", ""
 			}
-			id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: fmt.Sprint(j), MessageType: "email", Subject: sql.NullString{String: subject, Valid: true}, SentAt: sql.NullTime{Time: day.Add(time.Duration(i*10+j) * time.Hour), Valid: true}})
+			id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: conv, SourceMessageID: strconv.Itoa(j), MessageType: "email", Subject: sql.NullString{String: subject, Valid: true}, SentAt: sql.NullTime{Time: day.Add(time.Duration(i*10+j) * time.Hour), Valid: true}})
 			requirements.NoError(err)
 			requirements.NoError(st.UpsertFTS(id, subject, body, "", "", ""))
 			if i == 1 {
@@ -69,7 +70,7 @@ func TestUpstreamSearchPagesScopeBeforeRankCountAndLimit(t *testing.T) {
 			requirements.NoError(err)
 			assertions.Equal(scope.total, total)
 			requirements.Len(full, int(scope.total))
-			for offset := 0; offset < int(scope.total)+1; offset++ {
+			for offset := range int(scope.total) + 1 {
 				page, count, err := st.SearchMessagesQueryContext(ctx, q, offset, 1)
 				requirements.NoError(err)
 				assertions.Equal(scope.total, count)
