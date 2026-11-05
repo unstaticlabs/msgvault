@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/fileutil"
 	"golang.org/x/sys/windows"
 )
 
@@ -166,4 +167,86 @@ func TestWindowsExistingCredentialLockIsHardenedUnderLock(t *testing.T) {
 		defer file.Close() //nolint:errcheck // permission result is authoritative
 		return (nativePermissions{}).verifyFile(file)
 	}))
+}
+
+func TestWindowsExistingCredentialLockRecoversAfterInheritedAccessIsRemoved(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	dir := t.TempDir()
+	entry := providerCredentialTestAccess(currentWindowsProviderCredentialSID(t), windows.GENERIC_ALL, windows.TRUSTEE_IS_USER)
+	entry.Inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	parent := setProviderCredentialTestACL(t, dir, []windows.EXPLICIT_ACCESS{entry}, true)
+	path := filepath.Join(dir, ".provider-credentials.lock")
+	sentinel := []byte("synthetic legacy lock contents")
+	requirements.NoError(os.WriteFile(path, sentinel, 0o600))
+	security, err := openSecurityHandle(path, false, windows.READ_CONTROL|windows.WRITE_DAC)
+	requirements.NoError(err)
+	t.Cleanup(func() {
+		requirements.NoError(secureOwnerOnlyHandle(security))
+		requirements.NoError(windows.CloseHandle(security))
+	})
+	dacl, control := readProviderCredentialTestACL(t, security)
+	requirements.Equal(uint16(1), dacl.AceCount)
+	requirements.Zero(control & windows.SE_DACL_PROTECTED)
+	var inherited *windows.ACCESS_ALLOWED_ACE
+	requirements.NoError(windows.GetAce(dacl, 0, &inherited))
+	requirements.NotZero(inherited.Header.AceFlags & windows.INHERITED_ACE)
+
+	// Reproduce the already-damaged state left by the former ordering:
+	// the parent publishes a non-inheriting ACL before the legacy lock opens.
+	oldEntry := providerCredentialTestAccess(currentWindowsProviderCredentialSID(t), windows.GENERIC_ALL, windows.TRUSTEE_IS_USER)
+	oldACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{oldEntry}, nil)
+	requirements.NoError(err)
+	requirements.NoError(windows.SetSecurityInfo(parent, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, oldACL, nil))
+	dacl, _ = readProviderCredentialTestACL(t, security)
+	requirements.Zero(dacl.AceCount, "parent propagation must remove the inherited access")
+	denied, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if denied != nil {
+		requirements.NoError(denied.Close())
+	}
+	requirements.ErrorIs(err, os.ErrPermission, "the fixture must deny ordinary read/write opening")
+	entered := false
+	requirements.NoError(withStoreLock(dir, func() error {
+		entered = true
+		file, err := openCredentialLock(dir)
+		if err != nil {
+			return err
+		}
+		defer file.Close() //nolint:errcheck // verification result is authoritative
+		return (nativePermissions{}).verifyFile(file)
+	}))
+	assertions.True(entered, "ACL recovery must reach the protected data critical section")
+	contents, err := os.ReadFile(path)
+	requirements.NoError(err)
+	assertions.Equal(sentinel, contents, "repair must preserve all existing lock bytes")
+	requirements.NoError(verifyOwnerOnlyHandle(security, false))
+}
+
+func TestWindowsSecureDirectoryUpgradesProtectedNonInheritingACL(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	dir := t.TempDir()
+	legacy := providerCredentialTestAccess(currentWindowsProviderCredentialSID(t), windows.GENERIC_ALL, windows.TRUSTEE_IS_USER)
+	handle := setProviderCredentialTestACL(t, dir, []windows.EXPLICIT_ACCESS{legacy}, true)
+	// The old ACL passes the owner-only verifier, but it must still upgrade:
+	// publishing it would remove inherited access from sibling store locks.
+	requirements.NoError(verifyOwnerOnlyHandle(handle, false))
+	requirements.NoError((nativePermissions{}).secureDirectory(dir))
+	requirements.NoError((nativePermissions{}).verifyDirectory(dir))
+	dacl, control := readProviderCredentialTestACL(t, handle)
+	requirements.Equal(uint16(1), dacl.AceCount)
+	requirements.NotZero(control & windows.SE_DACL_PROTECTED)
+	var ace *windows.ACCESS_ALLOWED_ACE
+	requirements.NoError(windows.GetAce(dacl, 0, &ace))
+	assertions.Equal(windows.ACCESS_MASK(fileutil.FileAllAccess), ace.Mask)
+	assertions.Equal(byte(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE), ace.Header.AceFlags&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE))
+	assertions.Zero(ace.Header.AceFlags & windows.INHERITED_ACE)
+
+	path := filepath.Join(dir, "synthetic-sibling.lock")
+	sentinel := []byte("synthetic sibling lock")
+	requirements.NoError(os.WriteFile(path, sentinel, 0o600))
+	requirements.NoError(secureOwnerOnlyHandle(handle))
+	contents, err := os.ReadFile(path)
+	requirements.NoError(err)
+	assertions.Equal(sentinel, contents, "directory publication must retain ordinary sibling owner access")
 }

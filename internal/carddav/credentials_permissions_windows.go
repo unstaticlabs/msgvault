@@ -74,10 +74,22 @@ func secureCardDAVHandle(handle windows.Handle) error {
 	if err != nil {
 		return fmt.Errorf("get current user SID: %w", err)
 	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect CardDAV credential handle: %w", err)
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	accessPermissions := windows.ACCESS_MASK(windows.GENERIC_ALL)
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		// Other credential stores share this directory. Their lock files need
+		// current-user access when Windows reapplies parent inheritance.
+		inheritance = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+		accessPermissions = fileutil.FileAllAccess
+	}
 	entries := []windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.GENERIC_ALL,
+		AccessPermissions: accessPermissions,
 		AccessMode:        windows.SET_ACCESS,
-		Inheritance:       windows.NO_INHERITANCE,
+		Inheritance:       inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER,
 			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),

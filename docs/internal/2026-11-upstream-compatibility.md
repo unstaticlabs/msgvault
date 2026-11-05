@@ -76,6 +76,11 @@ semantics and existing opt-ins.
   it is not a claim of a power-loss durable two-file transaction.
 - Native JSONv2 migration preserves the distinct all-source and empty-source
   memo scopes, historical linkage serialization and newline-delimited exports.
+- Windows token-directory repair keeps current-user inheritance for shared
+  OAuth lock files. Existing provider locks can recover an already stripped
+  inherited ACL through an owner-verified security handle. Secret files remain
+  protected, and native locks and exact owner checks stay in place. Provider
+  and CardDAV publication both preserve subsequent OAuth writes and deletes.
 
 ## Evidence and limits
 
