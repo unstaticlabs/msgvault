@@ -52,3 +52,22 @@ The updater's release owner remains `unstaticlabs`, so a self-update cannot repl
 a downstream binary with an upstream build. Pull-request workflows execute the
 combined checkout's local reusable workflows. Upstream publishing removal does
 not remove the downstream release and image workflows.
+
+## Qualify publisher artifacts before tagging
+
+The Release workflow supports a build-only dispatch with an exact commit SHA,
+a distinct QA version label and `publish=false`. It builds the same six binary
+archives and executes their smokes without creating a remote tag, GitHub Release
+or container publication. Windows uses a runner-local QA tag for native version
+metadata. A conflicting tag target or a publishing request with `build_ref` is
+refused; ordinary tag releases keep exact tag/checkout verification.
+
+```bash
+gh workflow run release.yml --repo unstaticlabs/msgvault --ref <candidate-branch> \
+  -f tag=v0.23.0-usl.1-qa.20261105 -f build_ref=<full-commit-sha> -F publish=false
+```
+
+After this job and the pull-request checks pass, merge the integration and tag
+the final source with its normal downstream version. Build-only artifacts are
+qualification evidence, not proof that the merged release has been published or
+deployed.
