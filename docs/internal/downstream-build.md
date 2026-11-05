@@ -1,44 +1,54 @@
 # Downstream build
 
-This repository is a downstream build of
-[kenn-io/msgvault](https://github.com/kenn-io/msgvault). It exists so that
-features can be deployed before, or independently of, their acceptance
-upstream, without ever diverging from upstream in a way that cannot be undone.
+Build and release the deployed distribution from
+[`unstaticlabs/msgvault`](https://github.com/unstaticlabs/msgvault).
+The deployment pins `ghcr.io/unstaticlabs/msgvault` by digest. Its historical
+stack name includes the operator's name; that name does not identify a different
+source repository.
 
-## Branch model
+## Repository roles
 
-- `main` is the build branch. It is `upstream/main` plus merged feature
-  branches plus the small set of downstream-only commits listed below. It is
-  published, so it is only ever moved forward: upstream is brought in with
-  `git merge upstream/main`, never by rebasing.
-- Feature work happens on branches cut from `upstream/main`, so each one can be
-  opened as an upstream pull request unchanged. A feature branch is merged into
-  `main` with `git merge --no-ff <branch>`; when upstream merges the same
-  branch, the next `git merge upstream/main` resolves to the upstream commits.
-- Deployable builds are tagged `v<upstream version>-usl.<n>`; the Docker
-  publish workflow pushes `ghcr.io/unstaticlabs/msgvault` for every push to
-  `main` and every `v*` tag. Deployments pin the image digest.
+| Repository | Role | Local remote |
+|---|---|---|
+| `kenn-io/msgvault` | Native product and upstream history | `upstream` (fetch only) |
+| `unstaticlabs/msgvault` | Integrated distribution, releases and container images | `usl` |
+| `ValentinViennot/msgvault` | Personal contribution branches | `valentin` |
 
-## Downstream-only commits
+Local `main` tracks `usl/main`. An `origin` fetch alias points to the same USL
+repository for documentation tools and has pushes disabled. Fetch `upstream/main` to prepare catch-ups in an
+isolated branch. Do not use the personal fork as a release source or overwrite
+its contribution branches when synchronizing the distribution.
 
-Keep this list short; every entry is a permanent merge burden.
+## Integration and release
 
-| Change | Why |
-|---|---|
-| `internal/update/update.go`: release owner `unstaticlabs` | `msgvault update` and the TUI's background check must look at this repository's releases, not upstream's, or they would replace a downstream binary with an upstream one. |
-| `.github/workflows/ci-pr.yml`: reusable workflow reference | Pull requests here must run this repository's `ci.yml`. |
-| this file | — |
-
-## Keeping up with upstream
+`main` retains both upstream and downstream ancestry. Bring upstream in with a
+merge, resolve overlap in that merge, and keep new compatibility work in separate
+commits. Open a pull request against `unstaticlabs/msgvault:main`; do not rebase
+published distribution history or push an integration straight to `main`.
 
 ```bash
+git fetch usl
 git fetch upstream
-git checkout main
-git merge upstream/main
-go build ./... && make test
-git push usl main
+git switch -c codex/upstream-catchup usl/main
+git merge --no-ff upstream/main
 ```
 
-A conflict in one of the downstream-only files is expected occasionally and is
-resolved by re-applying the row above; a conflict anywhere else means a feature
-branch and upstream disagree, and the feature branch is where it is fixed.
+Qualify the combined archive upgrade, source access, MCP contracts and browser
+journeys. Tag the approved distribution `v<upstream version>-usl.<n>` after the
+pull request passes and merges. The downstream publishing workflows build the
+release binaries and `ghcr.io/unstaticlabs/msgvault`. Pin the resulting immutable
+image digest in deployment configuration; a published image alone is not proof
+of deployment.
+
+## Compatibility ownership
+
+The distribution retains multi-user sign-in and source visibility, calendar
+coverage, provider Inbox/read state, related-email grouping and exact-message
+Inbox archiving. Prefer native replacements when they preserve those outcomes.
+The [October integration record](2026-10-upstream-compatibility.md) describes the
+predecessor contracts; its schema numbers are historical.
+
+The updater's release owner remains `unstaticlabs`, so a self-update cannot replace
+a downstream binary with an upstream build. Pull-request workflows execute the
+combined checkout's local reusable workflows. Upstream publishing removal does
+not remove the downstream release and image workflows.
