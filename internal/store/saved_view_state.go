@@ -152,7 +152,7 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 		for _, value := range filter.Values {
 			switch dimension {
 			case "handling_state":
-				if !slices.Contains([]string{"handled", "actionable", "unknown"}, value) {
+				if !slices.Contains([]string{"handled", "actionable", EmailWorkUnknown}, value) {
 					return fmt.Errorf("filters[%d] handling_state accepts handled, actionable or unknown", i)
 				}
 			case "row_unit":
@@ -160,9 +160,9 @@ func validateSavedViewState(state SavedViewStateEnvelope) error {
 					return fmt.Errorf("filters[%d] row_unit accepts email_work_item", i)
 				}
 			case "inbox_state", "read_state":
-				allowed := []string{"inbox", "outside", "unknown"}
+				allowed := []string{"inbox", "outside", ProviderMailboxStateUnknown}
 				if dimension == "read_state" {
-					allowed = []string{"read", "unread", "unknown"}
+					allowed = []string{"read", "unread", ProviderMailboxStateUnknown}
 				}
 				if !slices.Contains(allowed, value) {
 					return fmt.Errorf("filters[%d] %s accepts %s", i, dimension, strings.Join(allowed, ", "))

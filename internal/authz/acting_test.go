@@ -23,6 +23,8 @@ func TestActingIdentityHeaderRoundTrips(t *testing.T) {
 	assert.Contains(value, `\u00eb`, "non-ASCII is escaped")
 	assert.Contains(value, `\ud83d\ude42`, "astral characters use surrogate pairs")
 
+	assert.Contains(value, `\u003cadmin\u0026co\u003e`, "existing ASCII header escaping remains stable")
+
 	parsed, err := ParseActingIdentity(value)
 	require.NoError(err)
 	assert.Equal(identity, parsed)

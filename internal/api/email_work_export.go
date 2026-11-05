@@ -3,7 +3,8 @@ package api
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -203,7 +204,7 @@ func (s *Server) handleEmailWorkExport(w http.ResponseWriter, r *http.Request) {
 		s.writeEmailWorkExportError(w, r, err)
 		return
 	}
-	if err = json.NewEncoder(entry).Encode(manifest); err != nil {
+	if err = json.MarshalEncode(jsontext.NewEncoder(entry), manifest); err != nil {
 		s.writeEmailWorkExportError(w, r, err)
 		return
 	}

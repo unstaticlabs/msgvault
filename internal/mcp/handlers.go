@@ -2808,15 +2808,6 @@ func (h *handlers) resolveFreshSearchTargets(
 	return targets, true
 }
 
-// truncateSelectionDescription bounds the human-readable description that ends
-// up in a manifest ID.
-func truncateSelectionDescription(description string) string {
-	if len(description) > 50 {
-		return description[:50]
-	}
-	return description
-}
-
 func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolResult, error) {
 	args := req.GetArguments()
 

@@ -2,7 +2,7 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 )
 
 // CalendarEventState is the provider/archival state needed to distinguish an

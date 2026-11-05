@@ -25,6 +25,8 @@ import (
 	"go.kenn.io/msgvault/internal/peoplesweep"
 )
 
+const messageRawFormatMIME = "mime"
+
 // querier is satisfied by both *sql.DB and *sql.Tx, allowing
 // helpers to run inside or outside a transaction.
 type querier interface {
@@ -323,7 +325,7 @@ func (s *Store) loadGmailAuditEvidenceTx(
 	}
 	item.RawMIMEPresent = rawMessageID.Valid
 	if item.RawMIMEPresent {
-		if !rawFormat.Valid || rawFormat.String != "mime" {
+		if !rawFormat.Valid || rawFormat.String != messageRawFormatMIME {
 			item.RawMIMEError = fmt.Sprintf("stored raw format %q is not MIME", rawFormat.String)
 		} else {
 			raw, _, decodeErr := decodeMessageRawBounded(
@@ -1784,7 +1786,7 @@ func nullStringValue(ns sql.NullString) string {
 
 // UpsertMessageRaw stores the compressed raw MIME data for a message.
 func (s *Store) UpsertMessageRaw(messageID int64, rawData []byte) error {
-	return s.UpsertMessageRawWithFormat(messageID, rawData, "mime")
+	return s.UpsertMessageRawWithFormat(messageID, rawData, messageRawFormatMIME)
 }
 
 func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, format string) error {
@@ -2491,7 +2493,7 @@ func (s *Store) persistMessageWith(
 		}
 		rawFormat := data.RawFormat
 		if rawFormat == "" {
-			rawFormat = "mime"
+			rawFormat = messageRawFormatMIME
 		}
 		if err := upsertMessageRawWithFormat(q, messageID, data.RawMIME, rawFormat); err != nil {
 			return 0, fmt.Errorf("upsert raw: %w", err)
@@ -2529,7 +2531,7 @@ func (s *Store) persistMessageWith(
 	}
 	delivery := deliveryInput{}
 	switch {
-	case len(data.RawMIME) > 0 && (data.RawFormat == "" || data.RawFormat == "mime"):
+	case len(data.RawMIME) > 0 && (data.RawFormat == "" || data.RawFormat == messageRawFormatMIME):
 		delivery = deliveryFromMIME(data.RawMIME)
 	case len(data.RawMIME) > 0:
 		// A non-MIME payload replaced any stored MIME, so its delivery
@@ -6238,7 +6240,7 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 			return err
 		}
 		replacesMIME := false
-		if format != "mime" {
+		if format != messageRawFormatMIME {
 			var stored int
 			err := tx.QueryRowContext(ctx,
 				`SELECT 1 FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`, messageID).Scan(&stored)
@@ -6265,7 +6267,7 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 			return err
 		}
 		switch {
-		case format == "mime":
+		case format == messageRawFormatMIME:
 			return s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID, deliveryFromMIME(rawData))
 		case replacesMIME:
 			return s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID,
@@ -6273,7 +6275,7 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 		}
 		return nil
 	}
-	if format != "mime" {
+	if format != messageRawFormatMIME {
 		// Delivery evidence comes only from MIME, so a write that neither
 		// stores MIME nor replaces it takes no attribution lock. One that
 		// finds MIME to replace rolls back and retries holding the lock.

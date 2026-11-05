@@ -3,7 +3,7 @@ package calsync
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"time"
@@ -212,7 +212,7 @@ func (s *Syncer) supersedeMissingOccurrences(sourceID int64, start, end time.Tim
 		metadata["status"] = "superseded"
 		metadata["superseded_reason"] = "not_in_expanded_window"
 		metadata["superseded_at"] = now.Format(time.RFC3339)
-		encoded, err := json.Marshal(metadata)
+		encoded, err := json.Marshal(metadata, json.Deterministic(true))
 		if err != nil {
 			return fmt.Errorf("encode superseded occurrence: %w", err)
 		}

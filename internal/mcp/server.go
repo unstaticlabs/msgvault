@@ -5,7 +5,8 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -730,7 +731,7 @@ func protectedResourceMetadataHandler(provider *oidc.Provider) http.Handler {
 		w.Header().Set("Cache-Control", "public, max-age=300")
 		// The document is public and clients may fetch it from a browser.
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		_ = json.MarshalEncode(jsontext.NewEncoder(w), map[string]any{
 			"resource":                 cfg.Resource,
 			"resource_name":            "msgvault",
 			"authorization_servers":    []string{cfg.Issuer},
