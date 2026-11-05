@@ -12,16 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestStoreAttachmentPreservesMIMEOccurrenceEvidence(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
-	st, err := store.Open(filepath.Join(tmp, "msgvault.db"))
-	require.NoError(err)
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmp, "msgvault.db"))
 
 	src, err := st.GetOrCreateSource("mbox", "me@example.com")
 	require.NoError(err)
@@ -68,6 +67,7 @@ func TestStoreAttachmentPreservesMIMEOccurrenceEvidence(t *testing.T) {
 }
 
 func TestStoreAttachment_StatError_DoesNotUpsertRow(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("requires symlink support")
@@ -76,10 +76,7 @@ func TestStoreAttachment_StatError_DoesNotUpsertRow(t *testing.T) {
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	src, err := st.GetOrCreateSource("mbox", "me@example.com")
 	require.NoError(err, "get/create source")

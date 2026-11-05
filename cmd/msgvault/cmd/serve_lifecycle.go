@@ -60,6 +60,9 @@ func newLifecycleCommand(name string, hidden bool) *cobra.Command {
 		Hidden: hidden,
 		Args:   cobra.NoArgs,
 	}
+	if name == "start" || name == "restart" {
+		markStrictConfig(cmd)
+	}
 	switch name {
 	case "start":
 		cmd.Short = "Start msgvault daemon in the background"
@@ -355,8 +358,10 @@ func prepareBackgroundDaemonStart(
 	return backgroundDaemonStartPreparation{}, nil
 }
 
+var errIncompatibleDaemon = errors.New("incompatible daemon is already running")
+
 func incompatibleDaemonError(err error, guidance string) error {
-	return fmt.Errorf("incompatible daemon is already running: %w; %s", err, guidance)
+	return fmt.Errorf("%w: %w; %s", errIncompatibleDaemon, err, guidance)
 }
 
 func runServeStart(cmd *cobra.Command, c *config.Config) error {
@@ -1018,6 +1023,10 @@ func serveBackgroundChildArgs(options ...invocationOptions) []string {
 	if len(options) > 0 {
 		o = options[0]
 	}
+	return append(invocationGlobalArgs(o), "serve")
+}
+
+func invocationGlobalArgs(o invocationOptions) []string {
 	args := make([]string, 0, 16)
 	if o.cfgFile != "" {
 		args = append(args, "--config", o.cfgFile)
@@ -1043,7 +1052,7 @@ func serveBackgroundChildArgs(options ...invocationOptions) []string {
 	if o.logSQLSlow != 0 {
 		args = append(args, "--log-sql-slow-ms", strconv.FormatInt(o.logSQLSlow, 10))
 	}
-	return append(args, "serve")
+	return args
 }
 
 func waitForBackgroundServeReady(

@@ -19,19 +19,17 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/mbox"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/testutil/email"
 )
 
 func TestImportMbox_IngestsMessagesThreadsAndAttachments(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	attachmentsDir := filepath.Join(tmp, "attachments")
 
@@ -116,15 +114,12 @@ func TestImportMbox_IngestsMessagesThreadsAndAttachments(t *testing.T) {
 }
 
 func TestImportMbox_NoAttachmentsStillRecordsAttachmentMetadata(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	raw := email.NewMessage().
 		From("Alice <alice@example.com>").
@@ -172,13 +167,11 @@ func TestImportMbox_NoAttachmentsStillRecordsAttachmentMetadata(t *testing.T) {
 // TestImportMboxPersistsListID catches an offline MIME import that parses the
 // List-Id header but drops it before the shared message persistence boundary.
 func TestImportMboxPersistsListID(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	assert := assert.New(t)
 	require := require.New(t)
 	tmp := t.TempDir()
-	st, err := store.Open(filepath.Join(tmp, "msgvault.db"))
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(st.InitSchema(), "initialize schema")
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmp, "msgvault.db"))
 
 	raw := email.NewMessage().
 		From("Alice <alice@example.com>").
@@ -191,7 +184,7 @@ func TestImportMboxPersistsListID(t *testing.T) {
 	mboxData := "From alice@example.com Mon Jan 1 12:00:00 2024\n" + string(raw)
 	require.NoError(os.WriteFile(mboxPath, []byte(mboxData), 0600), "write mbox")
 
-	_, err = ImportMbox(context.Background(), st, mboxPath, MboxImportOptions{
+	_, err := ImportMbox(context.Background(), st, mboxPath, MboxImportOptions{
 		SourceType: "mbox",
 		Identifier: "owner@example.com",
 		NoResume:   true,
@@ -206,15 +199,12 @@ func TestImportMboxPersistsListID(t *testing.T) {
 }
 
 func TestImportMbox_IsIdempotentAcrossPathChanges(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	raw1 := email.NewMessage().
 		From("Alice <alice@example.com>").
@@ -256,7 +246,7 @@ func TestImportMbox_IsIdempotentAcrossPathChanges(t *testing.T) {
 	require.NoError(os.WriteFile(mboxPath1, []byte(mboxData.String()), 0600), "write mbox1")
 	require.NoError(os.WriteFile(mboxPath2, []byte(mboxData.String()), 0600), "write mbox2")
 
-	_, err = ImportMbox(context.Background(), st, mboxPath1, MboxImportOptions{
+	_, err := ImportMbox(context.Background(), st, mboxPath1, MboxImportOptions{
 		SourceType:         "mbox",
 		Identifier:         "me@example.com",
 		NoResume:           true,
@@ -287,20 +277,17 @@ func TestParseFromLineDate_NamedTimezone(t *testing.T) {
 }
 
 func TestImportMbox_InvalidInput_ReturnsErrorAndFailsSync(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	mboxPath := filepath.Join(tmp, "not-mbox.txt")
 	require.NoError(os.WriteFile(mboxPath, []byte("this is not an mbox file\n"), 0600), "write file")
 
-	_, err = ImportMbox(context.Background(), st, mboxPath, MboxImportOptions{
+	_, err := ImportMbox(context.Background(), st, mboxPath, MboxImportOptions{
 		SourceType:         "mbox",
 		Identifier:         "me@example.com",
 		NoResume:           true,
@@ -314,15 +301,12 @@ func TestImportMbox_InvalidInput_ReturnsErrorAndFailsSync(t *testing.T) {
 }
 
 func TestImportMbox_IdenticalRawMessagesAreImportedSeparately(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	raw := email.NewMessage().
 		From("Alice <alice@example.com>").
@@ -366,15 +350,12 @@ func TestImportMbox_IdenticalRawMessagesAreImportedSeparately(t *testing.T) {
 }
 
 func TestImportMbox_RerunRepairsMissingRawInsteadOfSkipping(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	raw := email.NewMessage().
 		From("Alice <alice@example.com>").
@@ -433,15 +414,12 @@ func TestImportMbox_RerunRepairsMissingRawInsteadOfSkipping(t *testing.T) {
 }
 
 func TestImportMbox_RerunRetriesAttachmentsAfterStoreFailure(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	attachmentsDir := filepath.Join(tmp, "attachments")
 	// Force attachment storage errors by making the attachments path a file.
@@ -469,7 +447,7 @@ func TestImportMbox_RerunRetriesAttachmentsAfterStoreFailure(t *testing.T) {
 
 	// Attachment storage is best-effort: the ingest succeeds even
 	// though the attachment file couldn't be written to disk.
-	_, err = ImportMbox(context.Background(), st, mboxPath, MboxImportOptions{
+	_, err := ImportMbox(context.Background(), st, mboxPath, MboxImportOptions{
 		SourceType:         "mbox",
 		Identifier:         "me@example.com",
 		NoResume:           true,
@@ -515,17 +493,14 @@ func TestImportMbox_RerunRetriesAttachmentsAfterStoreFailure(t *testing.T) {
 }
 
 func TestImportMbox_ErrorsCauseSyncFailed(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
-	_, err = st.DB().Exec(`DROP TABLE messages`)
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
+	_, err := st.DB().Exec(`DROP TABLE messages`)
 	require.NoError(err, "drop messages")
 
 	raw := email.NewMessage().
@@ -566,16 +541,13 @@ func TestImportMbox_ErrorsCauseSyncFailed(t *testing.T) {
 }
 
 func TestImportMbox_SoftErrorsDoNotFailSync(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	maxBytes := int64(64)
 
@@ -616,15 +588,12 @@ func TestImportMbox_SoftErrorsDoNotFailSync(t *testing.T) {
 }
 
 func TestImportMbox_CheckpointDoesNotAdvancePastFailedIngest(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	raw := func(subject string) []byte {
 		return email.NewMessage().
@@ -740,15 +709,12 @@ func TestImportMbox_CheckpointDoesNotAdvancePastFailedIngest(t *testing.T) {
 }
 
 func TestImportMbox_InvalidResumeOffsetBeyondEOF_FailsSync(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	mboxData := "From sender@example.com Mon Jan 1 00:00:00 2024\nSubject: One\n\nBody\n"
 	mboxPath := filepath.Join(tmp, "export.mbox")
@@ -785,13 +751,11 @@ func TestImportMbox_InvalidResumeOffsetBeyondEOF_FailsSync(t *testing.T) {
 }
 
 func TestImportMbox_RejectsLiveSyncOwner(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err)
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	mboxPath := filepath.Join(tmp, "export.mbox")
 	require.NoError(os.WriteFile(mboxPath, []byte(
@@ -810,6 +774,7 @@ func TestImportMbox_RejectsLiveSyncOwner(t *testing.T) {
 }
 
 func TestImportMbox_ResumesCheckpointAfterWorkerExit(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	assert := assert.New(t)
 	require := require.New(t)
 	tmp := t.TempDir()
@@ -818,9 +783,7 @@ func TestImportMbox_ResumesCheckpointAfterWorkerExit(t *testing.T) {
 	mboxData := []byte("From sender@example.com Mon Jan 1 00:00:00 2024\nSubject: One\n\nBody\n")
 	require.NoError(os.WriteFile(mboxPath, mboxData, 0o600))
 
-	first, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(first.InitSchema())
+	first := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	src, err := first.GetOrCreateSource("mbox", "user@example.com")
 	require.NoError(err)
 	runID, err := first.StartSync(src.ID, "import-mbox")
@@ -842,29 +805,18 @@ func TestImportMbox_ResumesCheckpointAfterWorkerExit(t *testing.T) {
 	assert.Equal(int64(len(mboxData)), summary.ResumedOffset)
 }
 
-func TestImportMbox_HardErrorsStopsMultiFileLoop(t *testing.T) {
+func TestImportMbox_HardIngestErrorLeavesNoMessages(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
-	// Verify that when ImportMbox reports HardErrors, the caller's
-	// multi-file loop should break. This simulates the control flow
-	// in import_mbox.go where HardErrors now stops subsequent files.
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	raw1 := email.NewMessage().
 		From("Alice <alice@example.com>").
 		Subject("File1").
 		Body("body1\n").
-		Bytes()
-	raw2 := email.NewMessage().
-		From("Alice <alice@example.com>").
-		Subject("File2").
-		Body("body2\n").
 		Bytes()
 
 	writeMbox := func(name string, raw []byte) string {
@@ -880,7 +832,6 @@ func TestImportMbox_HardErrorsStopsMultiFileLoop(t *testing.T) {
 	}
 
 	path1 := writeMbox("file1.mbox", raw1)
-	path2 := writeMbox("file2.mbox", raw2)
 
 	// Inject ingest failure to cause HardErrors on file1.
 	failIngest := func(_ context.Context, _ *store.Store, _ int64, _ string, _ string, _ []int64, _ string, _ string, _ *mbox.Message, _ *slog.Logger) error {
@@ -897,15 +848,9 @@ func TestImportMbox_HardErrorsStopsMultiFileLoop(t *testing.T) {
 	require.NoError(err, "ImportMbox file1")
 	require.True(sum1.HardErrors, "expected HardErrors=true for file1")
 
-	// Simulate the multi-file loop: if HardErrors, skip file2.
-	// This is the behavior we're testing: the loop breaks.
-	// Verify file2 was NOT processed.
 	var msgCount int
 	require.NoError(st.DB().QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&msgCount), "count messages")
 	require.Equal(0, msgCount, "msgCount (file1 failed)")
-
-	// File2 should not have been imported.
-	_ = path2 // would be processed if loop didn't break
 }
 
 type cancelOnLogMessageHandler struct {
@@ -945,15 +890,12 @@ func (h *cancelOnLogMessageHandler) WithGroup(name string) slog.Handler {
 }
 
 func TestImportMbox_CheckpointAdvancesPastReaderErrors(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	require := require.New(t)
 	tmp := t.TempDir()
 
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-
-	require.NoError(st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	maxBytes := int64(64)
 

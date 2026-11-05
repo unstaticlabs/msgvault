@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/savedview"
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/senderauth"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/chunkmatch"
@@ -61,6 +62,7 @@ const (
 	toolArgOffset        = "offset"
 	toolArgLength        = "length"
 	toolArgSourceMsgID   = "source_message_id"
+	toolArgSourceID      = "source_id"
 	toolArgThreadID      = "thread_id"
 	toolArgMinScore      = "min_score"
 	toolArgMaxChars      = "max_chars"
@@ -136,32 +138,36 @@ func listLimitArg(args map[string]any) int {
 }
 
 type handlers struct {
-	inboxArchiver       InboxArchiver
-	delegatedOnly       bool
-	downloads           *downloadCache
-	engine              query.Engine
-	archiveSQLQuerier   ArchiveSQLQuerier
-	attachmentsDir      string
-	attachmentReader    AttachmentReader
-	manifestSaver       DeletionManifestSaver
-	hybridSearcher      HybridSearcher
-	similarSearcher     SimilarSearcher
-	dataDir             string
-	documentSearcher    DocumentSearcher
-	mediaSearcher       MediaSearcher
-	personFileSearcher  PersonFileSearcher
-	peopleBackend       peoplebrowser.Backend
-	directoryBackend    peoplebrowser.DirectoryLister
-	savedViews          savedview.Service
-	meetings            MeetingBackend
-	calendar            CalendarBackend
-	personAgendaBackend PersonAgendaBackend
-	kata                KataBackend
-	identityReview      IdentityReviewBackend
-	personCardDAV       PersonCardDAVBackend
-	messageTags         MessageTagBackend
-	identityScoring     IdentityScoringBackend
-	drafts              DraftRunner
+	embeddingStatus      EmbeddingStatusReader
+	delegatedOnly        bool
+	downloads            *downloadCache
+	engine               query.Engine
+	archiveSQLQuerier    ArchiveSQLQuerier
+	attachmentsDir       string
+	attachmentReader     AttachmentReader
+	manifestSaver        DeletionManifestSaver
+	hybridSearcher       HybridSearcher
+	similarSearcher      SimilarSearcher
+	dataDir              string
+	documentSearcher     DocumentSearcher
+	mediaSearcher        MediaSearcher
+	personFileSearcher   PersonFileSearcher
+	peopleBackend        peoplebrowser.Backend
+	directoryBackend     peoplebrowser.DirectoryLister
+	savedViews           savedview.Service
+	meetings             MeetingBackend
+	calendar             CalendarBackend
+	personAgendaBackend  PersonAgendaBackend
+	personTierBackend    PersonTierBackend
+	kata                 KataBackend
+	identityReview       IdentityReviewBackend
+	personCardDAV        PersonCardDAVBackend
+	messageTags          MessageTagBackend
+	identityScoring      IdentityScoringBackend
+	drafts               DraftRunner
+	contactRoutesBackend ContactRoutesBackend
+	chatDiscoveryBackend ChatDiscoveryBackend
+	inboxArchiver        InboxArchiver
 
 	// Optional vector-search wiring. When hybridEngine is nil, the
 	// search_message_bodies handler rejects mode=vector and mode=hybrid with
@@ -523,6 +529,9 @@ type daemonAPIErrorCoder interface {
 }
 
 func translateDaemonRequestError(err error) *toolResult {
+	if local, ok := errors.AsType[*daemonclient.LocalDaemonUnavailableError](err); ok {
+		return toolErrorResult(local.Error())
+	}
 	var coded daemonAPIErrorCoder
 	if !errors.As(err, &coded) {
 		return nil
@@ -620,9 +629,12 @@ func translateVectorErr(err error) *toolResult {
 			"vector_not_enabled: vector search is not configured",
 		)
 	case errors.Is(err, vector.ErrIndexStale):
+		if apiErr, ok := errors.AsType[*daemonclient.APIError](err); ok && apiErr.Message != "" {
+			return toolErrorResult("index_stale: " + apiErr.Message)
+		}
 		return toolErrorResult(
 			"index_stale: the vector index does not match configured embedding settings; " +
-				"align [vector.embed.scope] accounts for an existing account-scoped index, or run `msgvault embeddings build --full-rebuild`",
+				"if the embedding settings on the archive host changed since its daemon started, restart that daemon; otherwise align [vector.embed.scope] accounts for an existing account-scoped index, or run `msgvault embeddings build --full-rebuild`",
 		)
 	case errors.Is(err, vector.ErrIndexBuilding):
 		return toolErrorResult(
@@ -751,7 +763,7 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 		return toolErrorResult("query parameter is required"), nil
 	}
 
-	q := search.Parse(queryStr)
+	q := search.ParseOR(queryStr)
 	if err := q.Err(); err != nil {
 		return toolErrorResult(err.Error()), nil
 	}
@@ -771,39 +783,29 @@ func (h *handlers) searchMetadata(ctx context.Context, req toolRequest) (*toolRe
 	var filter query.MessageFilter
 	selection.applyToFilter(&filter)
 
-	if h.delegatedOnly {
-		result, err := h.engine.SearchFastWithStats(ctx, q, queryStr, filter, query.ViewSenders, limit+1, offset)
-		if err != nil {
-			return nil, newInternalError("search metadata", err)
-		}
-		hasMore := len(result.Messages) > limit
-		if hasMore {
-			result.Messages = result.Messages[:limit]
-		}
-		if result.TotalCount < 0 {
-			return jsonResult(searchMetadataResponse{
-				paginatedResponse: newPaginatedResponseNoTotal(result.Messages, offset, hasMore), IndexState: result.IndexState,
-			})
-		}
-		return metadataSearchResult(result.Messages, result.TotalCount, offset, result.IndexState, h.calendarQueryCache(ctx, q))
-	}
-	results, err := h.engine.SearchFast(ctx, q, filter, limit, offset)
+	// Fetch one extra row so unknown totals still support reliable pagination.
+	result, err := h.engine.SearchFastWithStats(ctx, q, queryStr, filter, query.ViewNoStats, limit+1, offset)
 	if err != nil {
 		return nil, newInternalError("search metadata", err)
 	}
-	totalMatched, err := h.engine.SearchFastCount(ctx, q, filter)
-	if err != nil {
-		return nil, newInternalError("count metadata search", err)
+	hasMore := len(result.Messages) > limit
+	if hasMore {
+		result.Messages = result.Messages[:limit]
 	}
-	return metadataSearchResult(results, totalMatched, offset, "", h.calendarQueryCache(ctx, q))
+	if result.TotalCount < 0 {
+		return jsonResult(searchMetadataResponse{
+			paginatedResponse: newPaginatedResponseNoTotal(result.Messages, offset, hasMore), IndexState: result.IndexState, Warnings: search.LiteralORWarnings(queryStr), CalendarCache: h.calendarQueryCache(ctx, q),
+		})
+	}
+	return metadataSearchResult(result.Messages, result.TotalCount, offset, result.IndexState, search.LiteralORWarnings(queryStr), h.calendarQueryCache(ctx, q))
 }
 
-func metadataSearchResult(messages []query.MessageSummary, total int64, offset int, state string, calendar ...*CalendarCache) (*toolResult, error) {
+func metadataSearchResult(messages []query.MessageSummary, total int64, offset int, state string, warnings []string, calendar ...*CalendarCache) (*toolResult, error) {
 	var coverage *CalendarCache
 	if len(calendar) > 0 {
 		coverage = calendar[0]
 	}
-	return jsonResult(searchMetadataResponse{paginatedResponse: newPaginatedResponse(messages, total, offset), IndexState: state, CalendarCache: coverage})
+	return jsonResult(searchMetadataResponse{paginatedResponse: newPaginatedResponse(messages, total, offset), IndexState: state, Warnings: warnings, CalendarCache: coverage})
 }
 
 func (h *handlers) searchDocuments(ctx context.Context, req toolRequest) (*toolResult, error) {
@@ -1647,7 +1649,7 @@ func lineNumberAt(body string, byteOffset int) int {
 }
 
 type getMessageResponse struct {
-	RelatedMessageID     *int64                    `json:"related_message_id,omitempty"`
+	SenderAuth           *senderauth.Verdict       `json:"sender_auth,omitempty"`
 	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
 	SourceID             int64                     `json:"source_id,omitempty"`
 	InboxState           string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
@@ -1659,6 +1661,8 @@ type getMessageResponse struct {
 	SourceConversationID string                    `json:"source_conversation_id"`
 	Subject              string                    `json:"subject"`
 	MessageType          string                    `json:"message_type,omitempty"`
+	RelatedMessageID     *int64                    `json:"related_message_id,omitempty"`
+	Calendar             *store.CalendarProjection `json:"calendar,omitempty"`
 	Snippet              string                    `json:"snippet"`
 	SentAt               time.Time                 `json:"sent_at"`
 	ReceivedAt           *time.Time                `json:"received_at,omitempty"`
@@ -1671,6 +1675,7 @@ type getMessageResponse struct {
 	Bcc                  []query.Address           `json:"bcc"`
 	BodyText             string                    `json:"body_text"`
 	BodyHTML             string                    `json:"body_html"`
+	HiddenTextPresent    bool                      `json:"hidden_text_present"`
 	BodyFormat           string                    `json:"body_format,omitempty"`
 	BodyLength           int                       `json:"body_length"`
 	BodyReturned         int                       `json:"body_returned"`
@@ -1712,10 +1717,7 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 	bodyFormat := bodyFormatText
 	switch requestedBodyFormat {
 	case bodyFormatAuto:
-		if fullBody == "" && msg.BodyHTML != "" {
-			fullBody = msg.BodyHTML
-			bodyFormat = bodyFormatHTML
-		}
+		fullBody, bodyFormat = automaticMessageBody(msg)
 	case bodyFormatText:
 	case bodyFormatHTML:
 		fullBody = msg.BodyHTML
@@ -1748,6 +1750,8 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 
 	return jsonResult(getMessageResponse{
 		CalendarState:        msg.CalendarState,
+		SenderAuth:           msg.SenderAuth,
+		Calendar:             msg.Calendar,
 		WebURL:               msg.WebURL,
 		ID:                   msg.ID,
 		InboxState:           mcpProviderStateValue(msg.InboxState),
@@ -1771,6 +1775,7 @@ func (h *handlers) getMessage(ctx context.Context, req toolRequest) (*toolResult
 		Bcc:                  msg.Bcc,
 		BodyText:             bodyText,
 		BodyHTML:             bodyHTML,
+		HiddenTextPresent:    msg.HiddenTextPresent,
 		BodyFormat:           bodyFormat,
 		BodyLength:           bodyLen,
 		BodyReturned:         len(bodySlice),
@@ -1864,7 +1869,10 @@ func (h *handlers) vectorMatchesInMessage(
 
 	total := int64(len(allMatches))
 	if offset >= len(allMatches) {
-		return jsonResult(searchInMessageResponse(newPaginatedResponse([]messageMatch{}, total, offset)))
+		return jsonResult(searchInMessageResponse{
+			paginatedResponse: newPaginatedResponse([]messageMatch{}, total, offset),
+			HiddenTextPresent: msg.HiddenTextPresent,
+		})
 	}
 	end := min(offset+limit, len(allMatches))
 	page := allMatches[offset:end]
@@ -1872,7 +1880,10 @@ func (h *handlers) vectorMatchesInMessage(
 	if len(page) > limit {
 		page = page[:limit]
 	}
-	return jsonResult(searchInMessageResponse(newPaginatedResponse(page, total, offset)))
+	return jsonResult(searchInMessageResponse{
+		paginatedResponse: newPaginatedResponse(page, total, offset),
+		HiddenTextPresent: msg.HiddenTextPresent,
+	})
 }
 
 func (h *handlers) searchInMessage(ctx context.Context, req toolRequest) (*toolResult, error) {
@@ -1912,13 +1923,28 @@ func (h *handlers) searchInMessage(ctx context.Context, req toolRequest) (*toolR
 		return toolErrorResult("message not found"), nil
 	}
 
-	allMatches := findTermMatches(msg.BodyText, queryStr)
+	body, _ := automaticMessageBody(msg)
+	allMatches := findTermMatches(body, queryStr)
 	total := int64(len(allMatches))
 	if offset >= len(allMatches) {
-		return jsonResult(searchInMessageResponse(newPaginatedResponse([]messageMatch{}, total, offset)))
+		return jsonResult(searchInMessageResponse{
+			paginatedResponse: newPaginatedResponse([]messageMatch{}, total, offset),
+			HiddenTextPresent: msg.HiddenTextPresent,
+		})
 	}
 	end := min(offset+limit, len(allMatches))
-	return jsonResult(searchInMessageResponse(newPaginatedResponse(allMatches[offset:end], total, offset)))
+	return jsonResult(searchInMessageResponse{
+		paginatedResponse: newPaginatedResponse(allMatches[offset:end], total, offset),
+		HiddenTextPresent: msg.HiddenTextPresent,
+	})
+}
+
+// automaticMessageBody keeps HTML raw so search offsets match get_message windows.
+func automaticMessageBody(msg *query.MessageDetail) (string, string) {
+	if msg.BodyText == "" && msg.BodyHTML != "" {
+		return msg.BodyHTML, bodyFormatHTML
+	}
+	return msg.BodyText, bodyFormatText
 }
 
 func findTermMatches(body, term string) []messageMatch {
@@ -2012,6 +2038,7 @@ func (h *handlers) getAttachment(ctx context.Context, req toolRequest) (*toolRes
 	}
 	att := payload.metadata
 	metaObj := getAttachmentResponse{
+		Docbank:  att.Docbank,
 		Filename: att.Filename,
 		MIMEType: payload.mimeType,
 		Size:     att.Size,
@@ -2262,11 +2289,9 @@ func (h *handlers) aggregate(ctx context.Context, req toolRequest) (*toolResult,
 	return jsonResult(aggregateResponse{Data: nonNilSlice(rows)})
 }
 
-// limitArg extracts a non-negative integer limit from a map, with a default.
-// JSON numbers arrive as float64. Clamps to maxLimit to prevent excessive
-// result sets.
 // intArg extracts a non-negative integer from args without the maxLimit clamp
-// used by limitArg. Suitable for body-text offsets and similar unbounded values.
+// used by limitArg. It reads unbounded non-negative integers such as
+// pagination and body offsets.
 func intArg(args map[string]any, key string, def int) int {
 	v, ok := args[key].(float64)
 	if !ok {
@@ -2278,6 +2303,9 @@ func intArg(args map[string]any, key string, def int) int {
 	return int(v)
 }
 
+// limitArg extracts a non-negative integer limit from a map, with a default.
+// JSON numbers arrive as float64. Clamps to maxLimit to prevent excessive
+// result sets.
 func limitArg(args map[string]any, key string, def int) int {
 	v, ok := args[key].(float64)
 	if !ok {
@@ -2389,7 +2417,7 @@ func stringArrayArg(args map[string]any, key string) ([]string, error) {
 }
 
 // maxStageDeletionResults limits how many messages can be staged in one call.
-const maxStageDeletionResults = 100000
+const maxStageDeletionResults = query.MaxDeletionTargetSearchResults - 1
 
 // selectionFilters records the structured filters a selection was built from,
 // so a caller can echo them back without re-parsing the arguments.
@@ -2531,7 +2559,7 @@ func (h *handlers) resolveMutationTargets(
 	selection := &mutationSelection{filters: filters}
 
 	if hasQuery {
-		q := search.Parse(queryStr)
+		q := search.ParseOR(queryStr)
 		if err := q.Err(); err != nil {
 			return nil, toolErrorResult(err.Error()), nil
 		}
@@ -2790,12 +2818,147 @@ func truncateSelectionDescription(description string) string {
 }
 
 func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolResult, error) {
-	selection, result, err := h.resolveMutationTargets(ctx, req.GetArguments(),
-		mutationResolveOptions{limit: maxStageDeletionResults, operation: "deletion"})
-	if result != nil || err != nil {
-		return result, err
+	args := req.GetArguments()
+
+	// Look up account filter
+	account, _ := args[toolArgAccount].(string)
+	selection, err := h.resolveAccount(ctx, account)
+	if err != nil {
+		return dependencyError("resolve deletion account", err)
 	}
-	targets := selection.targets
+	sourceID := selection.sourceID
+
+	// Check for query vs structured filters
+	queryStr, _ := args[toolArgQuery].(string)
+	queryStr = strings.TrimSpace(queryStr)
+	hasQuery := queryStr != ""
+
+	// Check for any structured filter
+	fromStr, _ := args[toolArgFrom].(string)
+	domainStr, _ := args["domain"].(string)
+	labelStr, _ := args["label"].(string)
+	hasAttachment, _ := args["has_attachment"].(bool)
+	afterDate, err := getDateArg(args, toolArgAfter)
+	if err != nil {
+		return toolErrorResult(err.Error()), nil
+	}
+	beforeDate, err := getDateArg(args, toolArgBefore)
+	if err != nil {
+		return toolErrorResult(err.Error()), nil
+	}
+
+	hasStructuredFilter := fromStr != "" || domainStr != "" || labelStr != "" ||
+		hasAttachment || afterDate != nil || beforeDate != nil
+
+	// Validate: must have either query or structured filters, but not both
+	if hasQuery && hasStructuredFilter {
+		return toolErrorResult("use either 'query' or structured filters (from, domain, label, etc.), not both"), nil
+	}
+	if !hasQuery && !hasStructuredFilter {
+		return toolErrorResult("must provide either 'query' or at least one filter (from, domain, label, after, before, has_attachment)"), nil
+	}
+
+	var targets []query.DeletionTarget
+	var description string
+	var searchNote string
+	var skipped int
+
+	if hasQuery {
+		// Query-based search
+		q := search.ParseOR(queryStr)
+		if err := q.Err(); err != nil {
+			return toolErrorResult(err.Error()), nil
+		}
+		if q.IsEmpty() {
+			return toolErrorResult("query must contain at least one search term or filter"), nil
+		}
+		// Query scopes survive FTS fallback; SourceID also crosses the daemon boundary.
+		if err := selection.applyToQuery(q); err != nil {
+			return toolErrorResult(err.Error()), nil
+		}
+		mode := query.DeletionSearchFast
+		if q.HasOR() && q.HasTextTerms() {
+			mode = query.DeletionSearchDeep
+			searchNote = "Full-text OR search includes body matches. "
+		}
+		resolver, ok := h.engine.(query.BoundedDeletionTargetSearchResolver)
+		if !ok {
+			return dependencyError("search messages for deletion", errors.New("query engine requires bounded deletion search support"))
+		}
+		filter := query.MessageFilter{SourceID: sourceID}
+		var matched int
+		targets, matched, err = resolver.GetDeletionTargetsBySearchBounded(ctx, q, filter, mode, maxStageDeletionResults+1)
+		if err == nil && mode == query.DeletionSearchFast && matched == 0 && q.HasTextTerms() {
+			targets, matched, err = resolver.GetDeletionTargetsBySearchBounded(ctx, q, filter, query.DeletionSearchDeep, maxStageDeletionResults+1)
+		}
+		if errors.Is(err, daemonclient.ErrBoundedDeletionSearchUnsupported) {
+			return toolErrorResult(err.Error()), nil
+		}
+		if err != nil {
+			return dependencyError("search messages for deletion", err)
+		}
+		if matched > maxStageDeletionResults {
+			return toolErrorResult(fmt.Sprintf("more than %d Gmail, Microsoft Graph, or IMAP messages match; stage_deletion stages at most %d per call. Narrow the selection with before:/after: or account and stage each part", maxStageDeletionResults, maxStageDeletionResults)), nil
+		}
+		if matched > 0 && len(targets) == 0 {
+			return toolErrorResult(fmt.Sprintf("%d messages match, but none can be deleted from their source", matched)), nil
+		}
+		skipped = matched - len(targets)
+		description = "query: " + queryStr
+		if len(description) > 50 {
+			description = description[:50]
+		}
+	} else {
+		// Structured filter
+		filter := query.MessageFilter{
+			SourceID:            sourceID,
+			Sender:              fromStr,
+			Domain:              domainStr,
+			Label:               labelStr,
+			WithAttachmentsOnly: hasAttachment,
+			After:               afterDate,
+			Before:              beforeDate,
+			Pagination: query.Pagination{
+				Limit: maxStageDeletionResults + 1,
+			},
+		}
+		selection.applyToFilter(&filter)
+
+		var err error
+		targets, err = h.engine.GetDeletionTargetsByFilter(ctx, filter)
+		if err != nil {
+			return nil, newInternalError("filter messages for deletion", err)
+		}
+
+		if len(targets) > maxStageDeletionResults {
+			return toolErrorResult(fmt.Sprintf("more than %d messages match; stage_deletion stages at most %d per call. Narrow the selection with before:/after: or account and stage each part", maxStageDeletionResults, maxStageDeletionResults)), nil
+		}
+
+		// Build description from filters
+		var parts []string
+		if fromStr != "" {
+			parts = append(parts, "from:"+fromStr)
+		}
+		if domainStr != "" {
+			parts = append(parts, "domain:"+domainStr)
+		}
+		if labelStr != "" {
+			parts = append(parts, "label:"+labelStr)
+		}
+		if hasAttachment {
+			parts = append(parts, "has:attachment")
+		}
+		if afterDate != nil {
+			parts = append(parts, "after:"+afterDate.Format("2006-01-02"))
+		}
+		if beforeDate != nil {
+			parts = append(parts, "before:"+beforeDate.Format("2006-01-02"))
+		}
+		description = "filter: " + strings.Join(parts, " ")
+		if len(description) > 50 {
+			description = description[:50]
+		}
+	}
 
 	if len(targets) == 0 {
 		return toolErrorResult("no messages match the specified criteria"), nil
@@ -2812,26 +2975,25 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 	}
 	gmailIDs := deletion.SourceMessageIDs(targets)
 
-	manifest := deletion.NewManifestForSource(
-		truncateSelectionDescription(selection.description), gmailIDs, source)
+	manifest := deletion.NewManifestForSource(description, gmailIDs, source)
 	manifest.CreatedBy = "mcp"
 
 	// Set filter metadata for execution
 	manifest.Filters.Account = source.Identifier
-	if selection.filters.from != "" {
-		manifest.Filters.Senders = []string{selection.filters.from}
+	if fromStr != "" {
+		manifest.Filters.Senders = []string{fromStr}
 	}
-	if selection.filters.domain != "" {
-		manifest.Filters.SenderDomains = []string{selection.filters.domain}
+	if domainStr != "" {
+		manifest.Filters.SenderDomains = []string{domainStr}
 	}
-	if selection.filters.label != "" {
-		manifest.Filters.Labels = []string{selection.filters.label}
+	if labelStr != "" {
+		manifest.Filters.Labels = []string{labelStr}
 	}
-	if selection.filters.after != nil {
-		manifest.Filters.After = selection.filters.after.Format("2006-01-02")
+	if afterDate != nil {
+		manifest.Filters.After = afterDate.Format("2006-01-02")
 	}
-	if selection.filters.before != nil {
-		manifest.Filters.Before = selection.filters.before.Format("2006-01-02")
+	if beforeDate != nil {
+		manifest.Filters.Before = beforeDate.Format("2006-01-02")
 	}
 
 	if err := h.saveDeletionManifest(ctx, manifest); err != nil {
@@ -2840,13 +3002,16 @@ func (h *handlers) stageDeletion(ctx context.Context, req toolRequest) (*toolRes
 
 	resp := stageDeletionResponse{
 		BatchID:       manifest.ID,
+		SkippedCount:  skipped,
+		TotalMatching: new(skipped + len(targets)),
 		MessageCount:  len(gmailIDs),
 		Status:        string(manifest.Status),
-		TotalMatching: matchTotal(selection),
-		HasMore:       selection.hasMore,
-		NextStep:      "In the invoking CLI's config.toml, set '[deletion] remote_enabled = true' for durable consent and run 'msgvault delete-staged'; for one command instead, run 'MSGVAULT_ENABLE_REMOTE_DELETE=1 msgvault delete-staged'. Run 'msgvault cancel-deletion " + manifest.ID + "' to cancel",
+		NextStep:      searchNote + "In the invoking CLI's config.toml, set '[deletion] remote_enabled = true' for durable consent and run 'msgvault delete-staged'; for one command instead, run 'MSGVAULT_ENABLE_REMOTE_DELETE=1 msgvault delete-staged'. Run 'msgvault cancel-deletion " + manifest.ID + "' to cancel",
 	}
 
+	if skipped > 0 {
+		resp.NextStep = fmt.Sprintf("%d of %d matching item(s) were skipped because they are no longer in the archive or cannot be deleted from their source. ", skipped, skipped+len(targets)) + resp.NextStep
+	}
 	return jsonResult(resp)
 }
 
@@ -2884,6 +3049,9 @@ func (h *handlers) searchByDomains(ctx context.Context, req toolRequest) (*toolR
 	}
 
 	limit := limitArg(args, toolArgLimit, 100)
+	if limit == 0 {
+		limit = 100
+	}
 	offset := offsetArg(args)
 
 	afterDate, err := getDateArg(args, toolArgAfter)
@@ -2895,12 +3063,13 @@ func (h *handlers) searchByDomains(ctx context.Context, req toolRequest) (*toolR
 		return toolErrorResult(err.Error()), nil
 	}
 
-	results, err := h.engine.SearchByDomains(ctx, domains, afterDate, beforeDate, limit, offset, nil)
+	result, err := h.engine.SearchByDomains(ctx, domains, afterDate, beforeDate, limit, offset, nil)
 	if err != nil {
 		return nil, newInternalError("search messages by domain", err)
 	}
 
-	return jsonResult(searchByDomainsResponse{Data: nonNilSlice(results)})
+	return jsonResult(searchByDomainsResponse(newPaginatedResponseNoTotal(
+		result.Messages, offset, result.HasMore)))
 }
 
 func nonNilSlice[T any](values []T) []T {

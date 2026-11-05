@@ -18,7 +18,7 @@ import (
 // runHybridSearch executes vector or hybrid search through the configured
 // remote server or local daemon. It preserves the historical CLI renderer while
 // keeping vector backend ownership inside the daemon.
-func runHybridSearch(cmd *cobra.Command, queryStr, mode string, explain bool) error {
+func runHybridSearch(cmd *cobra.Command, queryStr, mode string, explain bool) (result error) {
 	state := invocationFromCommand(cmd)
 	if state == nil || state.logger == nil {
 		return errors.New("invocation state is unavailable")
@@ -29,6 +29,13 @@ func runHybridSearch(cmd *cobra.Command, queryStr, mode string, explain bool) er
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = s.Close() }()
+	kind := "hybrid"
+	if mode == "vector" {
+		kind = "semantic"
+	}
+	if strings.TrimSpace(queryStr) != "" {
+		defer reportSuccessfulCLIAction(cmd, s, "search_run", "search_type", kind, &result)
+	}
 
 	logger.Info("vector search start",
 		"mode", mode,
@@ -79,6 +86,10 @@ func runHybridSearch(cmd *cobra.Command, queryStr, mode string, explain bool) er
 
 	if searchSort == "date" {
 		sortSemanticResultsByDate(resp.Results)
+	}
+
+	if strings.TrimSpace(queryStr) != "" && len(resp.Results) == 0 {
+		defer reportSuccessfulCLIAction(cmd, s, "search_empty", "search_type", kind, &result)
 	}
 	if searchJSON {
 		return outputHybridResultsJSON(resp, explain)
@@ -162,13 +173,14 @@ func outputHybridResultsJSON(resp *daemonclient.CLIHybridSearch, explain bool) e
 	rows := make([]map[string]any, len(resp.Results))
 	for i, r := range resp.Results {
 		row := map[string]any{
-			"id":              r.ID,
-			"subject":         r.Subject,
-			"from_email":      r.FromEmail,
-			"sent_at":         r.SentAt.Format(time.RFC3339),
-			"boosted":         r.SubjectBoosted,
-			"conversation_id": r.Message.ConversationID,
-			"snippet":         r.Message.Snippet,
+			"id":                  r.ID,
+			"subject":             r.Subject,
+			"from_email":          r.FromEmail,
+			"sent_at":             r.SentAt.Format(time.RFC3339),
+			"boosted":             r.SubjectBoosted,
+			"conversation_id":     r.Message.ConversationID,
+			"snippet":             r.Message.Snippet,
+			"hidden_text_present": r.Message.HiddenTextPresent,
 		}
 		if r.AttachmentCount != nil {
 			row["attachment_count"] = *r.AttachmentCount

@@ -155,7 +155,7 @@ func (SQLiteQueryDialect) TimeTruncExpression(column string, granularity string)
 		return fmt.Sprintf("strftime('%%Y', %s)", column)
 	case timeGranularityMonth:
 		return fmt.Sprintf("strftime('%%Y-%%m', %s)", column)
-	case "day":
+	case timeGranularityDay:
 		return fmt.Sprintf("strftime('%%Y-%%m-%%d', %s)", column)
 	default:
 		return fmt.Sprintf("strftime('%%Y-%%m', %s)", column)
@@ -256,7 +256,7 @@ func (PostgreSQLQueryDialect) TimeTruncExpression(column string, granularity str
 		return fmt.Sprintf("to_char(%s AT TIME ZONE 'UTC', 'YYYY')", column)
 	case timeGranularityMonth:
 		return fmt.Sprintf("to_char(%s AT TIME ZONE 'UTC', 'YYYY-MM')", column)
-	case "day":
+	case timeGranularityDay:
 		return fmt.Sprintf("to_char(%s AT TIME ZONE 'UTC', 'YYYY-MM-DD')", column)
 	default:
 		return fmt.Sprintf("to_char(%s AT TIME ZONE 'UTC', 'YYYY-MM')", column)
@@ -362,6 +362,7 @@ func (PostgreSQLQueryDialect) SanitizeFTSQuery(query string) string {
 }
 
 func (SQLiteQueryDialect) DateOrderExpression(column string) string {
-	return sqliteutil.TimestampKeyFunction + "(" + column + ")"
+	// Keep zero times undated, as the timestamp key does.
+	return "NULLIF(julianday(" + column + "), " + sqliteutil.ZeroTimeJulianDay + ")"
 }
 func (PostgreSQLQueryDialect) DateOrderExpression(column string) string { return column }

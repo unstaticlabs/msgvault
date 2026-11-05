@@ -1,4 +1,5 @@
 ---
+last_edited: "2026-10-23"
 title: Setup Guide
 description: Install msgvault, choose a source, and explore your first archived messages.
 ---
@@ -8,9 +9,6 @@ Install msgvault, bring in a small first batch, then open it in the browser or
 terminal. The Gmail walkthrough below includes Google OAuth setup. For other
 mail providers, chats, meetings, contacts, or local exports, use
 [Choose a Source](guides/sources.md) after installation.
-
-Already have an archive? Read [the upgrade notes](changelog.md#before-upgrading) before
-opening an existing archive with a newer build.
 
 ## Install Release
 
@@ -50,12 +48,12 @@ the archive or its checksum entry is missing.
 Archives use `msgvault_<version>_<os>_<arch>`, with the version's leading `v`
 removed. Use `darwin` for macOS, `linux` for Linux, and `windows` for Windows;
 architectures are `amd64` and `arm64`. macOS and Linux archives end in `.tar.gz`;
-Windows archives end in `.zip`, such as `msgvault_0.21.0_windows_arm64.zip`.
+Windows archives end in `.zip`, such as `msgvault_0.23.0_windows_arm64.zip`.
 
 ### Migrate before replacing the executable
 
-The following commands are new on `main` and are not in v0.21.0. Use a candidate
-binary that includes them. Run maintenance on the archive host; for a configured
+These commands are available in 0.22.0 and later; run them from the candidate
+binary. Run maintenance on the archive host; for a configured
 remote server, use `--local` only when intentionally selecting this host's archive.
 
 1. Download, verify, and extract the candidate into a separate directory.
@@ -216,6 +214,13 @@ msgvault add-account you@gmail.com
 This opens your browser for OAuth consent. For headless servers, see the [copy-token workflow](/docs/guides/oauth-setup/#headless-server-setup).
 
 If you plan to deploy to a remote host (NAS, cloud VM, etc.), run `msgvault setup` after this step to generate a ready-to-run deployment bundle with Docker Compose and remote configuration. See the [Remote Deployment](/docs/guides/remote-deployment/) guide.
+
+During setup, choose the detected host IANA timezone for activity day
+boundaries, or enter another IANA zone. Setup writes the effective zone to
+`[activity].timezone` in the local config and to any NAS bundle it creates. If
+the daemon is running, restart it to load the new zone; later projection passes
+then re-date existing activity rows automatically. `Local` is not accepted
+because it depends on the host at runtime.
 
 ## Add an IMAP Account
 

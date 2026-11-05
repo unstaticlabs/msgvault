@@ -21,6 +21,7 @@ import (
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/twilio"
 )
 
@@ -176,10 +177,8 @@ func twilioSyncFixture(t *testing.T, recordingStatus string, mediaStatus int) *c
 		opts.Endpoints = map[string]string{"voice": server.URL, "intelligence": server.URL}
 		return twilio.NewClient(opts)
 	}
-	st, err := store.Open(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
-	_, err = st.GetOrCreateSource("twilio", "work")
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+	_, err := st.GetOrCreateSource("twilio", "work")
 	require.NoError(err)
 	require.NoError(st.Close())
 	return cfg
@@ -263,6 +262,98 @@ func TestScheduledTwilioSyncLogsDiagnostics(t *testing.T) {
 	assert.Contains(t, logs.String(), "legacy transcription coverage unavailable (HTTP 404)")
 }
 
+func retiredTwilioFixture(t *testing.T) (*config.Config, *store.Store) {
+	t.Helper()
+	require := require.New(t)
+	cfg := lifecycleTestConfig(t.TempDir())
+	cfg.Analytics.AutoBuildCache = false
+	cfg.Twilio = []config.TwilioSource{{Identifier: "history"}}
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+	from, err := st.GetOrCreateSource(twilio.SourceType, "history")
+	require.NoError(err)
+	into, err := st.GetOrCreateSource(twilio.SourceType, "live")
+	require.NoError(err)
+	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+		FromSourceID: from.ID,
+		IntoSourceID: into.ID,
+	})
+	require.NoError(err)
+	return cfg, st
+}
+
+func TestConfiguredTwilioSyncSkipsRetiredSourceBeforeClientCreation(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	cfg, st := retiredTwilioFixture(t)
+	previousClient := newTwilioClient
+	t.Cleanup(func() { newTwilioClient = previousClient })
+	clientCalls := 0
+	newTwilioClient = func(twilio.Options) (*twilio.Client, error) {
+		clientCalls++
+		return nil, errors.New("retired source should not create a provider client")
+	}
+	previousRefresh := rebuildTwilioCacheAfterScheduledSync
+	t.Cleanup(func() { rebuildTwilioCacheAfterScheduledSync = previousRefresh })
+	refreshCalls := 0
+	rebuildTwilioCacheAfterScheduledSync = func(context.Context, string) error {
+		refreshCalls++
+		return nil
+	}
+	state := newInvocation()
+	state.cfg = cfg
+
+	err := runConfiguredTwilioSync(withInvocation(t.Context(), state), st, cfg.Twilio[0])
+	require.NoError(err)
+	assert.Zero(clientCalls, "retired sources do not construct provider clients")
+	assert.Zero(refreshCalls, "skipped sources do not rebuild the call cache")
+}
+
+func TestManualTwilioSyncSkipsRetiredSourceWithoutIdentifier(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	cfg, _ := retiredTwilioFixture(t)
+	previousClient := newTwilioClient
+	t.Cleanup(func() { newTwilioClient = previousClient })
+	clientCalls := 0
+	newTwilioClient = func(twilio.Options) (*twilio.Client, error) {
+		clientCalls++
+		return nil, errors.New("retired source should not create a provider client")
+	}
+	previousRefresh := rebuildTwilioCacheAfterWrite
+	t.Cleanup(func() { rebuildTwilioCacheAfterWrite = previousRefresh })
+	rebuildTwilioCacheAfterWrite = func(string, *invocation) error { return nil }
+	cmd := &cobra.Command{Use: syncTwilioCmd.Use}
+	cmd.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+
+	err := syncTwilioCmd.RunE(cmd, nil)
+	require.NoError(err)
+	assert.Zero(clientCalls, "an unqualified configured sync skips retired sources")
+}
+
+func TestManualTwilioSyncRejectsExplicitRetiredSource(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	cfg, _ := retiredTwilioFixture(t)
+	previousClient := newTwilioClient
+	t.Cleanup(func() { newTwilioClient = previousClient })
+	clientCalls := 0
+	newTwilioClient = func(twilio.Options) (*twilio.Client, error) {
+		clientCalls++
+		return nil, errors.New("retired source should not create a provider client")
+	}
+	previousRefresh := rebuildTwilioCacheAfterWrite
+	t.Cleanup(func() { rebuildTwilioCacheAfterWrite = previousRefresh })
+	rebuildTwilioCacheAfterWrite = func(string, *invocation) error { return nil }
+	cmd := &cobra.Command{Use: syncTwilioCmd.Use}
+	cmd.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+
+	err := syncTwilioCmd.RunE(cmd, []string{"history"})
+	require.ErrorIs(err, store.ErrSourceRetired)
+	assert.Zero(clientCalls, "explicit retired selections fail before client creation")
+}
+
 func TestTwilioDaemonDispatchesRegisteredScheduledSource(t *testing.T) {
 	require := require.New(t)
 	cfg := lifecycleTestConfig(t.TempDir())
@@ -281,11 +372,8 @@ func TestTwilioDaemonDispatchesRegisteredScheduledSource(t *testing.T) {
 		opts.Endpoints = map[string]string{"voice": server.URL}
 		return twilio.NewClient(opts)
 	}
-	st, err := store.Open(cfg.DatabaseDSN())
-	require.NoError(err)
-	t.Cleanup(func() { require.NoError(st.Close()) })
-	require.NoError(st.InitSchema())
-	_, err = st.GetOrCreateSource("twilio", "work")
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+	_, err := st.GetOrCreateSource("twilio", "work")
 	require.NoError(err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cmd := &cobra.Command{Use: serveCmd.Use}
@@ -303,7 +391,7 @@ func TestTwilioDaemonDispatchesRegisteredScheduledSource(t *testing.T) {
 	})
 	waitForServeHealth(t, cfg.Server.APIPort, errCh)
 	base := fmt.Sprintf("http://127.0.0.1:%d", cfg.Server.APIPort)
-	client := &http.Client{Timeout: time.Second}
+	client := &http.Client{Timeout: serveLifecycleTestTimeout}
 	response, err := client.Post(base+"/api/v1/sync/work?source_type=twilio", "application/json", nil)
 	require.NoError(err)
 	require.NoError(response.Body.Close())
@@ -323,10 +411,8 @@ func TestTwilioDaemonDispatchesRegisteredScheduledSource(t *testing.T) {
 func TestTwilioRemovalDoesNotRecreateScheduledSource(t *testing.T) {
 	require := require.New(t)
 	cfg := lifecycleTestConfig(t.TempDir())
-	st, err := store.Open(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
-	_, err = st.GetOrCreateSource("twilio", "work")
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+	_, err := st.GetOrCreateSource("twilio", "work")
 	require.NoError(err)
 	require.NoError(st.Close())
 	root := newTestRootCmd()

@@ -25,13 +25,13 @@ for (const width of [320, 390]) {
     })).toBe(true);
     await primary.click();
     const navigation = page.getByRole('dialog', { name: 'Navigation', exact: true });
-    await expect(navigation.getByRole('button', { name: 'Everything', exact: true })).toBeVisible();
+    await expect(navigation.getByRole('button', { name: 'Messages', exact: true })).toBeVisible();
     await expect(page.getByRole('menu', { name: 'Display', exact: true })).not.toBeVisible();
-    await navigation.getByRole('button', { name: 'Everything', exact: true }).click();
+    await navigation.getByRole('button', { name: 'Messages', exact: true }).click();
     await expect(navigation).not.toBeVisible();
-    await expect(page.getByRole('main', { name: 'Everything', exact: true })).toBeVisible();
+    await expect(page.getByRole('main', { name: 'Messages', exact: true })).toBeVisible();
     await density.click();
-    await expect(page.getByRole('menuitemradio', { name: 'Auto', exact: true })).toBeVisible();
+    await expect(page.getByRole('menuitemradio', { name: 'Compact', exact: true })).toBeVisible();
     await page.getByRole('menuitemradio', { name: 'Comfortable', exact: true }).click();
     await expect(primary).toBeVisible();
   });
@@ -44,7 +44,7 @@ test('Desktop header retains one row and direct navigation', async ({ page }) =>
   const banner = page.getByRole('banner');
   const navigation = page.getByRole('navigation', { name: 'Primary' });
   const density = page.getByRole('button', { name: 'Display', exact: true });
-  await expect(navigation.getByRole('button', { name: 'Everything', exact: true })).toBeVisible();
+  await expect(navigation.getByRole('button', { name: 'Messages', exact: true })).toBeVisible();
   const headerBox = await banner.boundingBox();
   const densityBox = await density.boundingBox();
   expect(headerBox).not.toBeNull();

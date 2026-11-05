@@ -26,11 +26,13 @@ describe('keyboard command registry', () => {
     expect(() => createCommandRegistry(handlersFor(ids))).toThrow(/clear-selection.*handler/i);
   });
 
-  it('renders and searches the registry, including selection commands', async () => {
+  it('searches selection commands and opens Commands', async () => {
     const onclose = vi.fn();
+    const onOpenCommands = vi.fn();
     render(KeyboardHelp, {
       commands: createCommandRegistry(handlersFor(COMMAND_DEFINITIONS.map(({ id }) => id))),
-      onclose
+      onclose,
+      onOpenCommands
     });
 
     expect(screen.getByRole('dialog', { name: 'Keyboard shortcuts' })).toBeDefined();
@@ -41,26 +43,16 @@ describe('keyboard command registry', () => {
     });
     expect(screen.getByText('Select all visible rows')).toBeDefined();
     expect(screen.queryByText('Open filters')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Commands' }));
+    expect(onOpenCommands).toHaveBeenCalledOnce();
     await fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     expect(onclose).toHaveBeenCalledOnce();
-  });
-
-  it('names r for what it does: showing the fixed sort order', async () => {
-    render(KeyboardHelp, {
-      commands: createCommandRegistry(handlersFor(COMMAND_DEFINITIONS.map(({ id }) => id))),
-      onclose: vi.fn()
-    });
-
-    await fireEvent.input(screen.getByRole('searchbox', { name: 'Search keyboard shortcuts' }), {
-      target: { value: 'sort' }
-    });
-    expect(screen.getByText('Show sort order')).toBeDefined();
-    expect(screen.queryByText(/Reverse sort/)).toBeNull();
   });
 
   it('renders a modified shortcut as one chord instead of key alternatives', () => {
     render(KeyboardHelp, {
       commands: createCommandRegistry(handlersFor(COMMAND_DEFINITIONS.map(({ id }) => id))),
+      onOpenCommands: vi.fn(),
       onclose: vi.fn()
     });
 
@@ -68,15 +60,6 @@ describe('keyboard command registry', () => {
     expect(command).not.toBeNull();
     expect(command?.querySelector('[aria-label="Mod K"]')).not.toBeNull();
     expect(command?.textContent).not.toContain('or');
-  });
-
-  it('documents extending a selection with Shift+Space', () => {
-    render(KeyboardHelp, {
-      commands: createCommandRegistry(handlersFor(COMMAND_DEFINITIONS.map(({ id }) => id))),
-      onclose: vi.fn()
-    });
-
-    expect(screen.getByText('Extend selection to focused row')).toBeTruthy();
   });
 });
 

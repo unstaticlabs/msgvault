@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -249,20 +250,33 @@ func TestOperationGateMiddlewareRejectsOversizedCLIRunInspectionBody(t *testing.
 
 func TestOperationGateMiddlewareStillGatesMutatingCLIRun(t *testing.T) {
 	t.Parallel()
-	assert := assert.New(t)
-	gate := &recordingOperationGate{allow: true}
-	handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"create-subset", `{"args":["create-subset","subset"]}`},
+		{"policy set", `{"args":["policy","set","1","room","cold"]}`},
+		{"import", `{"args":["import-mbox","archive.mbox"]}`},
+		{"flag value matches status", `{"args":["embeddings","--config","status","build"]}`},
+		{"unknown flag", `{"args":["embeddings","--account","status","build"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			gate := &recordingOperationGate{allow: true}
+			handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNoContent)
+			}))
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", strings.NewReader(`{"args":["import-mbox","archive.mbox"]}`))
-	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", strings.NewReader(tc.body))
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
 
-	assert.Equal(http.StatusNoContent, resp.Code, "status")
-	begin, done := gate.counts()
-	assert.Equal(1, begin, "begin calls")
-	assert.Equal(1, done, "done calls")
+			assert.Equal(http.StatusNoContent, resp.Code, "status")
+			begin, done := gate.counts()
+			assert.Equal(1, begin, "begin calls")
+			assert.Equal(1, done, "done calls")
+		})
+	}
 }
 
 func TestOperationGateMiddlewareStillGatesMutatingDocumentCommands(t *testing.T) {
@@ -295,28 +309,6 @@ func TestOperationGateMiddlewareStillGatesMutatingDocumentCommands(t *testing.T)
 			assert.Equal(t, 1, done)
 		})
 	}
-}
-
-func TestOperationGateMiddlewareGatesMessageExport(t *testing.T) {
-	t.Parallel()
-	assert := assert.New(t)
-	gate := &recordingOperationGate{allow: true}
-	handler := operationGateMiddleware(gate, nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
-
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/api/v1/cli/run",
-		strings.NewReader(`{"args":["export-messages","--start","2026-07-20T00:00:00Z","--end","2026-07-21T00:00:00Z"]}`),
-	)
-	resp := httptest.NewRecorder()
-	handler.ServeHTTP(resp, req)
-
-	assert.Equal(http.StatusNoContent, resp.Code, "status")
-	begin, done := gate.counts()
-	assert.Equal(1, begin, "begin calls")
-	assert.Equal(1, done, "done calls")
 }
 
 func TestOperationGateMiddlewareRejectsUnavailableGate(t *testing.T) {
@@ -407,78 +399,40 @@ func waitForParkedContext(t *testing.T, parked <-chan struct{}, work string) {
 	}
 }
 
-func TestServerEmbeddingsOptimizeHoldsOperationGateUntilRunnerReturns(t *testing.T) {
+func TestServerEmbeddingsOptimizeLeavesOperationGateToRunner(t *testing.T) {
 	t.Parallel()
-	for _, ending := range []string{"complete", "cancel"} {
-		t.Run(ending, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				gate := NewSerialOperationGate()
-				requestCtx, cancelRequest := context.WithCancel(t.Context())
-				defer cancelRequest()
-				cleanupCtx, finishCleanup := context.WithCancel(t.Context())
-				defer finishCleanup()
-				commandFinished := make(chan struct{})
-				started := make(chan []string, 1)
-				srv := NewServerWithOptions(ServerOptions{
-					Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
-					Store: &mockStore{runFunc: func(ctx context.Context, req CLIRunRequest, _ func(CLIRunEvent) error) error {
-						started <- req.Args
-						select {
-						case <-commandFinished:
-						case <-ctx.Done():
-						}
-						// The subprocess boundary returns only after worker cleanup.
-						<-cleanupCtx.Done()
-						return ctx.Err()
-					}},
-					Logger:        testLogger(),
-					OperationGate: gate,
-				})
-				defer func() {
-					cancelRequest()
-					finishCleanup()
-					synctest.Wait()
-					require.NoError(t, srv.Shutdown(context.Background()))
-				}()
-				req := httptest.NewRequestWithContext(requestCtx, http.MethodPost, "/api/v1/cli/run",
-					strings.NewReader(`{"args":["embeddings","optimize"]}`))
-				req.Header.Set("Content-Type", "application/json")
-				response := httptest.NewRecorder()
-				requestDone := make(chan struct{})
-				go func() {
-					srv.Router().ServeHTTP(response, req)
-					close(requestDone)
-				}()
-				synctest.Wait()
-				require.Len(t, started, 1, "optimize reaches the subprocess runner")
-				assert.Equal(t, []string{"embeddings", "optimize"}, <-started)
-
-				backgroundCtx, cancelBackground := context.WithCancel(t.Context())
-				defer cancelBackground()
-				backgroundStarted := make(chan bool, 1)
-				go func() {
-					release, ok := gate.BeginWorkContext(backgroundCtx)
-					defer release()
-					backgroundStarted <- ok
-				}()
-				synctest.Wait()
-				assert.Empty(t, backgroundStarted, "background embedding work waits during optimize")
-
-				if ending == "cancel" {
-					cancelRequest()
-				} else {
-					close(commandFinished)
-				}
-				synctest.Wait()
-				assert.Empty(t, backgroundStarted, "the gate stays held until the runner finishes cleanup")
-
-				finishCleanup()
-				synctest.Wait()
-				require.Len(t, backgroundStarted, 1, "runner return releases background work")
-				assert.True(t, <-backgroundStarted)
-				<-requestDone
-				assert.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	for _, args := range [][]string{
+		{"embeddings", "optimize"},
+		{"embeddings", "--verbose", "optimize", "--drop", "2"},
+		{"embeddings", "-vv", "optimize"},
+		{"embeddings", "--log-level", "debug", "optimize"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			gate := NewSerialOperationGate()
+			release, ok := gate.BeginWorkContext(t.Context())
+			require.True(ok)
+			defer release()
+			ran := false
+			srv := NewServerWithOptions(ServerOptions{
+				Config: &config.Config{Server: config.ServerConfig{APIPort: 8080}},
+				Store: &mockStore{runFunc: func(_ context.Context, req CLIRunRequest, _ func(CLIRunEvent) error) error {
+					ran = true
+					assert.Equal(args, req.Args)
+					return nil
+				}},
+				Logger: testLogger(), OperationGate: gate,
 			})
+			defer func() { require.NoError(srv.Shutdown(context.Background())) }()
+			body, err := json.Marshal(CLIRunRequest{Args: args})
+			require.NoError(err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/cli/run", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			srv.Router().ServeHTTP(response, req)
+			assert.True(ran, "the coordinator owns admission instead of middleware")
+			assert.Equal(http.StatusOK, response.Code, response.Body.String())
 		})
 	}
 }
@@ -651,7 +605,7 @@ func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T
 	select {
 	case queuedOK := <-queuedDone:
 		assert.Fail("queued work returned before drain", "ok=%v", queuedOK)
-	case <-time.After(25 * time.Millisecond): //nolint:kennlint // absence check: active work keeps queued work waiting
+	case <-time.After(25 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check: active work keeps queued work waiting
 	}
 
 	drainDone := make(chan error, 1)
@@ -670,7 +624,7 @@ func TestSerialOperationGateDrainRejectsQueuedWorkAndWaitsForActive(t *testing.T
 	select {
 	case err := <-drainDone:
 		assert.Fail("drain returned before active work released", "err=%v", err)
-	case <-time.After(25 * time.Millisecond): //nolint:kennlint // absence check: unreleased active work keeps the drain waiting
+	case <-time.After(25 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check: unreleased active work keeps the drain waiting
 	}
 
 	releaseActive()
@@ -720,8 +674,15 @@ func TestOperationGateMiddlewareSkipsReadOnlyCLIRunCommands(t *testing.T) {
 		name string
 		body string
 	}{
+		{"export-messages", `{"args":["export-messages","--start","2026-07-20T00:00:00Z","--end","2026-07-21T00:00:00Z"]}`},
+		{"export-discord", `{"args":["export-discord"]}`},
+		{"list-folders", `{"args":["list-folders"]}`},
+		{"policy list", `{"args":["policy","list"]}`},
 		{"embeddings list", `{"args":["embeddings","list"]}`},
+		{"embeddings value flag before status", `{"args":["embeddings","--source","42","--json=true","status"]}`},
 		{"documents search", `{"args":["documents","search","shipping damage"]}`},
+		{"person tiers preview", `{"args":["person","tiers","preview","--json"]}`},
+		{"person tiers explain", `{"args":["person","tiers","explain","7"]}`},
 		{"list-deletions", `{"args":["list-deletions"]}`},
 		{"show-deletion with id", `{"args":["show-deletion","batch-123"]}`},
 	}

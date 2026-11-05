@@ -160,10 +160,14 @@ func endMediaPass(err error) error {
 
 // gated runs one Store step under the operation gate so backup freeze sees no writer.
 func (w *MediaSubmitter) gated(ctx context.Context, step func() error) error {
-	if w.gate == nil {
+	return gatedMediaStep(ctx, w.gate, step)
+}
+
+func gatedMediaStep(ctx context.Context, gate func(context.Context) (func(), bool), step func() error) error {
+	if gate == nil {
 		return step()
 	}
-	release, ok := w.gate(ctx)
+	release, ok := gate(ctx)
 	if !ok {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -208,14 +212,18 @@ func (w *MediaSubmitter) discover(ctx context.Context, archiveUID string) (Media
 	if err != nil {
 		return result, err
 	}
-	scan, err := w.store.LoadBeeperMediaScan(ctx, w.destination)
+	var scan store.BeeperMediaScan
+	err = w.gated(ctx, func() (err error) {
+		scan, err = w.store.LoadBeeperMediaScan(ctx, w.destination)
+		return err
+	})
 	if err != nil {
 		return result, err
 	}
 	before := scan
 	if !consumer.ReconciliationComplete && (created || scan.BaselineSequence != consumer.BaselineSequence) {
 		// A registration completes only after a full pass that began after it.
-		scan = store.BeeperMediaScan{DestinationKey: w.destination, BaselineSequence: consumer.BaselineSequence}
+		scan = store.BeeperMediaScan{DestinationKey: w.destination, Generation: scan.Generation, BaselineSequence: consumer.BaselineSequence}
 	}
 	if !consumer.ReconciliationComplete || !time.Now().Before(scan.NextFullScanAt) {
 		if scan.PassHighWater == 0 {
@@ -643,6 +651,7 @@ func sameBeeperMediaCandidate(a, b store.BeeperMediaCandidate) bool {
 		a.ConversationID == b.ConversationID && a.SourceID == b.SourceID &&
 		a.SourceType == b.SourceType && a.SourceIdentifier == b.SourceIdentifier &&
 		a.SourceConversationID == b.SourceConversationID && a.SourceMessageID == b.SourceMessageID &&
+		a.OriginalSourceMessageID == b.OriginalSourceMessageID &&
 		a.SourceAttachmentID == b.SourceAttachmentID && a.SourcePartKey == b.SourcePartKey &&
 		a.Filename == b.Filename && a.MIMEType == b.MIMEType && a.MediaType == b.MediaType &&
 		a.Role == b.Role && a.ContentHash == b.ContentHash && a.ByteLength == b.ByteLength &&
@@ -708,14 +717,21 @@ func fallbackMediaMappingCode(
 	return mapping
 }
 
+func beeperMediaOperationTimeout(timeout time.Duration, byteLength, uploadRate int64) time.Duration {
+	if uploadRate > 0 {
+		timeout += time.Duration(byteLength/uploadRate) * time.Second
+	}
+	return timeout
+}
+
 func (w *MediaSubmitter) runOperation(
 	ctx context.Context, archiveUID string, operation store.BeeperMediaOperation,
 ) (bool, error) {
 	// Only remote and spool work runs under the step deadline, so a timed-out step can still record its retry.
 	timeout := w.actionTimeout
-	if operation.Kind == store.BeeperMediaOperationRetain && w.uploadRate > 0 {
+	if operation.Kind == store.BeeperMediaOperationRetain {
 		// Copying and uploading scale with size, so large audio gets a proportionally longer bounded deadline.
-		timeout += time.Duration(operation.ByteLength/w.uploadRate) * time.Second
+		timeout = beeperMediaOperationTimeout(timeout, operation.ByteLength, w.uploadRate)
 	}
 	actionCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -1268,7 +1284,11 @@ func describeMedia(raw []byte, candidate store.BeeperMediaCandidate, archiveUID 
 }
 
 func describeMediaEnvelope(envelope mediaEnvelope, candidate store.BeeperMediaCandidate, archiveUID string) (MediaDescriptor, string, error) {
-	if candidate.SourceMessageID != "" && envelope.ID != candidate.SourceMessageID {
+	messageIDMatches := envelope.ID == candidate.SourceMessageID
+	if !messageIDMatches && candidate.OriginalSourceMessageID != "" {
+		messageIDMatches = envelope.ID == candidate.OriginalSourceMessageID
+	}
+	if candidate.SourceMessageID != "" && !messageIDMatches {
 		return MediaDescriptor{}, "", errBeeperMediaSourceChanged
 	}
 	part := candidate.SourcePartKey

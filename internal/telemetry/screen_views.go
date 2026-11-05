@@ -30,11 +30,12 @@ type screenViews struct {
 }
 
 type screenCaptureHandler struct {
-	reporter *posthog.Reporter
-	capture  http.Handler
-	dir      string
-	now      func() time.Time
-	mu       sync.Mutex
+	reporter     *posthog.Reporter
+	capture      http.Handler
+	captureEvent func(string, map[string]any) error
+	dir          string
+	now          func() time.Time
+	mu           sync.Mutex
 }
 
 func (h *screenCaptureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -63,15 +64,51 @@ func (h *screenCaptureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(canonical))
-	if req.Event != EventScreenViewed || !h.reporter.EventAllowed(req.Event) || !h.reporter.Enabled() {
+	if req.Event == EventScreenViewed || req.Event == EventMessageOpened {
+		status := posthog.StatusDisabled
+		if h.reporter.Enabled() {
+			status, err = h.reporter.Report(r.Context(), req.Event, req.Properties)
+		}
+		if err != nil && !errors.Is(err, posthog.ErrInvalidProperty) {
+			http.Error(w, "capture telemetry event failed", http.StatusInternalServerError)
+			return
+		}
+		if status == posthog.StatusDisabled {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = io.WriteString(w, "{\"status\":\"disabled\"}\n")
+			return
+		}
+		acceptedScreen(w)
+		return
+	}
+	if !h.reporter.EventAllowed(req.Event) || !h.reporter.Enabled() {
+		h.capture.ServeHTTP(w, r)
+		return
+	}
+	required, action := actionProperties[req.Event]
+	if !action || req.Event == EventSyncFailed {
 		h.capture.ServeHTTP(w, r)
 		return
 	}
 	req.Properties, _ = h.reporter.SanitizeProperties(req.Event, req.Properties)
-	if req.Properties["screen"] == nil || req.Properties[propertySurface] == nil {
+	for key := range required {
+		if req.Properties[key] == nil {
+			acceptedScreen(w)
+			return
+		}
+	}
+	surface, _ := req.Properties[propertySurface].(string)
+	if req.Event == EventErrorShown || req.Event == EventSyncFinished && surface == "cli" {
+		h.capture.ServeHTTP(w, r)
+		return
+	}
+	if req.Event == EventSyncFinished {
 		acceptedScreen(w)
 		return
 	}
+	searchType, _ := req.Properties["search_type"].(string)
+	claim := req.Event + ":" + surface + ":" + searchType
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	path := filepath.Join(h.dir, screenViewsFile)
@@ -98,12 +135,11 @@ func (h *screenCaptureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if state.Screens == nil {
 		state.Screens = map[string]bool{}
 	}
-	screen, _ := req.Properties["screen"].(string)
-	if state.Screens[screen] {
+	if state.Screens[claim] {
 		acceptedScreen(w)
 		return
 	}
-	state.Screens[screen] = true
+	state.Screens[claim] = true
 	encoded, err := json.Marshal(state)
 	if err == nil {
 		err = writeScreenViews(path, encoded)
@@ -112,7 +148,7 @@ func (h *screenCaptureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		h.storageError(w, err)
 		return
 	}
-	if captureErr := h.reporter.Capture(req.Event, req.Properties); captureErr != nil {
+	if captureErr := h.captureEvent(req.Event, req.Properties); captureErr != nil {
 		if len(previous) == 0 {
 			err = os.Remove(path)
 		} else {

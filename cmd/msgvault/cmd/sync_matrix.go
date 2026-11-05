@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -57,12 +59,25 @@ func runMatrixSync(ctx context.Context, s *store.Store, cfg *config.Config, acco
 	if len(sources) == 0 {
 		return errors.New("no Matrix accounts registered (run 'add-matrix' first)")
 	}
+	if account == "" {
+		sources = activeSyncSources(sources)
+	} else {
+		for _, source := range sources {
+			if source.Identifier == account && source.MergedIntoSourceID != 0 {
+				return fmt.Errorf("matrix account %q is retired: %w", account, store.ErrSourceRetired)
+			}
+		}
+	}
 	var failures []string
+	backupHintShown := false
 	for _, source := range sources {
 		if account != "" && source.Identifier != account {
 			continue
 		}
 		var summary *matrixsource.ImportSummary
+		var needsBackupKey bool
+		var homeserver string
+		skippedRetired := false
 		syncErr := matrixsource.WithCredentialLifecycleLock(cfg.TokensDir(), func() error {
 			current, lookupErr := s.GetSourceByID(source.ID)
 			if lookupErr != nil {
@@ -71,29 +86,60 @@ func runMatrixSync(ctx context.Context, s *store.Store, cfg *config.Config, acco
 			if current.SourceType != sourceTypeMatrix || current.Identifier != source.Identifier {
 				return fmt.Errorf("matrix source %d changed before sync", source.ID)
 			}
+			if current.MergedIntoSourceID != 0 {
+				if account != "" {
+					return fmt.Errorf("matrix account %q is retired: %w", current.Identifier, store.ErrSourceRetired)
+				}
+				skippedRetired = true
+				return nil
+			}
 			creds, loadErr := matrixsource.LoadCredentials(cfg.TokensDir(), current.Identifier)
 			if loadErr != nil {
 				return loadErr
 			}
+			homeserver = creds.Homeserver
 			runtime, openErr := matrixsource.Open(creds)
 			if openErr != nil {
 				return openErr
 			}
 			imp := matrixsource.NewImporter(s, runtime)
+			var preferences matrixSyncPreferences
+			if current.SyncConfig.Valid {
+				if err := json.Unmarshal([]byte(current.SyncConfig.String), &preferences); err != nil {
+					slog.Warn("Matrix key backup preference unreadable; treating it as unset", "error", err)
+					preferences.SkipKeyBackup = false
+				}
+			}
+			skipKeyBackup := preferences.SkipKeyBackup && creds.BackupKey == ""
 			var importErr error
 			summary, importErr = imp.Import(ctx, matrixsource.ImportOptions{
-				UserID: current.Identifier, Full: full,
+				UserID: current.Identifier, Full: full, SkipKeyBackup: skipKeyBackup,
 				Rooms: cfg.Matrix.Rooms, ExcludeRooms: cfg.Matrix.ExcludeRooms,
 				Progress: progress,
 			})
+			if importErr == nil && creds.BackupKey == "" {
+				needsBackupKey = summary.PendingEncrypted > 0 && !skipKeyBackup
+			}
 			return importErr
 		})
+		if skippedRetired {
+			continue
+		}
+		_ = recordSyncAttempt(ctx, sourceTypeMatrix, source.Identifier, syncErr)
 		if syncErr != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", source.Identifier, syncErr))
 			continue
 		}
-		_, _ = fmt.Fprintf(out, "Matrix %s: %d rooms, %d messages, %d encrypted placeholders, %d unsupported events skipped\n",
-			source.Identifier, summary.RoomsProcessed, summary.MessagesProcessed, summary.Undecryptable, summary.EventsSkipped)
+		_, _ = fmt.Fprintf(out, "Matrix %s: %d rooms, %d messages, %d encrypted placeholders, %d messages recovered, %d unsupported events skipped\n",
+			source.Identifier, summary.RoomsProcessed, summary.MessagesProcessed, summary.PendingEncrypted, summary.Recovered, summary.EventsSkipped)
+		if needsBackupKey && !backupHintShown {
+			backupHintShown = true
+			_, _ = fmt.Fprintf(out, "To recover encrypted history, run msgvault add-matrix --homeserver %q --user-id %q --recovery-file <path>. This renews the login and logs out the old Matrix device.\n", homeserver, source.Identifier)
+		}
+		if summary.BackupFailure != nil {
+			failure := fmt.Sprintf("%s: key backup unavailable: %v", source.Identifier, summary.BackupFailure)
+			failures = append(failures, failure)
+		}
 	}
 	if account != "" {
 		found := false

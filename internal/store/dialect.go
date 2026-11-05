@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -23,6 +24,26 @@ type FTSDoc struct {
 	FromAddr  string
 	ToAddrs   string
 	CcAddrs   string
+}
+
+type ftsEnvelopeExpressions struct {
+	subject, fromAddr, toAddrs, ccAddrs string
+}
+
+// storedFTSEnvelopeSQL keeps archive comparison, repair, and backfill on the
+// same stored subject, sender fallback, and recipient selection.
+// The enclosing query must alias messages as m.
+func storedFTSEnvelopeSQL(aggregate string) ftsEnvelopeExpressions {
+	recipients := func(kind string) string {
+		return fmt.Sprintf("COALESCE((SELECT %s(p.email_address, ' ') FROM message_recipients mr JOIN participants p ON p.id = mr.participant_id WHERE mr.message_id = m.id AND mr.recipient_type = '%s'), '')", aggregate, kind)
+	}
+	return ftsEnvelopeExpressions{
+		subject: "COALESCE(m.subject, '')",
+		fromAddr: `COALESCE(CASE WHEN m.message_type != 'email' AND m.message_type IS NOT NULL AND m.message_type != ''
+			THEN (SELECT COALESCE(p.phone_number, p.email_address) FROM participants p WHERE p.id = m.sender_id) END, ` + recipients("from") + `)`,
+		toAddrs: recipients("to"),
+		ccAddrs: recipients("cc"),
+	}
 }
 
 // ColumnMigration is a single ALTER TABLE ADD COLUMN statement used by
@@ -179,7 +200,8 @@ type Dialect interface {
 	// "rank" is an implicit FTS5 column; PostgreSQL: 1 for ts_rank).
 	// Callers compose these with their own SQL and must run Rebind on the
 	// final query before execution.
-	FTSSearchClause() (join, where, orderBy string, orderArgCount int)
+	// rowIDs uses a self-contained predicate so MATCH can appear inside OR.
+	FTSSearchClause(rowIDs bool) (join, where, orderBy string, orderArgCount int)
 
 	// FTSDeleteSQL returns the SQL to remove FTS entries for messages belonging to
 	// a given source. Takes one parameter: source_id.
@@ -193,6 +215,12 @@ type Dialect interface {
 	// FTSBackfillBatchSQL returns the SQL to populate the search index for a range of message IDs.
 	// Uses two ? placeholders for the ID range: WHERE m.id >= ? AND m.id < ?
 	FTSBackfillBatchSQL() string
+
+	// FTSBackfillMissingBatchSQL populates missing search entries on SQLite.
+	// PostgreSQL also refreshes entries with an old indexing version.
+	// It uses the same ID range as FTSBackfillBatchSQL and selects the presence
+	// check supported by the archive's search tables.
+	FTSBackfillMissingBatchSQL(ctx context.Context, db *sql.DB) (string, error)
 
 	// FTSAvailable reports whether full-text search is available for this database.
 	// For SQLite this probes the FTS5 virtual table; for PostgreSQL it checks
@@ -218,9 +246,6 @@ type Dialect interface {
 	// comparison misses interior holes that only the full anti-join finds.
 	FTSNeedsBackfillQuick(ctx context.Context, db *sql.DB) bool
 
-	// FTSClearSQL returns the SQL to clear all FTS data before a full backfill.
-	FTSClearSQL() string
-
 	// SchemaFTS returns the embedded filename containing FTS DDL to execute during
 	// schema initialization. Returns "" if no separate FTS schema file is needed
 	// (e.g., PostgreSQL includes tsvector in its main schema).
@@ -235,7 +260,7 @@ type Dialect interface {
 	//
 	// Takes a querier (not *sql.DB) so RebuildFTS can run it on the
 	// maintenance transaction whose statement_timeout has been disabled — the
-	// PG path includes a full-table tsvector clear (same cost as FTSClearSQL)
+	// PG path includes a full-table tsvector clear
 	// plus a GIN rebuild over a populated table, both of which can exceed the
 	// pool-wide 30s timeout on a large archive (finding S1).
 	FTSRebuildSchema(ctx context.Context, q contextQuerier) error

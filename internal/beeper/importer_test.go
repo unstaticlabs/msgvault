@@ -3,10 +3,12 @@ package beeper
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +18,7 @@ import (
 )
 
 func TestImporterScopesEveryStoreOwningHelper(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	st := testutil.NewTestStore(t)
 	source, err := st.GetOrCreateSource(sourceTypeBeeper, "account-a")
@@ -100,7 +103,415 @@ func newTestImporter(t *testing.T, f *fakeBeeper) (*Importer, *store.Store, func
 	return imp, st, srv.Close
 }
 
+func newHandlerTestImporter(t *testing.T, f *fakeBeeper) (*Importer, *store.Store) {
+	t.Helper()
+	st := testutil.NewTestStore(t)
+	client := NewClient("http://beeper.test", testToken, 10000)
+	client.http.Transport = handlerTransport(f.handler())
+	return NewImporter(st, client), st
+}
+
+func TestIncrementalSyncRepairsQuietLegacyRoster(t *testing.T) {
+	t.Parallel()
+	for _, unknown := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unknown), func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			f := newFakeBeeper(t)
+			chat := mediaChat()
+			f.addChat(chat)
+			active := mediaChat()
+			active.ID = "!active:beeper.local"
+			active.LastActivity = time.Now().UTC()
+			active.Msgs = nil
+			f.addChat(active)
+			imp, st, done := newTestImporter(t, f)
+			defer done()
+			opts := ImportOptions{AccountID: "signal", NoMedia: true}
+			_, err := imp.Import(t.Context(), opts)
+			requirements.NoError(err)
+			before := *latestBeeperState(t, imp).Chats[chat.ID]
+			requirements.True(before.Done)
+			var conversationID, messageID int64
+			requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT conversation_id, id FROM messages WHERE source_id = (SELECT id FROM sources WHERE source_type = 'beeper' AND identifier = 'signal') LIMIT 1`)).Scan(&conversationID, &messageID))
+			if unknown {
+				requirements.NoError(st.MarkConversationMemberCountUnknown(conversationID))
+			} else {
+				requirements.NoError(st.SetConversationMetadata(conversationID, sql.NullString{String: "{}", Valid: true}))
+			}
+			f.mu.Lock()
+			chat.Participants = append(chat.Participants, map[string]any{
+				"id": "@signal_bob:beeper.local", "fullName": "Bob",
+			})
+			f.mu.Unlock()
+			f.resetRequests()
+			_, err = imp.Import(t.Context(), opts)
+			requirements.NoError(err)
+			membership, err := st.AttachmentConversationMembershipContext(t.Context(), messageID)
+			requirements.NoError(err)
+			assertions.True(membership.RosterArchived)
+			assertions.Equal(3, membership.Conversation.ParticipantCount)
+			var statsParticipantCount int
+			requirements.NoError(st.DB().QueryRow(
+				st.Rebind(`SELECT participant_count FROM conversations WHERE id = ?`), conversationID,
+			).Scan(&statsParticipantCount))
+			assertions.Equal(3, statsParticipantCount, "quiet roster repair must refresh denormalized conversation stats")
+			after := latestBeeperState(t, imp).Chats[chat.ID]
+			assertions.Equal(before.Newest, after.Newest)
+			assertions.Equal(before.Oldest, after.Oldest)
+			assertions.True(after.Done)
+			isChatProbe := func(req string) bool { return strings.SplitN(req, "?", 2)[0] == "/v1/chats/"+chat.ID }
+			assertions.True(slices.ContainsFunc(f.requests(), isChatProbe))
+			f.resetRequests()
+			_, err = imp.Import(t.Context(), opts)
+			requirements.NoError(err)
+			assertions.False(slices.ContainsFunc(f.requests(), isChatProbe), "resolved quiet rooms need no further metadata probe")
+		})
+	}
+}
+
+func TestQuietRosterRepairRetriesAfterParticipantReplacementFails(t *testing.T) {
+	t.Parallel()
+	assertions, requirements := assert.New(t), require.New(t)
+	f := newFakeBeeper(t)
+	quiet := mediaChat()
+	f.addChat(quiet)
+	active := mediaChat()
+	active.ID = "!active-partial-repair:beeper.local"
+	active.LastActivity = time.Now().UTC()
+	active.Msgs = nil
+	f.addChat(active)
+	imp, st, done := newTestImporter(t, f)
+	defer done()
+	opts := ImportOptions{AccountID: "signal", NoMedia: true}
+	_, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	source, err := st.GetOrCreateSource("beeper", "signal")
+	requirements.NoError(err)
+	var conversationID int64
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM conversations
+		WHERE source_id = ? AND source_conversation_id = ?`), source.ID, quiet.ID).Scan(&conversationID))
+	requirements.NoError(st.SetConversationMetadata(conversationID, sql.NullString{String: "{}", Valid: true}))
+	f.mu.Lock()
+	quiet.Participants = []map[string]any{
+		{"id": "@me:beeper.local", "fullName": "Test User", "isSelf": true},
+		{"id": "@signal_bob:beeper.local", "fullName": "Bob"},
+		{"id": "@signal_carla:beeper.local", "fullName": "Carla"},
+	}
+	f.mu.Unlock()
+	release := installQuietRosterReplacementFailure(t, st)
+
+	sum, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err, "a failed optional roster write must not fail completed message work")
+	assertions.EqualValues(1, sum.RosterRepairErrors)
+	assertions.Zero(sum.Errors, "optional repair failures do not withhold source freshness")
+	run, err := st.GetLastSuccessfulSync(source.ID)
+	requirements.NoError(err)
+	assertions.EqualValues(1, run.ErrorsCount, "the completed run reports the failed repair")
+	failures, err := st.ListSyncRunItems(run.ID, store.SyncRunItemStatusError, 10)
+	requirements.NoError(err)
+	requirements.Len(failures, 1, "the failed repair stays visible on the completed run")
+	assertions.Equal(quiet.ID, failures[0].SourceMessageID)
+	assertions.Equal("beeper_roster_repair_failed", failures[0].ErrorKind)
+	assertions.NotEmpty(latestBeeperState(t, imp).Chats[quiet.ID].RosterRetryAfter, "the failed room backs off")
+	ids, err := st.ListUnresolvedConversationIDs(t.Context(), source.ID)
+	requirements.NoError(err)
+	assertions.Equal([]string{quiet.ID}, ids,
+		"a committed member count must not hide a roster whose participant replacement failed")
+
+	f.resetRequests()
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err, "a persistent write failure must not fail later syncs")
+	assertions.False(slices.ContainsFunc(f.requests(), func(req string) bool {
+		return strings.SplitN(req, "?", 2)[0] == "/v1/chats/"+quiet.ID
+	}), "the backed-off room is not retried on the next sync")
+
+	release()
+	f.appendMsg(quiet.ID, fakeMsg{
+		ID: "resumed-active-roster-repair", SortKey: 1, Timestamp: time.Now().UTC(),
+		Text: "new activity", SenderID: "@signal_bob:beeper.local", SenderName: "Bob",
+	})
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	ids, err = st.ListUnresolvedConversationIDs(t.Context(), source.ID)
+	requirements.NoError(err)
+	assertions.Empty(ids, "the next run must finish the pending quiet-room repair")
+	assertions.Len(rosterMembers(t, st, source.ID, quiet.ID), 3)
+}
+
+func TestQuietRosterRepairRunsDespiteMessageFetchErrors(t *testing.T) {
+	t.Parallel()
+	assertions, requirements := assert.New(t), require.New(t)
+	f := newFakeBeeper(t)
+	quiet := mediaChat()
+	f.addChat(quiet)
+	active := mediaChat()
+	active.ID = "!active-fetch-error:beeper.local"
+	active.LastActivity = time.Now().UTC()
+	active.Msgs = nil
+	f.addChat(active)
+	imp, st, done := newTestImporter(t, f)
+	defer done()
+	opts := ImportOptions{AccountID: "signal", NoMedia: true}
+	_, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	source, err := st.GetOrCreateSource("beeper", "signal")
+	requirements.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE conversations SET metadata = '{}'
+		WHERE source_id = ? AND source_conversation_id = ?`), source.ID, quiet.ID)
+	requirements.NoError(err)
+	f.setMessageListFailure(active.ID, true)
+
+	summary, err := imp.Import(t.Context(), opts)
+	var partial *PartialSyncError
+	requirements.ErrorAs(err, &partial, "the active chat's page failure keeps the run partial")
+	assertions.Positive(summary.FetchErrors)
+	ids, err := st.ListUnresolvedConversationIDs(t.Context(), source.ID)
+	requirements.NoError(err)
+	assertions.Empty(ids, "a message fetch error in one chat must not hold up quiet-room roster repair")
+}
+
+func TestQuietRosterRepairOfGoneChatLeavesNoFetchFailure(t *testing.T) {
+	t.Parallel()
+	assertions, requirements := assert.New(t), require.New(t)
+	f := newFakeBeeper(t)
+	quiet := mediaChat()
+	f.addChat(quiet)
+	active := mediaChat()
+	active.ID = "!active-gone-repair:beeper.local"
+	active.LastActivity = time.Now().UTC()
+	active.Msgs = nil
+	f.addChat(active)
+	imp, st, done := newTestImporter(t, f)
+	defer done()
+	opts := ImportOptions{AccountID: "signal", NoMedia: true}
+	_, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	source, err := st.GetOrCreateSource("beeper", "signal")
+	requirements.NoError(err)
+	var conversationID int64
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM conversations
+		WHERE source_id = ? AND source_conversation_id = ?`), source.ID, quiet.ID).Scan(&conversationID))
+	requirements.NoError(st.MarkConversationMemberCountUnknown(conversationID))
+	f.mu.Lock()
+	f.goneChatGets = map[string]bool{quiet.ID: true}
+	f.mu.Unlock()
+
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	assertions.True(latestBeeperState(t, imp).Chats[quiet.ID].Gone)
+	var raw string
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT CAST(metadata AS TEXT) FROM conversations WHERE id = ?`), conversationID).Scan(&raw))
+	var metadata struct {
+		Route struct {
+			Failure            string `json:"failure"`
+			MembershipComplete bool   `json:"membership_complete"`
+		} `json:"messaging_route"`
+	}
+	requirements.NoError(json.Unmarshal([]byte(raw), &metadata))
+	assertions.NotEqual("membership_fetch_failed", metadata.Route.Failure, "a confirmed-gone room is not a failed fetch")
+	assertions.False(metadata.Route.MembershipComplete)
+}
+
+func installQuietRosterReplacementFailure(t *testing.T, st *store.Store) func() {
+	t.Helper()
+	requirements := require.New(t)
+	if st.IsPostgreSQL() {
+		_, err := st.DB().Exec(`CREATE FUNCTION fail_quiet_roster_replace()
+			RETURNS trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'forced quiet roster replacement failure';
+			END;
+			$$`)
+		requirements.NoError(err, "create PostgreSQL roster failure function")
+		_, err = st.DB().Exec(`CREATE TRIGGER fail_quiet_roster_replace
+			BEFORE DELETE ON conversation_participants
+			FOR EACH ROW EXECUTE FUNCTION fail_quiet_roster_replace()`)
+		requirements.NoError(err, "create PostgreSQL roster failure trigger")
+		release := func() {
+			_, err := st.DB().Exec(`DROP TRIGGER IF EXISTS fail_quiet_roster_replace
+				ON conversation_participants`)
+			requirements.NoError(err, "drop PostgreSQL roster failure trigger")
+			_, err = st.DB().Exec(`DROP FUNCTION IF EXISTS fail_quiet_roster_replace()`)
+			requirements.NoError(err, "drop PostgreSQL roster failure function")
+		}
+		t.Cleanup(release)
+		return release
+	}
+
+	_, err := st.DB().Exec(`CREATE TRIGGER fail_quiet_roster_replace
+		BEFORE DELETE ON conversation_participants
+		FOR EACH ROW BEGIN
+			SELECT RAISE(ABORT, 'forced quiet roster replacement failure');
+		END`)
+	requirements.NoError(err, "create SQLite roster failure trigger")
+	release := func() {
+		_, err := st.DB().Exec(`DROP TRIGGER IF EXISTS fail_quiet_roster_replace`)
+		requirements.NoError(err, "drop SQLite roster failure trigger")
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func TestQuietRosterFailureDoesNotBlockActiveSync(t *testing.T) {
+	t.Parallel()
+	assertions, requirements := assert.New(t), require.New(t)
+	f := newFakeBeeper(t)
+	quiet := mediaChat()
+	f.addChat(quiet)
+	active := mediaChat()
+	active.ID = "!active-repair:beeper.local"
+	active.LastActivity = time.Now().UTC().Add(-time.Hour)
+	active.Msgs = nil
+	f.addChat(active)
+	imp, st, done := newTestImporter(t, f)
+	defer done()
+	opts := ImportOptions{AccountID: "signal", NoMedia: true}
+	_, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	before := latestBeeperState(t, imp).ListWatermark
+	var conversationID int64
+	requirements.NoError(st.DB().QueryRow(`SELECT conversation_id FROM messages LIMIT 1`).Scan(&conversationID))
+	requirements.NoError(st.MarkConversationMemberCountUnknown(conversationID))
+	f.setChatGetFailure(quiet.ID, true)
+	f.appendMsg(active.ID, fakeMsg{ID: "fresh-repair", SortKey: 1, Timestamp: time.Now().UTC(), Text: "fresh", SenderID: "@me:beeper.local"})
+	f.resetRequests()
+	summary, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err, "best-effort membership repair must not fail a message-complete sync")
+	assertions.EqualValues(1, summary.MessagesAdded)
+	assertions.Zero(summary.FetchErrors)
+	assertions.Zero(summary.Errors)
+	assertions.Greater(latestBeeperState(t, imp).ListWatermark, before)
+	requests := f.requests()
+	probeIndex := slices.IndexFunc(requests, func(req string) bool { return strings.SplitN(req, "?", 2)[0] == "/v1/chats/"+quiet.ID })
+	messageIndex := slices.IndexFunc(requests, func(req string) bool { return strings.HasPrefix(req, "/v1/chats/"+active.ID+"/messages") })
+	assertions.Greater(probeIndex, messageIndex, "active history must run before optional roster repairs")
+	f.resetRequests()
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	assertions.False(slices.ContainsFunc(f.requests(), func(req string) bool { return strings.SplitN(req, "?", 2)[0] == "/v1/chats/"+quiet.ID }), "failed repairs back off across syncs")
+	f.setChatGetFailure(quiet.ID, false)
+	f.appendMsg(quiet.ID, fakeMsg{ID: "quiet-active-again", SortKey: 1, Timestamp: time.Now().UTC(), Text: "active again", SenderID: "@me:beeper.local"})
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	assertions.Empty(latestBeeperState(t, imp).Chats[quiet.ID].RosterRetryAfter, "a successful active refresh clears the backoff")
+}
+
+// serial: changes routeProbeTimeout.
+func TestQuietRosterBudgetExpiryBacksOffBeforeTryingLaterRoom(t *testing.T) {
+	requirements := require.New(t)
+	f := newFakeBeeper(t)
+	stalled := mediaChat()
+	stalled.ID = "!stalled-roster:beeper.local"
+	stalled.Msgs[0].ID = "stalled-roster-message"
+	f.addChat(stalled)
+	later := mediaChat()
+	later.ID = "!later-roster:beeper.local"
+	later.Msgs[0].ID = "later-roster-message"
+	f.addChat(later)
+	active := mediaChat()
+	active.ID = "!active-roster:beeper.local"
+	active.LastActivity = time.Now().UTC()
+	active.Msgs = nil
+	f.addChat(active)
+	imp, st := newHandlerTestImporter(t, f)
+
+	_, err := imp.Import(t.Context(), ImportOptions{AccountID: "signal", NoMedia: true})
+	requirements.NoError(err)
+	source, err := st.GetOrCreateSource("beeper", "signal")
+	requirements.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE conversations SET metadata = '{}'
+		WHERE source_id = ? AND source_conversation_id IN (?, ?)`), source.ID, stalled.ID, later.ID)
+	requirements.NoError(err)
+	ids, err := st.ListUnresolvedConversationIDs(t.Context(), source.ID)
+	requirements.NoError(err)
+	requirements.Equal([]string{stalled.ID, later.ID}, ids, "the stalled room must be visited first")
+
+	oldTimeout := routeProbeTimeout
+	routeProbeTimeout = 30 * time.Second
+	t.Cleanup(func() { routeProbeTimeout = oldTimeout })
+	started := f.blockChatGetFor(stalled.ID)
+	synctest.Test(t, func(t *testing.T) {
+		assertions, requirements := assert.New(t), require.New(t)
+		start := time.Now()
+		f.mu.Lock()
+		stalled.LastActivity = start.Add(-48 * time.Hour)
+		later.LastActivity = start.Add(-47 * time.Hour)
+		active.LastActivity = start
+		f.mu.Unlock()
+		f.resetRequests()
+
+		_, err := imp.Import(context.Background(), ImportOptions{
+			AccountID: "signal", NoMedia: true, StopAt: start.Add(2 * time.Second),
+		})
+		requirements.NoError(err)
+		assertions.Equal(2*time.Second, time.Since(start), "the blocked roster request should exhaust the scheduled budget")
+		select {
+		case <-started:
+		default:
+			requirements.FailNow("stalled room request did not start before the scheduled deadline")
+		}
+
+		state := latestBeeperState(t, imp)
+		requirements.NotNil(state.Chats[stalled.ID])
+		requirements.NotNil(state.Chats[later.ID])
+		assertions.NotEmpty(state.Chats[stalled.ID].RosterRetryAfter, "deadline cancellation must persist retry backoff")
+		assertions.Empty(state.Chats[later.ID].RosterRetryAfter, "the later room was not attempted in the expired run")
+
+		f.resetRequests()
+		_, err = imp.Import(context.Background(), ImportOptions{AccountID: "signal", NoMedia: true})
+		requirements.NoError(err)
+		requests := f.requests()
+		isChatProbe := func(chatID string) func(string) bool {
+			return func(request string) bool {
+				return strings.SplitN(request, "?", 2)[0] == "/v1/chats/"+chatID
+			}
+		}
+		assertions.False(slices.ContainsFunc(requests, isChatProbe(stalled.ID)), "the backed-off room must be skipped")
+		assertions.True(slices.ContainsFunc(requests, isChatProbe(later.ID)), "the next room must receive its roster repair")
+		ids, err = st.ListUnresolvedConversationIDs(context.Background(), source.ID)
+		requirements.NoError(err)
+		assertions.Equal([]string{stalled.ID}, ids, "the later room's membership must be archived")
+	})
+}
+
+func TestQuietRosterRepairsMakeProgressInBatches(t *testing.T) {
+	t.Parallel()
+	assertions, requirements := assert.New(t), require.New(t)
+	f := newFakeBeeper(t)
+	for i := range 17 {
+		chat := mediaChat()
+		chat.ID = "!repair" + strconv.Itoa(i) + ":beeper.local"
+		chat.Msgs[0].ID = "repair" + strconv.Itoa(i)
+		f.addChat(chat)
+	}
+	active := mediaChat()
+	active.ID = "!repair-active:beeper.local"
+	active.LastActivity = time.Now().UTC()
+	active.Msgs = nil
+	f.addChat(active)
+	imp, st, done := newTestImporter(t, f)
+	defer done()
+	opts := ImportOptions{AccountID: "signal", NoMedia: true}
+	_, err := imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	source, err := st.GetOrCreateSource("beeper", "signal")
+	requirements.NoError(err)
+	_, err = st.DB().Exec(st.Rebind(`UPDATE conversations SET metadata = '{}' WHERE source_id = ? AND source_conversation_id <> ?`), source.ID, active.ID)
+	requirements.NoError(err)
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	ids, err := st.ListUnresolvedConversationIDs(t.Context(), source.ID)
+	requirements.NoError(err)
+	assertions.Len(ids, 1, "only sixteen optional repairs run per sync")
+	_, err = imp.Import(t.Context(), opts)
+	requirements.NoError(err)
+	ids, err = st.ListUnresolvedConversationIDs(t.Context(), source.ID)
+	requirements.NoError(err)
+	assertions.Empty(ids, "later batches reach the remaining quiet rooms")
+}
+
 func TestBeeperHTMLPersists(t *testing.T) {
+	t.Parallel()
 	assert, require := assert.New(t), require.New(t)
 	f := newFakeBeeper(t)
 	ch := mediaTranscriptChat()
@@ -117,6 +528,7 @@ func TestBeeperHTMLPersists(t *testing.T) {
 }
 
 func TestImportBackfillEndToEnd(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -248,6 +660,7 @@ func TestImportBackfillEndToEnd(t *testing.T) {
 }
 
 func TestImportScopesFallbackUserIDsByAccount(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -327,6 +740,7 @@ func TestImportScopesFallbackUserIDsByAccount(t *testing.T) {
 }
 
 func TestImportSecondRunIncremental(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -376,6 +790,7 @@ func TestImportSecondRunIncremental(t *testing.T) {
 }
 
 func TestImportLimitIsSharedAcrossIncrementalAndReconcile(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -423,6 +838,7 @@ func TestImportLimitIsSharedAcrossIncrementalAndReconcile(t *testing.T) {
 }
 
 func TestImportResumeAfterLimit(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -504,6 +920,7 @@ func TestImportResumeAfterLimit(t *testing.T) {
 }
 
 func TestImportReactionEventRefreshesTarget(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -546,6 +963,7 @@ func TestImportReactionEventRefreshesTarget(t *testing.T) {
 }
 
 func TestImportReconcileCatchesRecentDeletion(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -601,6 +1019,7 @@ func TestImportReconcileCatchesRecentDeletion(t *testing.T) {
 }
 
 func TestImportReconcileVisitsRecentChatWithoutNewActivity(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -649,6 +1068,7 @@ func TestImportReconcileVisitsRecentChatWithoutNewActivity(t *testing.T) {
 }
 
 func TestImportReactionTargetTransientErrorRetries(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -677,6 +1097,12 @@ func TestImportReactionTargetTransientErrorRetries(t *testing.T) {
 	sum, err := imp.Import(context.Background(), ImportOptions{AccountID: "signal"})
 	require.ErrorContains(err, "partial Beeper sync")
 	assert.Positive(sum.FetchErrors, "transient target failure must be recorded as a fetch error")
+	cf := sum.FailedChats["!e2e:beeper.local"]
+	require.NotNil(cf)
+	assert.Positive(cf.FetchErrors)
+	assert.Zero(cf.MediaErrors)
+	assert.Contains(cf.LastError, "400")
+	assert.Equal(cf.FetchErrors, sum.Errors)
 
 	// Healed: the next run re-delivers the reaction event and archives it.
 	f.setMessageGetFailure("m5", false)
@@ -693,6 +1119,7 @@ func TestImportReactionTargetTransientErrorRetries(t *testing.T) {
 }
 
 func TestImportTruncatedParticipantsFetchesDetail(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -729,6 +1156,7 @@ func TestImportTruncatedParticipantsFetchesDetail(t *testing.T) {
 }
 
 func TestImportFullReconcilesConversationParticipants(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -786,6 +1214,7 @@ func TestImportFullReconcilesConversationParticipants(t *testing.T) {
 }
 
 func TestImportFullRepairsWithoutDuplicates(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -805,6 +1234,7 @@ func TestImportFullRepairsWithoutDuplicates(t *testing.T) {
 }
 
 func TestImportEmptyChatPicksUpLaterMessages(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -841,6 +1271,7 @@ func TestImportEmptyChatPicksUpLaterMessages(t *testing.T) {
 // the end. The new messages carry old timestamps, so they neither advance the
 // chat's lastActivity nor land in the reconcile window — without the tail scan
 // the chat stays done and that history is never archived.
+// serial: changes tailScanInterval.
 func TestImportPicksUpHistoryBackfilledAfterChatCompleted(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -892,6 +1323,7 @@ func TestImportPicksUpHistoryBackfilledAfterChatCompleted(t *testing.T) {
 }
 
 func TestTailScanVisitsChatsCompletedInInterruptedDiscoveryCycle(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -962,6 +1394,7 @@ func TestTailScanVisitsChatsCompletedInInterruptedDiscoveryCycle(t *testing.T) {
 	assert.Equal(1, archived, "a due tail scan must still probe chats marked visited by an interrupted discovery cycle")
 }
 
+// serial: changes tailScanInterval.
 func TestImportTailOnlyCursorlessChatStillChecksForBackfill(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1007,6 +1440,7 @@ func TestImportTailOnlyCursorlessChatStillChecksForBackfill(t *testing.T) {
 	assert.Equal(2, total, "a cursorless tail-only chat must still run its empty-chat recovery")
 }
 
+// serial: changes tailScanInterval.
 func TestImportTailProbeSkipsEventOnlyPagesToFindOlderContent(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1060,6 +1494,7 @@ func TestImportTailProbeSkipsEventOnlyPagesToFindOlderContent(t *testing.T) {
 	assert.Equal("older content", text)
 }
 
+// serial: changes tailScanInterval.
 func TestImportTailScanIgnoresUnarchivedNonContentEvents(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1113,6 +1548,7 @@ func TestImportTailScanIgnoresUnarchivedNonContentEvents(t *testing.T) {
 	assert.Equal(2, total, "non-content events must remain excluded from the archive")
 }
 
+// serial: changes tailScanInterval.
 func TestImportTailOnlyUnchangedChatSkipsIncrementalAndReconcile(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1163,6 +1599,7 @@ func TestImportTailOnlyUnchangedChatSkipsIncrementalAndReconcile(t *testing.T) {
 }
 
 func TestImportTailProbeCancellationLeavesScanDue(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1224,6 +1661,7 @@ func TestImportTailProbeCancellationLeavesScanDue(t *testing.T) {
 // costs one request per completed chat, so a run soon after a clean scan must
 // leave completed chats alone.
 func TestImportTailScanThrottled(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1243,11 +1681,17 @@ func TestImportTailScanThrottled(t *testing.T) {
 	_, err := imp.Import(context.Background(), ImportOptions{AccountID: "signal"})
 	require.NoError(err)
 
-	sum, err := imp.Import(context.Background(), ImportOptions{AccountID: "signal"})
+	f.resetRequests()
+	_, err = imp.Import(context.Background(), ImportOptions{AccountID: "signal"})
 	require.NoError(err)
-	assert.Zero(sum.ChatsReopened, "a scan within the interval must not re-probe completed chats")
+	for _, req := range f.requests() {
+		if strings.Contains(req, "/messages?") {
+			assert.NotContains(req, "direction=before", "a scan within the interval must not re-probe completed chats: %s", req)
+		}
+	}
 }
 
+// serial: changes tailScanInterval.
 func TestImportResumesActiveTailScanWithinThrottleInterval(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -1306,6 +1750,7 @@ func TestImportResumesActiveTailScanWithinThrottleInterval(t *testing.T) {
 }
 
 func TestTailScanDue(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	now := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	assert.True(tailScanDue("", now), "an archive predating tail scanning is due")
@@ -1315,6 +1760,7 @@ func TestTailScanDue(t *testing.T) {
 }
 
 func TestImportDegenerateTailPagination(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -1374,6 +1820,7 @@ func TestImportDegenerateTailPagination(t *testing.T) {
 	assert.True(state.Chats["!tail:beeper.local"].Done)
 }
 
+// serial: changes checkpointMinInterval.
 func TestBackfillCheckpointCarriesPendingReplies(t *testing.T) {
 	require := require.New(t)
 
@@ -1385,6 +1832,7 @@ func TestBackfillCheckpointCarriesPendingReplies(t *testing.T) {
 	t.Cleanup(func() { checkpointMinInterval = oldInterval })
 
 	f := newFakeBeeper(t)
+	f.pageSize = 1
 	base := time.Now().Add(-90 * 24 * time.Hour).UTC().Truncate(time.Second)
 	ch := &fakeChat{
 		ID: "!ckpt:beeper.local", AccountID: "signal", Network: "Signal", Title: "Ckpt", Type: "single",
@@ -1393,16 +1841,16 @@ func TestBackfillCheckpointCarriesPendingReplies(t *testing.T) {
 			{"id": "@signal_ann:beeper.local", "fullName": "Ann"},
 		},
 	}
-	// >25 pages so a mid-chat checkpoint fires; the newest message replies to
-	// a parent near the beginning of history, far beyond the interrupt point.
-	for i := range 600 {
+	// 40 one-message pages cross the 25-page checkpoint. After 27 pages,
+	// c39 through c13 have been seen, while reply parent c5 is still unseen.
+	for i := range 40 {
 		m := fakeMsg{
 			ID: "c" + strconv.Itoa(i), SortKey: i,
 			Timestamp: base.Add(time.Duration(i) * time.Minute),
 			Text:      "ckpt " + strconv.Itoa(i),
 			SenderID:  "@signal_ann:beeper.local", SenderName: "Ann",
 		}
-		if i == 599 {
+		if i == 39 {
 			m.LinkedMessageID = "c5"
 		}
 		ch.Msgs = append(ch.Msgs, m)
@@ -1445,7 +1893,7 @@ func TestBackfillCheckpointCarriesPendingReplies(t *testing.T) {
 	require.NotNil(cs)
 	require.NotEmpty(cs.Oldest, "persisted state must carry the advanced cursor")
 	require.False(cs.Done)
-	require.Equal([][2]string{{"c599", "c5"}}, cs.PendingReplies,
+	require.Equal([][2]string{{"c39", "c5"}}, cs.PendingReplies,
 		"persisted state must carry the reply pairs its cursor has walked past")
 
 	// The resumed run completes the chat and links the pair.
@@ -1456,12 +1904,13 @@ func TestBackfillCheckpointCarriesPendingReplies(t *testing.T) {
 		`SELECT id FROM messages WHERE source_message_id = ?`), "c5").Scan(&parentID))
 	var linked sql.NullInt64
 	require.NoError(st.DB().QueryRow(st.Rebind(
-		`SELECT reply_to_message_id FROM messages WHERE source_message_id = ?`), "c599").Scan(&linked))
+		`SELECT reply_to_message_id FROM messages WHERE source_message_id = ?`), "c39").Scan(&linked))
 	require.True(linked.Valid)
 	require.Equal(parentID, linked.Int64)
 }
 
 func TestImportUnfinishedChatGoneMarksDone(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 
 	f := newFakeBeeper(t)
@@ -1506,6 +1955,7 @@ func TestImportUnfinishedChatGoneMarksDone(t *testing.T) {
 }
 
 func TestImportIncrementalStuckCursorTerminates(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 
 	f := newFakeBeeper(t)
@@ -1533,6 +1983,7 @@ func TestImportIncrementalStuckCursorTerminates(t *testing.T) {
 }
 
 func TestImportWatermarkHeldOnFetchError(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 
 	f := newFakeBeeper(t)

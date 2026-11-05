@@ -65,7 +65,7 @@ func TestBuildCacheLockedAcceptsSQLiteFileURI(t *testing.T) {
 	dbURI := (&url.URL{Scheme: "file", Path: filepath.ToSlash(dbPath)}).String()
 
 	result, err := buildCacheLocked(
-		dbURI, filepath.Join(tmpDir, "analytics"), true, false, acquirePublishLock,
+		dbURI, filepath.Join(tmpDir, "analytics"), true, false,
 	)
 
 	require.NoError(t, err, "buildCacheLocked with file URI")
@@ -85,6 +85,10 @@ func setupTestSQLite(t *testing.T) string {
 
 	// Create schema
 	schema := `
+		CREATE TABLE source_merge_archive_only_messages (message_id INTEGER PRIMARY KEY);
+		CREATE TABLE imap_message_memberships (message_id INTEGER, source_id INTEGER, mailbox TEXT NOT NULL, flags TEXT);
+		CREATE TABLE imap_drafts (current_message_id INTEGER, pending_original_message_id INTEGER);
+		CREATE TABLE gmail_drafts (current_message_id INTEGER, pending_original_message_id INTEGER);
 		CREATE TABLE sources (
 			id INTEGER PRIMARY KEY,
 			source_type TEXT NOT NULL DEFAULT 'gmail',
@@ -104,12 +108,15 @@ func setupTestSQLite(t *testing.T) string {
 			received_at TIMESTAMP,
 			size_estimate INTEGER,
 			has_attachments BOOLEAN DEFAULT FALSE,
+			hidden_text_present BOOLEAN NOT NULL DEFAULT FALSE,
 			attachment_count INTEGER DEFAULT 0,
 			deleted_from_source_at TIMESTAMP,
 			list_id TEXT,
 			sender_id INTEGER,
 			message_type TEXT NOT NULL DEFAULT 'email',
 			is_from_me BOOLEAN DEFAULT FALSE,
+			is_sent BOOLEAN DEFAULT TRUE,
+			metadata TEXT,
 			deleted_at DATETIME,
 			UNIQUE(source_id, source_message_id)
 		);
@@ -146,7 +153,8 @@ func setupTestSQLite(t *testing.T) string {
 			source_id INTEGER NOT NULL REFERENCES sources(id),
 			source_label_id TEXT,
 			name TEXT NOT NULL,
-			label_type TEXT
+			label_type TEXT,
+			system_role TEXT
 		);
 
 		CREATE TABLE message_labels (
@@ -154,6 +162,8 @@ func setupTestSQLite(t *testing.T) string {
 			label_id INTEGER NOT NULL REFERENCES labels(id),
 			PRIMARY KEY (message_id, label_id)
 		);
+
+		CREATE INDEX idx_message_labels_label ON message_labels(label_id);
 
 		CREATE TABLE attachments (
 			id INTEGER PRIMARY KEY,
@@ -917,7 +927,7 @@ func TestBuildCache_WaitsForCacheLockHolders(t *testing.T) {
 			select {
 			case <-done:
 				require.FailNow("buildCache must wait for the cache lock holder")
-			case <-time.After(150 * time.Millisecond): //nolint:kennlint // absence check: the held cache lock keeps buildCache waiting
+			case <-time.After(150 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check: the held cache lock keeps buildCache waiting
 			}
 
 			require.NoError(holder.Unlock(), "release cache lock")
@@ -1187,6 +1197,59 @@ func TestBuildCache_DataIntegrity(t *testing.T) {
 	require.NoError(db.QueryRow("SELECT COUNT(DISTINCT attachment_id) FROM read_parquet('" +
 		filepath.Join(analyticsDir, "attachments", "*.parquet") + "')").Scan(&attachmentIDs))
 	assert.Equal(int64(3), attachmentIDs, "durable attachment IDs")
+}
+
+func TestBuildCacheIncrementalReadsOnlyNewSliceAndMatchesFullBuild(t *testing.T) {
+	require := require.New(t)
+	oldGOOS := cacheSnapshotGOOS
+	cacheSnapshotGOOS = "linux"
+	t.Cleanup(func() { cacheSnapshotGOOS = oldGOOS })
+	t.Setenv("MSGVAULT_FORCE_CSV_SNAPSHOT", "")
+	duck, err := sql.Open("duckdb", "")
+	require.NoError(err)
+	defer func() { require.NoError(duck.Close()) }()
+	requireSQLiteScanner(t, duck)
+	tmp := setupTestSQLite(t)
+	dbPath := filepath.Join(tmp, "test.db")
+	incDir, fullDir := filepath.Join(tmp, "incremental"), filepath.Join(tmp, "full")
+	db, err := sql.Open("sqlite3", dbPath)
+	require.NoError(err)
+	defer func() { require.NoError(db.Close()) }()
+	_, err = db.Exec(`INSERT INTO account_identities (source_id, address) VALUES (1, 'alice@example.com');
+		INSERT INTO attachments (message_id, filename, size) VALUES (1, 'old.txt', 42)`)
+	require.NoError(err)
+	_, err = buildCache(dbPath, incDir, true)
+	require.NoError(err)
+	_, err = db.Exec(`INSERT INTO messages
+		(id, source_id, source_message_id, conversation_id, sender_id, sent_at, received_at, snippet, size_estimate, has_attachments, is_from_me, deleted_from_source_at)
+		VALUES (6, 1, 'delta-out', 101, 1, '2024-04-01 12:00:00+02:00', '2024-04-01 10:00:00.25', NULL, 1200, 1, 1, '2024-04-02 10:00:00'),
+		(7, 1, 'delta-in', 101, 2, '2024-04-02 10:00:00', '2024-04-02 12:00:00', CAST(X'6869ff' AS TEXT), NULL, 0, 0, NULL);
+		INSERT INTO message_recipients (message_id, participant_id, recipient_type, email_address) VALUES
+		(6, 1, 'from', 'alice@example.com'), (6, 2, 'to', 'bob@example.org'),
+		(7, 2, 'from', 'bob@example.org'), (7, 1, 'to', NULL);
+		INSERT INTO message_labels (message_id, label_id) VALUES (6, 2), (7, 1);
+		INSERT INTO attachments (message_id, filename, mime_type, size) VALUES (6, 'delta.txt', 'text/plain', 123)`)
+	require.NoError(err)
+	// The messages export selects size_estimate, so the scanner must decode
+	// this old row unless SQLite bounds the read to the new slice.
+	_, err = db.Exec(`UPDATE messages SET size_estimate = 'unreadable' WHERE id = 1`)
+	require.NoError(err)
+	_, err = buildCache(dbPath, fullDir, true)
+	require.ErrorContains(err, "export messages:", "a full messages scan must trip over the old row")
+	_, err = db.Exec(`UPDATE message_recipients SET participant_id = 'unreadable' WHERE message_id = 1 AND participant_id = 1;
+		UPDATE message_labels SET label_id = 'unreadable' WHERE message_id = 1 AND label_id = 1;
+		UPDATE attachments SET size = 'unreadable' WHERE message_id = 1`)
+	require.NoError(err)
+	_, err = buildCache(dbPath, incDir, false)
+	require.NoError(err, "incremental exports must read only the new slice")
+	_, err = db.Exec(`UPDATE messages SET size_estimate = 1000 WHERE id = 1;
+		UPDATE message_recipients SET participant_id = 1 WHERE message_id = 1 AND participant_id = 'unreadable';
+		UPDATE message_labels SET label_id = 1 WHERE message_id = 1 AND label_id = 'unreadable';
+		UPDATE attachments SET size = 42 WHERE message_id = 1`)
+	require.NoError(err)
+	_, err = buildCache(dbPath, fullDir, true)
+	require.NoError(err)
+	assertCacheExportParity(t, tmp, incDir, fullDir, []string{"messages", "message_recipients", "message_labels", "attachments"})
 }
 
 // TestBuildCache_IncrementalExport tests that incremental exports only add new messages.
@@ -2973,13 +3036,18 @@ func TestBuildCache_EmptyDatabase(t *testing.T) {
 	// Create empty database with schema
 	db, _ := sql.Open("sqlite3", dbPath)
 	_, _ = db.Exec(`
+		CREATE TABLE source_merge_archive_only_messages (message_id INTEGER PRIMARY KEY);
+		CREATE TABLE imap_message_memberships (message_id INTEGER, source_id INTEGER, mailbox TEXT NOT NULL, flags TEXT);
+		CREATE TABLE imap_drafts (current_message_id INTEGER, pending_original_message_id INTEGER);
+		CREATE TABLE gmail_drafts (current_message_id INTEGER, pending_original_message_id INTEGER);
 		CREATE TABLE sources (id INTEGER PRIMARY KEY, source_type TEXT NOT NULL DEFAULT 'gmail', identifier TEXT);
-		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', is_from_me BOOLEAN DEFAULT FALSE, deleted_at DATETIME);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, hidden_text_present BOOLEAN NOT NULL DEFAULT FALSE, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', is_from_me BOOLEAN DEFAULT FALSE, is_sent BOOLEAN DEFAULT TRUE, metadata TEXT, deleted_at DATETIME);
 		CREATE TABLE participants (id INTEGER PRIMARY KEY, email_address TEXT, domain TEXT, display_name TEXT, phone_number TEXT);
 		CREATE TABLE participant_identifiers (participant_id INTEGER, identifier_type TEXT, identifier_value TEXT, display_value TEXT, is_primary BOOLEAN);
 		CREATE TABLE message_recipients (message_id INTEGER, participant_id INTEGER, recipient_type TEXT, display_name TEXT);
-		CREATE TABLE labels (id INTEGER PRIMARY KEY, name TEXT);
+		CREATE TABLE labels (id INTEGER PRIMARY KEY, source_id INTEGER, source_label_id TEXT, system_role TEXT, name TEXT);
 		CREATE TABLE message_labels (message_id INTEGER, label_id INTEGER);
+		CREATE INDEX idx_message_labels_label ON message_labels(label_id);
 		CREATE TABLE attachments (id INTEGER PRIMARY KEY, message_id INTEGER, size INTEGER, filename TEXT);
 		CREATE TABLE conversations (id INTEGER PRIMARY KEY, source_conversation_id TEXT, title TEXT, conversation_type TEXT NOT NULL DEFAULT 'email');
 		CREATE TABLE conversation_participants (conversation_id INTEGER, participant_id INTEGER, PRIMARY KEY (conversation_id, participant_id));
@@ -3173,7 +3241,7 @@ func BenchmarkBuildCache(b *testing.B) {
 	// Create schema
 	_, _ = db.Exec(`
 		CREATE TABLE sources (id INTEGER PRIMARY KEY, identifier TEXT);
-		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', deleted_at DATETIME);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, hidden_text_present BOOLEAN NOT NULL DEFAULT FALSE, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', deleted_at DATETIME);
 		CREATE TABLE participants (id INTEGER PRIMARY KEY, email_address TEXT UNIQUE, domain TEXT, display_name TEXT, phone_number TEXT);
 		CREATE TABLE participant_identifiers (participant_id INTEGER, identifier_type TEXT, identifier_value TEXT, display_value TEXT, is_primary BOOLEAN);
 		CREATE TABLE message_recipients (message_id INTEGER, participant_id INTEGER, recipient_type TEXT, display_name TEXT);
@@ -3241,6 +3309,10 @@ func setupTestSQLiteEmpty(t *testing.T) string {
 	defer func() { _ = db.Close() }()
 
 	schema := `
+		CREATE TABLE source_merge_archive_only_messages (message_id INTEGER PRIMARY KEY);
+		CREATE TABLE imap_message_memberships (message_id INTEGER, source_id INTEGER, mailbox TEXT NOT NULL, flags TEXT);
+		CREATE TABLE imap_drafts (current_message_id INTEGER, pending_original_message_id INTEGER);
+		CREATE TABLE gmail_drafts (current_message_id INTEGER, pending_original_message_id INTEGER);
 		CREATE TABLE sources (
 			id INTEGER PRIMARY KEY,
 			source_type TEXT NOT NULL DEFAULT 'gmail',
@@ -3259,12 +3331,15 @@ func setupTestSQLiteEmpty(t *testing.T) string {
 			received_at TIMESTAMP,
 			size_estimate INTEGER,
 			has_attachments BOOLEAN DEFAULT FALSE,
+			hidden_text_present BOOLEAN NOT NULL DEFAULT FALSE,
 			attachment_count INTEGER DEFAULT 0,
 			deleted_from_source_at TIMESTAMP,
 			list_id TEXT,
 			sender_id INTEGER,
 			message_type TEXT NOT NULL DEFAULT 'email',
 			is_from_me BOOLEAN DEFAULT FALSE,
+			is_sent BOOLEAN DEFAULT TRUE,
+			metadata TEXT,
 			deleted_at DATETIME,
 			UNIQUE(source_id, source_message_id)
 		);
@@ -3292,13 +3367,15 @@ func setupTestSQLiteEmpty(t *testing.T) string {
 			source_id INTEGER NOT NULL REFERENCES sources(id),
 			source_label_id TEXT,
 			name TEXT NOT NULL,
-			label_type TEXT
+			label_type TEXT,
+			system_role TEXT
 		);
 		CREATE TABLE message_labels (
 			message_id INTEGER NOT NULL REFERENCES messages(id),
 			label_id INTEGER NOT NULL REFERENCES labels(id),
 			PRIMARY KEY (message_id, label_id)
 		);
+		CREATE INDEX idx_message_labels_label ON message_labels(label_id);
 		CREATE TABLE attachments (
 			id INTEGER PRIMARY KEY,
 			message_id INTEGER NOT NULL REFERENCES messages(id),
@@ -3747,10 +3824,11 @@ func writeSyncStateAt(t *testing.T, analyticsDir string, lastMessageID int64, sy
 		LastMessageID: lastMessageID,
 		LastSyncAt:    syncAt,
 		SchemaVersion: cacheSchemaVersion,
-		// Both fingerprints hash zero rows in these fixtures, so both are
+		// These fingerprints hash zero rows in these fixtures, so they are
 		// the empty-input sha256 digest.
 		ConversationParticipantsFingerprint: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		ConversationTypesFingerprint:        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		UnsentFingerprint:                   "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	}
 	data, err := json.Marshal(state)
 	require.NoError(t, err, "marshal sync state")
@@ -4330,6 +4408,7 @@ func TestCacheNeedsBuild_IgnoresAlreadyProcessedUpdatedSyncRun(t *testing.T) {
 		SchemaVersion:                       cacheSchemaVersion,
 		ConversationParticipantsFingerprint: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		ConversationTypesFingerprint:        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+		UnsentFingerprint:                   "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 	}
 	data, err := json.Marshal(state)
 	require.NoError(err, "marshal sync state")
@@ -4551,7 +4630,7 @@ func BenchmarkBuildCacheIncremental(b *testing.B) {
 	// Create schema and initial data (10000 messages)
 	_, _ = db.Exec(`
 		CREATE TABLE sources (id INTEGER PRIMARY KEY, identifier TEXT);
-		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', deleted_at DATETIME);
+		CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT, rfc822_message_id TEXT, sent_at TIMESTAMP, size_estimate INTEGER, has_attachments BOOLEAN, hidden_text_present BOOLEAN NOT NULL DEFAULT FALSE, subject TEXT, snippet TEXT, conversation_id INTEGER, deleted_from_source_at TIMESTAMP, attachment_count INTEGER DEFAULT 0, list_id TEXT, sender_id INTEGER, message_type TEXT NOT NULL DEFAULT 'email', deleted_at DATETIME);
 		CREATE TABLE participants (id INTEGER PRIMARY KEY, email_address TEXT UNIQUE, domain TEXT, display_name TEXT, phone_number TEXT);
 		CREATE TABLE participant_identifiers (participant_id INTEGER, identifier_type TEXT, identifier_value TEXT, display_value TEXT, is_primary BOOLEAN);
 		CREATE TABLE message_recipients (message_id INTEGER, participant_id INTEGER, recipient_type TEXT, display_name TEXT);
@@ -4745,7 +4824,7 @@ func TestBuildCacheWarningExportScope(t *testing.T) {
 					_, err = db.Exec(`UPDATE conversations SET title=CAST(? AS TEXT) WHERE id=101`, []byte(title))
 					require.NoError(err)
 					stderr = captureStderrDuring(t, func() {
-						result, err = refreshDerivedDatasetsOnly(context.Background(), dbPath, cache, acquirePublishLock, false)
+						result, err = refreshDerivedDatasetsOnly(context.Background(), dbPath, cache, false)
 					})
 					require.NoError(err)
 					assert.True(result.IdentityOnly)

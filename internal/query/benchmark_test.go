@@ -2,7 +2,6 @@ package query
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +11,7 @@ import (
 
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/duckdbutil"
 	"go.kenn.io/msgvault/internal/identityindex"
 	"go.kenn.io/msgvault/internal/search"
 )
@@ -34,7 +34,9 @@ func buildBenchData(tb testing.TB) *DuckDBEngine {
 
 	tmpDir := tb.TempDir()
 
-	db, err := sql.Open("duckdb", "")
+	// Derive the fixture under the production cache-builder policy so the
+	// identity index build runs with the limits a real build-cache uses.
+	db, err := duckdbutil.Open(tb.Context(), duckdbutil.BuilderPolicy(tb.TempDir()))
 	requirements.NoError(err, "open duckdb")
 	defer func() { _ = db.Close() }()
 
@@ -110,6 +112,7 @@ func buildBenchData(tb testing.TB) *DuckDBEngine {
 			i::BIGINT AS id,
 			1::BIGINT AS source_id,
 			'msg' || i AS source_message_id,
+			false AS archive_only,
 			CASE WHEN i <= %d THEN (200 + ((i - 1) %% 100))::BIGINT ELSE (10000 + i)::BIGINT END AS conversation_id,
 			CASE (i %% 10)
 				WHEN 0 THEN 'Q' || (i/10000+1) || ' budget review meeting notes'
@@ -264,7 +267,7 @@ func buildBenchData(tb testing.TB) *DuckDBEngine {
 				   subject, snippet, sent_at, size_estimate, has_attachments,
 				   deleted_from_source_at, attachment_count, sender_id,
 				   NULL::BIGINT AS owner_participant_id,
-				   message_type, is_from_me, year, month
+				   message_type, is_from_me, archive_only, year, month
 			FROM bench_messages
 		) TO '%s' (FORMAT PARQUET, PARTITION_BY (year), OVERWRITE_OR_IGNORE)
 	`, msgPath)

@@ -545,6 +545,66 @@ func TestStore_FailSyncAndClearSourceCursorRejectsSupersededRunAtomically(t *tes
 	checks.Equal("expired cursor", run.ErrorMessage.String)
 }
 
+// An unavailable FTS index must not let a superseded importer report success.
+func TestScopedStoreRejectsFTSWriteWhenFTSUnavailable(t *testing.T) {
+	requirements := require.New(t)
+	f := storetest.New(t)
+	store.SetFTS5AvailableForTest(f.Store, false)
+	st := f.Store
+	messageID := f.CreateMessage("generation-fence-message")
+	otherSource, err := st.GetOrCreateSource("gmail", "other@example.com")
+	requirements.NoError(err)
+	otherConversationID, err := st.EnsureConversation(otherSource.ID, "other-thread", "Other Thread")
+	requirements.NoError(err)
+	otherMessageID, err := st.UpsertMessage(&store.Message{
+		ConversationID:  otherConversationID,
+		SourceID:        otherSource.ID,
+		SourceMessageID: "other-generation-message",
+		MessageType:     "email",
+	})
+	requirements.NoError(err)
+
+	oldID, err := st.StartSync(f.Source.ID, "full")
+	requirements.NoError(err)
+	stale := st.ScopedToSync(f.Source.ID, oldID)
+	requirements.NoError(st.FailSync(oldID, "worker stopped"))
+	newID, err := st.StartSync(f.Source.ID, "full")
+	requirements.NoError(err)
+	t.Cleanup(func() { _ = st.FailSync(newID, "test complete") })
+	live := st.ScopedToSync(f.Source.ID, newID)
+
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	requirements.ErrorIs(stale.UpsertFTS(messageID, "", "", "", "", ""), store.ErrSyncRunSuperseded)
+	requirements.ErrorContains(live.UpsertFTS(otherMessageID, "", "", "", "", ""), "is scoped to source")
+	requirements.ErrorIs(live.UpsertFTSContext(cancelled, messageID, "", "", "", "", ""), context.Canceled)
+	requirements.NoError(st.UpsertFTS(messageID, "", "", "", "", ""))
+}
+
+// Dropping the real index must not turn a live scoped write into an error.
+func TestScopedStoreSkipsFTSWriteOnArchiveWithoutFTSIndex(t *testing.T) {
+	testutil.SkipIfPostgres(t, "drops the SQLite FTS5 table")
+	requirements := require.New(t)
+	f := storetest.New(t)
+	messageID := f.CreateMessage("generation-fence-message")
+	var dbPath string
+	requirements.NoError(f.Store.DB().QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&dbPath))
+	_, err := f.Store.DB().Exec(`DROP TABLE IF EXISTS messages_fts`)
+	requirements.NoError(err)
+	requirements.NoError(f.Store.Close())
+
+	st, err := store.OpenForTest(dbPath)
+	requirements.NoError(err)
+	t.Cleanup(func() { _ = st.Close() })
+	requirements.False(st.FTS5Available())
+	runID, err := st.StartSync(f.Source.ID, "full")
+	requirements.NoError(err)
+	t.Cleanup(func() { _ = st.FailSync(runID, "test complete") })
+
+	requirements.NoError(st.ScopedToSync(f.Source.ID, runID).UpsertFTS(messageID, "", "", "", "", ""))
+}
+
 func TestScopedStoreRejectsEveryImporterMutationAfterSupersession(t *testing.T) {
 	requirements := require.New(t)
 	checks := assert.New(t)
@@ -1281,4 +1341,73 @@ func TestStore_InterruptSyncWithCheckpoint(t *testing.T) {
 			require.ErrorIs(err, store.ErrSyncRunNotFound)
 		})
 	}
+}
+
+func TestStore_ListUnresolvedSyncItemErrors(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	f := storetest.New(t)
+	other, err := f.Store.GetOrCreateSource("gmail", "other@example.com")
+	require.NoError(err)
+	firstRun := f.StartSync()
+	for _, id := range []string{"retry", "resolved", "gone", "reopened"} {
+		require.NoError(f.Store.RecordSyncRunItem(store.SyncRunItem{
+			SyncRunID: firstRun, SourceMessageID: id, Phase: "ingest",
+			Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error",
+		}))
+	}
+	require.NoError(f.Store.FailSync(firstRun, "interrupted"))
+	nextRun := f.StartSync()
+	for _, item := range []store.SyncRunItem{
+		{SourceMessageID: "resolved", Phase: "fetch", Status: store.SyncRunItemStatusResolved, ErrorKind: "acquired"},
+		{SourceMessageID: "gone", Phase: "fetch", Status: store.SyncRunItemStatusSkipped, ErrorKind: "gmail_not_found"},
+		{SourceMessageID: "reopened", Phase: "fetch", Status: store.SyncRunItemStatusResolved, ErrorKind: "acquired"},
+		{SourceMessageID: "reopened", Phase: "fetch", Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error"},
+		{SourceMessageID: "retry", Phase: "delete", Status: store.SyncRunItemStatusSkipped, ErrorKind: "delete_error"},
+	} {
+		item.SyncRunID = nextRun
+		require.NoError(f.Store.RecordSyncRunItem(item))
+	}
+	require.NoError(f.Store.CompleteSync(nextRun, "1000"))
+	otherRun, err := f.Store.StartSync(other.ID, "full")
+	require.NoError(err)
+	for _, item := range []store.SyncRunItem{
+		{SourceMessageID: "other-only", Phase: "fetch", Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error"},
+		{SourceMessageID: "retry", Phase: "fetch", Status: store.SyncRunItemStatusResolved, ErrorKind: "acquired"},
+	} {
+		item.SyncRunID = otherRun
+		require.NoError(f.Store.RecordSyncRunItem(item))
+	}
+
+	items, err := f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID)
+	require.NoError(err)
+	require.Len(items, 2)
+	assert.Equal("retry", items[0].SourceMessageID)
+	assert.Equal("ingest_error", items[0].ErrorKind)
+	assert.Equal(firstRun, items[0].SyncRunID)
+	assert.Equal("reopened", items[1].SourceMessageID)
+	assert.Equal("fetch_error", items[1].ErrorKind)
+	assert.Equal(nextRun, items[1].SyncRunID)
+
+	boundary, err := f.Store.StartSync(f.Source.ID, "incremental")
+	require.NoError(err)
+	require.NoError(f.Store.RecordSyncRunItem(store.SyncRunItem{
+		SyncRunID: boundary, SourceMessageID: "still-failing", Phase: "fetch",
+		Status: store.SyncRunItemStatusError, ErrorKind: "fetch_error",
+	}))
+	require.NoError(f.Store.CompleteSync(boundary, "1001"))
+	full, err := f.Store.StartSync(f.Source.ID, "full")
+	require.NoError(err)
+	require.NoError(f.Store.RecordSyncRunItem(store.SyncRunItem{
+		SyncRunID: full, SourceMessageID: "later-full", Phase: "ingest",
+		Status: store.SyncRunItemStatusError, ErrorKind: "ingest_error",
+	}))
+	require.NoError(f.Store.CompleteSync(full, "1001"))
+	items, err = f.Store.ListUnresolvedSyncItemErrors(context.Background(), f.Source.ID)
+	require.NoError(err)
+	var ids []string
+	for _, item := range items {
+		ids = append(ids, item.SourceMessageID)
+	}
+	assert.ElementsMatch([]string{"still-failing", "later-full"}, ids)
 }

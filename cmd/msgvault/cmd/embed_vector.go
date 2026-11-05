@@ -62,6 +62,13 @@ func runEmbed(cmd *cobra.Command) error {
 		return err
 	}
 
+	configCopy := *cfg
+	cfg = &configCopy
+	cfg.Vector, err = resolveLocalVectorConfig(ctx, cfg.Vector)
+	if err != nil {
+		return err
+	}
+
 	var (
 		backend   vector.Backend
 		vectorsDB *sql.DB
@@ -165,10 +172,7 @@ func runEmbed(cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("load provider credentials: %w", err)
 	}
-	embeddingAPIKey, err := resolveProviderCredentialFromSnapshot(
-		credentialSnapshot, providercredentials.VectorEmbeddingsID,
-		cfg.Vector.Embeddings.Endpoint, cfg.Vector.Embeddings.APIKeyEnv,
-	)
+	embeddingAPIKey, err := resolveTextEmbeddingCredential(credentialSnapshot, cfg.Vector)
 	if err != nil {
 		return fmt.Errorf("resolve text embedding credential: %w", err)
 	}
@@ -414,7 +418,7 @@ func newProgressPrinter(w io.Writer, total int, windowSize int) func(embed.Progr
 
 func newProgressPrinterWithMinInterval(w io.Writer, total int, windowSize int, minInterval time.Duration) func(embed.ProgressReport) {
 	var lastPrint time.Time
-	window := newRateWindow(windowSize)
+	window := vector.NewEmbeddingRateWindow(windowSize)
 	return func(p embed.ProgressReport) {
 		// Always feed the window — including events the throttle is
 		// about to suppress. Otherwise a fast downshift drain (where
@@ -457,22 +461,4 @@ func max1(n int) int {
 		return 1
 	}
 	return n
-}
-
-// formatETA renders a duration as h:mm:ss or m:ss, dropping leading
-// zero components so "3 hours" reads as "3h02m18s" and "45 seconds"
-// as "45s". Rounds to whole seconds.
-func formatETA(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	switch {
-	case h > 0:
-		return fmt.Sprintf("%dh%02dm%02ds", h, m, s)
-	case m > 0:
-		return fmt.Sprintf("%dm%02ds", m, s)
-	default:
-		return fmt.Sprintf("%ds", s)
-	}
 }

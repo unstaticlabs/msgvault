@@ -45,8 +45,8 @@ func MailboxStateExpressions(alias, prefix, driver string, hasIMAP bool) (string
 		// Scalar list operations avoid repeated correlated json_each readers
 		// during a large cache COPY while retaining strict element-type checks.
 		items := "json_extract(TRY_CAST(mm.flags AS JSON), '$[*]')"
-		valid = "json_type(TRY_CAST(mm.flags AS JSON)) = 'ARRAY' AND list_has_all(['VARCHAR'], list_transform(" + items + ", flag -> COALESCE(json_type(flag), 'NULL')))"
-		seen = "list_contains(list_transform(" + items + ", flag -> LOWER(json_extract_string(flag, '$'))), '\\seen')"
+		valid = "json_type(TRY_CAST(mm.flags AS JSON)) = 'ARRAY' AND list_has_all(['VARCHAR'], list_transform(" + items + ", lambda flag: COALESCE(json_type(flag), 'NULL')))"
+		seen = "list_contains(list_transform(" + items + ", lambda flag: LOWER(json_extract_string(flag, '$'))), '\\seen')"
 	default:
 		elements = "json_each(CASE WHEN json_valid(mm.flags) THEN mm.flags ELSE '[]' END) AS mf"
 		elementType = "mf.type = 'text'"

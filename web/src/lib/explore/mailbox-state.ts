@@ -1,3 +1,4 @@
+import { filterDimensionLabel, filterValueLabel } from './labels';
 import { HANDLING_LABELS } from './email-work';
 import type { ExploreFilter } from './models';
 export type MailboxDimension = 'inbox_state' | 'read_state';
@@ -26,7 +27,7 @@ export function filterCaption(filter: ExploreFilter): string {
   if (filter.dimension === 'inbox_state' || filter.dimension === 'read_state') {
     return filter.values.map((value) => labels[filter.dimension as MailboxDimension][value] ?? value).join(' or ');
   }
-  return `Filter ${filter.dimension}: ${filter.values.join(', ')}`;
+  return `${filterDimensionLabel(filter.dimension)}: ${filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}`;
 }
 export function mailboxCaption(inboxState?: string, readState?: string): string {
   const read = labels.read_state[readState ?? 'unknown'] ?? labels.read_state.unknown;

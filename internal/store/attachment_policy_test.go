@@ -61,6 +61,15 @@ func newPolicyMessage(t *testing.T, st *store.Store, sourceType, identifier, con
 	return source.ID, insertStoreTestMessage(t, st, source.ID, conversationID, sourceMessageID)
 }
 
+func policyMessageConversationID(t *testing.T, st *store.Store, messageID int64) int64 {
+	t.Helper()
+	var conversationID int64
+	require.NoError(t, st.DB().QueryRow(st.Rebind(
+		`SELECT conversation_id FROM messages WHERE id = ?`,
+	), messageID).Scan(&conversationID))
+	return conversationID
+}
+
 func TestAttachmentOutcomeRoundTrip(t *testing.T) {
 	st := testutil.NewTestStore(t)
 	_, messageID := newPolicyMessage(t, st, "beeper", "signal", "direct_chat", "round-trip", 2)
@@ -111,16 +120,16 @@ func TestRetryableAttachmentMessagesReevaluateSkippedUnderCurrentPolicy(t *testi
 	})
 	require.NoError(err)
 	assert.Equal([]store.BeeperPendingAttachmentMessage{
-		{MessageID: pendingID, SourceMessageID: "pending", ChatID: "conversation-pending", ConversationType: "group_chat", ParticipantCount: 4},
-		{MessageID: failedID, SourceMessageID: "failed", ChatID: "conversation-failed", ConversationType: "group_chat", ParticipantCount: 4},
+		{MessageID: pendingID, ConversationID: policyMessageConversationID(t, st, pendingID), SourceMessageID: "pending", ChatID: "conversation-pending", ConversationType: "group_chat", ParticipantCount: 4},
+		{MessageID: failedID, ConversationID: policyMessageConversationID(t, st, failedID), SourceMessageID: "failed", ChatID: "conversation-failed", ConversationType: "group_chat", ParticipantCount: 4},
 	}, items)
 
 	items, err = st.ListBeeperRetryableAttachmentMessages(sourceID, attachmentpolicy.Policy{})
 	require.NoError(err)
 	assert.Equal([]store.BeeperPendingAttachmentMessage{
-		{MessageID: pendingID, SourceMessageID: "pending", ChatID: "conversation-pending", ConversationType: "group_chat", ParticipantCount: 4},
-		{MessageID: failedID, SourceMessageID: "failed", ChatID: "conversation-failed", ConversationType: "group_chat", ParticipantCount: 4},
-		{MessageID: skippedID, SourceMessageID: "skipped", ChatID: "conversation-skipped", ConversationType: "group_chat", ParticipantCount: 4},
+		{MessageID: pendingID, ConversationID: policyMessageConversationID(t, st, pendingID), SourceMessageID: "pending", ChatID: "conversation-pending", ConversationType: "group_chat", ParticipantCount: 4},
+		{MessageID: failedID, ConversationID: policyMessageConversationID(t, st, failedID), SourceMessageID: "failed", ChatID: "conversation-failed", ConversationType: "group_chat", ParticipantCount: 4},
+		{MessageID: skippedID, ConversationID: policyMessageConversationID(t, st, skippedID), SourceMessageID: "skipped", ChatID: "conversation-skipped", ConversationType: "group_chat", ParticipantCount: 4},
 	}, items)
 }
 
@@ -200,6 +209,41 @@ func TestExcludeAttachmentOccurrencesRemovesOnlySelectedBlobReference(t *testing
 	referenced, err := st.AttachmentBlobReferenced(context.Background(), hash, path)
 	require.NoError(err)
 	assert.True(referenced)
+}
+
+func TestAttachmentBlobReferenced(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	_, messageID := newPolicyMessage(t, st, "beeper", "signal", "direct_chat", "blob-references", 2)
+	_, err := st.DB().Exec(st.Rebind(`
+		INSERT INTO attachments (message_id, content_hash, thumbnail_hash, storage_path, thumbnail_path)
+		VALUES (?, 'content-hash', 'thumbnail-hash', 'content/path', 'thumbnail/path'),
+		       (?, '', '', '', '')
+	`), messageID, messageID)
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, hash, path string
+		want             bool
+	}{
+		{"content hash", "content-hash", "", true},
+		{"thumbnail hash", "thumbnail-hash", "", true},
+		{"content path", "", "content/path", true},
+		{"thumbnail path", "", "thumbnail/path", true},
+		{"only content hash matches", "content-hash", "missing/path", true},
+		{"only thumbnail hash matches", "thumbnail-hash", "missing/path", true},
+		{"only content path matches", "missing-hash", "content/path", true},
+		{"only thumbnail path matches", "missing-hash", "thumbnail/path", true},
+		{"missing hash ignores empty paths", "missing-hash", "", false},
+		{"missing path ignores empty hashes", "", "missing/path", false},
+		{"both missing", "missing-hash", "missing/path", false},
+		{"both empty", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := st.AttachmentBlobReferenced(t.Context(), tc.hash, tc.path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }
 
 func TestAttachmentPolicyCandidatesIncludeLegacyAliasesSlackdumpAndTeamsInlineRows(t *testing.T) {

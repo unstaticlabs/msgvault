@@ -35,6 +35,8 @@ const (
 	runtimeCreateTime               = "create_time"
 	runtimeShutdownToken            = "shutdown_token"
 	runtimeStartupPhase             = "startup_phase"
+	runtimeBackground               = "background"
+	runtimeBackgroundValue          = "true"
 	minimumDaemonAPISchemaVersion   = "3.0.0"
 	runtimeStartupCacheBuildOutcome = "startup_cache_build_outcome"
 	daemonProbeTick                 = 250 * time.Millisecond
@@ -95,6 +97,9 @@ func writeDaemonRuntime(dataDir string, host string, port int, version string, a
 	}
 	if createTime, ok := processCreateTimeMillisForRun(os.Getpid()); ok {
 		rec.Metadata[runtimeCreateTime] = strconv.FormatInt(createTime, 10)
+	}
+	if os.Getenv(serveBackgroundChildEnv) == "1" {
+		rec.Metadata[runtimeBackground] = runtimeBackgroundValue
 	}
 	if _, err := daemonRuntimeStore(dataDir).Write(rec); err != nil {
 		return daemon.RuntimeRecord{}, "", fmt.Errorf("write daemon runtime record: %w", err)
@@ -301,6 +306,9 @@ func listLiveDaemonRuntimeRecordsContext(ctx context.Context, dataDir string) ([
 		if rec.Service != "" && rec.Service != daemonService {
 			continue
 		}
+		if daemon.RuntimeProcessScope(rec) != daemon.ProcessScopeLocal {
+			continue
+		}
 		if !daemon.ProcessAlive(rec.PID) {
 			continue
 		}
@@ -502,7 +510,7 @@ func proveDaemonRuntimeIdentity(ctx context.Context, rec daemon.RuntimeRecord) (
 // (PID reuse). An indeterminate or tolerance-skewed comparison keeps the
 // record, but an affirmative mismatch is never overridden by the
 // unauthenticated HTTP ping at the recorded address. This function never
-// deletes the record file: genuinely dead PIDs are reaped by CleanupDead,
+// deletes the record file: processes proven gone are reaped by CleanupDead,
 // and anything else is left in place for inspection.
 func runtimeRecordIdentityMismatched(rec daemon.RuntimeRecord) bool {
 	return runtimeRecordIdentity(rec) == createTimeMismatch

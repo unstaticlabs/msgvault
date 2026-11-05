@@ -56,6 +56,13 @@ const (
 // A variable so tests can disable the throttle.
 var tailScanInterval = 24 * time.Hour
 
+// routeProbeTimeout bounds each request that runs before listed chats sync:
+// the optional account read that supplies route proof and each probe of a
+// chat missing from the listing. Retried 503s with a long Retry-After must not
+// spend a scheduled run's budget before any listed chat syncs. A variable so
+// tests can shorten it.
+var routeProbeTimeout = 15 * time.Second
+
 // chatScope carries per-chat state through the persist call chain: the chat
 // and store IDs, the run options, and the chat's cursor state (whose
 // PendingReplies buffer persistMessage appends to, keeping checkpoints
@@ -235,13 +242,43 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 		// upserted in place — but keep the anchors. Skipping their
 		// verification would let a --full run against a reinstalled Beeper
 		// Desktop (re-assigned message IDs) silently duplicate the archive.
-		anchors := state.Anchors
+		previous := state
 		state = NewSyncState()
-		state.Anchors = anchors
+		state.Anchors = previous.Anchors
+		// Keep known chat IDs so the full listing can reconcile disappearances.
+		// Each chat starts with empty progress so its history is fetched again.
+		for chatID := range previous.Chats {
+			state.EnsureChat(chatID)
+		}
 	}
 	if opts.stopRequested() {
 		sum.Stopped = true
 		return sum, nil
+	}
+
+	// Capture route proof once per selected account. Older Desktop versions or
+	// a failed or slow account read still archive messages, with unresolved
+	// route proof.
+	requestCtx, cancelRequest := opts.requestContext(ctx)
+	lookupCtx, cancelLookup := context.WithTimeout(requestCtx, routeProbeTimeout)
+	opts.routeAccount, err = imp.client.GetAccount(lookupCtx, opts.AccountID)
+	cancelLookup()
+	cancelRequest()
+	accountRouteFailure := "account_lookup_failed"
+	if err != nil {
+		opts.routeAccount = nil
+		err = nil
+	} else {
+		accountRouteFailure = accountRouteProofFailure(opts.routeAccount, opts.AccountID)
+	}
+	routeFailureCtx, cancelRouteFailure := opts.finalizeContext(ctx)
+	routeFailureErr := imp.store.SetSourceMessagingRouteFailureContext(routeFailureCtx, src.ID, accountRouteFailure)
+	cancelRouteFailure()
+	if routeFailureErr != nil {
+		return nil, fmt.Errorf("record Beeper account route lookup: %w", routeFailureErr)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	// Heal rows derived by an older build before syncing new ones, so an
@@ -323,14 +360,7 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 		verifyErr := imp.verifyAnchors(requestCtx, syncID, src.ID, state)
 		cancel()
 		if errors.Is(verifyErr, ErrNeedsReanchor) {
-			markerCtx, cancelMarker := opts.finalizeContext(ctx)
-			markerErr := imp.store.SetArchiveMarker(
-				markerCtx,
-				store.BeeperReanchorMarkerKey(src.ID),
-				"Beeper message IDs may have been reassigned; manual verification is required.",
-			)
-			cancelMarker()
-			err = errors.Join(verifyErr, markerErr)
+			err = imp.recordReanchorRequired(ctx, opts, src.ID, verifyErr)
 		} else {
 			err = opts.budgetError(ctx, verifyErr)
 			if err == nil && !opts.Scheduled && !opts.stopRequested() {
@@ -384,7 +414,7 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 	reconcileCutoff := start.Add(-reconcileWindow)
 	var chats []chatVisit
 	if !sum.Stopped {
-		chats, err = imp.enumerateChats(ctx, syncID, opts, state, reconcileCutoff, tailScan, sum)
+		chats, err = imp.enumerateChats(ctx, syncID, src.ID, opts, state, reconcileCutoff, tailScan, sum)
 	}
 	if err != nil {
 		return sum, err
@@ -499,20 +529,35 @@ func (imp *Importer) Import(ctx context.Context, opts ImportOptions) (sum *Impor
 			sum.Stopped = true
 		}
 	}
+	// Roster repairs back off per room, so a chat whose messages failed to
+	// fetch must not hold up membership repair for every quiet room.
+	optionalWorkStopped := false
+	if !sum.Stopped {
+		optionalWorkStopped, err = imp.repairQuietRosters(ctx, syncID, src.ID, opts, state, chats, sum)
+		if err != nil {
+			return sum, err
+		}
+	}
 
 	finalizeCtx := ctx
-	if sum.Stopped {
+	if sum.Stopped || optionalWorkStopped {
 		var cancel context.CancelFunc
 		finalizeCtx, cancel = opts.finalizeContext(ctx)
 		defer cancel()
 	}
-	// Mid-run checkpoints are throttled, so persist the final counters before
-	// completing (CompleteSync only writes status and cursor).
+	// Mid-run checkpoints are throttled, so persist the final counters before completing.
 	if err = imp.checkpointNowContext(finalizeCtx, syncID, state, sum); err != nil {
 		return sum, err
 	}
 	blob, _ := state.Marshal()
-	if err = imp.store.CompleteSyncContext(finalizeCtx, syncID, blob); err != nil {
+	// Partial and stopped runs keep their resume state without advancing source
+	// freshness. Route freshness may rely only on a complete, error-free pass.
+	if sum.Errors == 0 && !sum.Stopped {
+		err = imp.store.CompleteSyncAndPreserveSourceCursorContext(finalizeCtx, syncID, src.ID, blob)
+	} else {
+		err = imp.store.CompleteSyncContext(finalizeCtx, syncID, blob)
+	}
+	if err != nil {
 		return sum, err
 	}
 	syncCompleted = true
@@ -591,13 +636,15 @@ func orderTailsFirst(chats []chatVisit, state *SyncState) {
 // enumerateChats lists the chats this run must visit: every chat active in
 // the discovery overlap or reconciliation window (all chats on first/full
 // runs), plus any chat whose backfill is unfinished even without new activity.
-func (imp *Importer) enumerateChats(ctx context.Context, syncID int64, opts ImportOptions, state *SyncState, reconcileCutoff time.Time, tailScan bool, sum *ImportSummary) ([]chatVisit, error) {
+// After an unfiltered listing, it also probes missing completed chats.
+func (imp *Importer) enumerateChats(ctx context.Context, syncID, sourceID int64, opts ImportOptions, state *SyncState, reconcileCutoff time.Time, tailScan bool, sum *ImportSummary) ([]chatVisit, error) {
 	params := SearchChatsParams{AccountID: opts.AccountID}
 	activityCutoff := chatActivityCutoff(opts, state, reconcileCutoff)
 	if !tailScan {
 		params.LastActivityAfter = activityCutoff
 	}
 	var chats []chatVisit
+	probeTimedOut := false
 	seen := map[string]bool{}
 	requestCtx, cancel := opts.requestContext(ctx)
 	defer cancel()
@@ -607,6 +654,9 @@ func (imp *Importer) enumerateChats(ctx context.Context, syncID int64, opts Impo
 			return errBeeperEnumerationStopped
 		}
 		seen[ch.ID] = true
+		if cs := state.Chats[ch.ID]; cs != nil {
+			cs.Gone = false
+		}
 		tailOnly := tailScan && !activityCutoff.IsZero() && !ch.LastActivity.After(activityCutoff)
 		if cs := state.Chats[ch.ID]; cs != nil && !cs.Done {
 			// Unfinished backfills are included independently of activity.
@@ -626,19 +676,74 @@ func (imp *Importer) enumerateChats(ctx context.Context, syncID int64, opts Impo
 	if err != nil {
 		return nil, err
 	}
+	if params.LastActivityAfter.IsZero() {
+		// Subset copies retain conversations but omit sync history. Include
+		// archived chat IDs so missing chats cannot keep their old route proof.
+		archived, err := imp.store.ListSourceConversationIDsContext(ctx, sourceID)
+		if err != nil {
+			return nil, fmt.Errorf("load archived Beeper chats: %w", err)
+		}
+		for _, chatID := range archived {
+			state.EnsureChat(chatID)
+		}
+	}
 	for chatID, cs := range state.Chats {
 		if opts.stopRequested() {
 			sum.Stopped = true
 			return chats, nil
 		}
-		if cs == nil || cs.Done || seen[chatID] {
+		if cs == nil || seen[chatID] {
 			continue
 		}
-		requestCtx, cancel := opts.requestContext(ctx)
-		detail, gerr := imp.client.GetChat(requestCtx, chatID)
-		cancel()
+		// Only an unfiltered listing can identify missing completed chats.
+		// Quiet chats are normally absent from activity-filtered listings.
+		if cs.Done && !params.LastActivityAfter.IsZero() {
+			continue
+		}
+		// A resumed scan must not spend its budget re-probing chats whose
+		// disappearance is already confirmed or checked in this tail scan.
+		if cs.Done && cs.Gone {
+			continue
+		}
+		if cs.Done && state.TailScanStarted != "" && cs.TailProbed == state.TailScanStarted {
+			// Visited earlier in this scan but missing from this listing, so it
+			// may have been deleted since. Clear its route proof without a probe;
+			// the next scan that lists or probes the chat restores it.
+			if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceContext(ctx, sourceID, chatID); err != nil {
+				return nil, fmt.Errorf("invalidate route evidence for unlisted Beeper chat %q: %w", chatID, err)
+			}
+			continue
+		}
+		if probeTimedOut {
+			// Once a probe times out, later probes likely would too. Defer them
+			// so listed chats still sync; each run spends at most one timeout.
+			if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceWithFailureContext(
+				ctx, sourceID, chatID, "membership_fetch_failed",
+			); err != nil {
+				return nil, fmt.Errorf("invalidate route evidence for deferred Beeper chat %q: %w", chatID, err)
+			}
+			imp.recordItem(syncID, chatID, "fetch", store.SyncRunItemStatusSkipped, "beeper_probe_deferred", nil)
+			sum.failChat(chatID, false, errors.New("probe deferred after an earlier timeout"))
+			sum.FetchErrors++
+			sum.Errors++
+			continue
+		}
+		if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceContext(ctx, sourceID, chatID); err != nil {
+			return nil, fmt.Errorf("invalidate route evidence before probing missing Beeper chat %q: %w", chatID, err)
+		}
+		requestCtx, cancelRequest := opts.requestContext(ctx)
+		probeCtx, cancelProbe := context.WithTimeout(requestCtx, routeProbeTimeout)
+		detail, gerr := imp.client.GetChat(probeCtx, chatID)
+		probeTimedOut = errors.Is(probeCtx.Err(), context.DeadlineExceeded) && !opts.budgetExpired()
+		cancelProbe()
+		cancelRequest()
 		gerr = opts.budgetError(ctx, gerr)
 		if errors.Is(gerr, errBeeperBudgetExpired) {
+			if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceWithFailureContext(
+				ctx, sourceID, chatID, "membership_fetch_failed",
+			); err != nil {
+				return nil, fmt.Errorf("invalidate route evidence for budget-expired Beeper chat %q: %w", chatID, err)
+			}
 			sum.Stopped = true
 			return chats, nil
 		}
@@ -646,7 +751,11 @@ func (imp *Importer) enumerateChats(ctx context.Context, syncID int64, opts Impo
 			// The chat no longer exists in Beeper (left/deleted); there is
 			// nothing more to fetch. Mark it complete so it stops pinning the
 			// discovery watermark; the archived messages are kept.
+			if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceContext(ctx, sourceID, chatID); err != nil {
+				return nil, fmt.Errorf("invalidate route evidence for missing Beeper chat %q: %w", chatID, err)
+			}
 			cs.Done = true
+			cs.Gone = true
 			imp.recordItem(syncID, chatID, "fetch", store.SyncRunItemStatusSkipped, "beeper_chat_gone", gerr)
 			continue
 		}
@@ -654,7 +763,13 @@ func (imp *Importer) enumerateChats(ctx context.Context, syncID int64, opts Impo
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceWithFailureContext(
+				ctx, sourceID, chatID, "membership_fetch_failed",
+			); err != nil {
+				return nil, fmt.Errorf("invalidate route evidence for failed Beeper chat %q: %w", chatID, err)
+			}
 			imp.recordItem(syncID, chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", gerr)
+			sum.failChat(chatID, false, gerr)
 			sum.FetchErrors++
 			sum.Errors++
 			continue
@@ -704,6 +819,7 @@ func (imp *Importer) syncChat(ctx context.Context, syncID, sourceID int64, ch *C
 		statsCtx, cancel := opts.conversationStatsContext(ctx)
 		defer cancel()
 		statsErr := imp.store.RecomputeConversationStatsForConversationContext(statsCtx, convID)
+		statsRefreshed := statsErr == nil
 		statsErr = opts.budgetError(ctx, statsErr)
 		if opts.stopRequested() {
 			sum.Stopped = true
@@ -714,9 +830,25 @@ func (imp *Importer) syncChat(ctx context.Context, syncID, sourceID int64, ch *C
 				statsErr = nil
 			}
 		}
+		if statsRefreshed && ctx.Err() == nil {
+			pendingCtx := ctx
+			var cancelPending context.CancelFunc
+			if opts.stopRequested() {
+				pendingCtx, cancelPending = opts.finalizeContext(ctx)
+			}
+			if cancelPending != nil {
+				defer cancelPending()
+			}
+			if clearErr := imp.store.SetConversationRosterRepairPendingContext(pendingCtx, convID, false); clearErr != nil {
+				statsErr = fmt.Errorf("clear roster repair pending marker after active sync: %w", clearErr)
+			}
+		}
 		err = errors.Join(err, statsErr)
 	}()
 	cs := state.EnsureChat(ch.ID)
+	if membership.known {
+		cs.RosterRetryAfter = ""
+	}
 	cc := &chatScope{
 		chatID: ch.ID, convID: convID, sourceID: sourceID, syncID: syncID,
 		opts: opts, cs: cs, membershipComplete: membershipComplete,
@@ -820,6 +952,9 @@ func (imp *Importer) ensureConversation(
 	detail := ch
 	membershipComplete := !ch.Participants.HasMore
 	if ch.Participants.HasMore {
+		if err := imp.store.InvalidateSourceConversationMessagingRouteEvidenceContext(ctx, sourceID, ch.ID); err != nil {
+			return 0, false, chatMembership{}, fmt.Errorf("invalidate route evidence before Beeper roster refresh for chat %q: %w", ch.ID, err)
+		}
 		requestCtx, cancel := opts.requestContext(ctx)
 		d, gerr := imp.client.GetChat(requestCtx, ch.ID)
 		cancel()
@@ -832,6 +967,7 @@ func (imp *Importer) ensureConversation(
 				return 0, false, chatMembership{}, ctx.Err()
 			}
 			imp.recordItem(syncID, ch.ID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", gerr)
+			sum.failChat(ch.ID, false, gerr)
 			sum.FetchErrors++
 			sum.Errors++
 		} else {
@@ -846,6 +982,20 @@ func (imp *Importer) ensureConversation(
 	if err != nil {
 		return 0, false, chatMembership{}, err
 	}
+	// Invalidate earlier proof before any roster writes. An interrupted refresh
+	// cannot retain a complete route snapshot beside partially updated members.
+	routeEvidence := routeEvidenceFor(detail, opts)
+	if ch.AccountID != opts.AccountID {
+		routeEvidence.Failure = "account_binding_mismatch"
+	}
+	routeEvidence.ChatID = ch.ID
+	if detail.ID != ch.ID {
+		routeEvidence.Failure = "chat_binding_mismatch"
+	}
+	if err := imp.store.SetConversationMessagingRouteEvidence(ctx, convID, routeEvidence); err != nil {
+		return 0, false, chatMembership{}, err
+	}
+
 	if membership.known {
 		err = imp.store.SetConversationMemberCountContext(ctx, convID, membership.count)
 	} else {
@@ -907,6 +1057,17 @@ func (imp *Importer) ensureConversation(
 			}
 		}
 	}
+	routeEvidence.MembershipComplete = membershipComplete && membership.known && len(resolvedMembers) == membership.count
+	for _, member := range resolvedMembers {
+		routeEvidence.ParticipantIDs = append(routeEvidence.ParticipantIDs, member.participantID)
+		if member.user.IsSelf {
+			routeEvidence.SelfParticipantIDs = append(routeEvidence.SelfParticipantIDs, member.participantID)
+		}
+	}
+	if err := imp.store.SetConversationMessagingRouteEvidence(ctx, convID, routeEvidence); err != nil {
+		return 0, false, chatMembership{}, err
+	}
+
 	// Membership must be visible before matching. The chat participant list is
 	// the only place Beeper hands us a person's phone, email, and username
 	// together, and matching those observations gathers shared-conversation
@@ -925,6 +1086,36 @@ func (imp *Importer) ensureConversation(
 		return 0, false, chatMembership{}, err
 	}
 	return convID, membershipComplete, membership, nil
+}
+
+// recordChatFetchError records a failed message-page read for one chat. Route
+// proof for the chat was written before its messages were read, so a chat
+// Beeper reports missing must not keep that proof. Its archived messages stay.
+func (imp *Importer) recordChatFetchError(ctx context.Context, cc *chatScope, sum *ImportSummary, err error) error {
+	if errors.Is(err, ErrNotFound) {
+		if ierr := imp.store.InvalidateConversationMessagingRouteEvidence(ctx, cc.convID); ierr != nil {
+			return fmt.Errorf("invalidate route evidence for missing Beeper chat %q: %w", cc.chatID, ierr)
+		}
+	}
+	imp.recordItem(cc.syncID, cc.chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", err)
+	sum.failChat(cc.chatID, false, err)
+	sum.FetchErrors++
+	sum.Errors++
+	return nil
+}
+
+// recordReanchorRequired stores the marker for a source whose message IDs may
+// have been reassigned. Scheduled syncs skip the source and route lookup
+// reports its routes unresolved until an operator re-verifies it.
+func (imp *Importer) recordReanchorRequired(ctx context.Context, opts ImportOptions, sourceID int64, verifyErr error) error {
+	markerCtx, cancel := opts.finalizeContext(ctx)
+	defer cancel()
+	markerErr := imp.store.SetArchiveMarker(
+		markerCtx,
+		store.BeeperReanchorMarkerKey(sourceID),
+		"Beeper message IDs may have been reassigned; manual verification is required.",
+	)
+	return errors.Join(verifyErr, markerErr)
 }
 
 // probeChatTail searches past a completed chat's oldest cursor and clears Done
@@ -963,11 +1154,8 @@ func (imp *Importer) probeChatTail(ctx context.Context, cc *chatScope, sum *Impo
 			return false, false, ctxErr
 		}
 		if err != nil {
-			imp.recordItem(cc.syncID, cc.chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", err)
-			sum.FetchErrors++
-			sum.Errors++
 			clearProbeCursor()
-			return false, false, nil
+			return false, false, imp.recordChatFetchError(ctx, cc, sum, err)
 		}
 		if len(page.Items) == 0 {
 			clearProbeCursor()
@@ -1145,10 +1333,7 @@ func (imp *Importer) backfillChat(ctx context.Context, cc *chatScope, state *Syn
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			imp.recordItem(cc.syncID, cc.chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", err)
-			sum.FetchErrors++
-			sum.Errors++
-			return nil
+			return imp.recordChatFetchError(ctx, cc, sum, err)
 		}
 		if cs.Newest == "" && page.NewestCursor != "" {
 			cs.Newest = page.NewestCursor
@@ -1236,10 +1421,7 @@ func (imp *Importer) incrementalChat(ctx context.Context, cc *chatScope, sum *Im
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			imp.recordItem(cc.syncID, cc.chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", err)
-			sum.FetchErrors++
-			sum.Errors++
-			return nil
+			return imp.recordChatFetchError(ctx, cc, sum, err)
 		}
 		// An empty page (null cursors) marks the head; hasMore is not a
 		// reliable signal on the live API.
@@ -1307,10 +1489,7 @@ func (imp *Importer) reconcileChat(ctx context.Context, cc *chatScope, cutoff ti
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			imp.recordItem(cc.syncID, cc.chatID, "fetch", store.SyncRunItemStatusError, "beeper_fetch_error", err)
-			sum.FetchErrors++
-			sum.Errors++
-			return nil
+			return imp.recordChatFetchError(ctx, cc, sum, err)
 		}
 		reachedCutoff := false
 		processed := 0
@@ -1410,6 +1589,7 @@ func (imp *Importer) refreshReactionTarget(ctx context.Context, cc *chatScope, m
 			return ctx.Err()
 		}
 		imp.recordItem(cc.syncID, m.ID, "reaction", store.SyncRunItemStatusError, "beeper_fetch_error", err)
+		sum.failChat(cc.chatID, false, err)
 		sum.FetchErrors++
 		sum.Errors++
 		return errRetryPage
@@ -1482,7 +1662,7 @@ func (imp *Importer) persistMessage(ctx context.Context, cc *chatScope, m *Messa
 
 	if len(m.Attachments) > 0 || (!cc.opts.NoMedia && cc.opts.AttachmentsDir != "") {
 		requestCtx, cancel := cc.opts.requestContext(ctx)
-		imp.persistAttachments(requestCtx, cc.syncID, messageID, m, cc.opts, sum)
+		imp.persistAttachments(requestCtx, cc.syncID, messageID, cc.chatID, m, cc.opts, sum)
 		cancel()
 		if cc.opts.budgetExpired() {
 			sum.Stopped = true
@@ -1600,7 +1780,7 @@ func (imp *Importer) checkpointNowContext(ctx context.Context, syncID int64, sta
 		PageToken:         blob,
 		MessagesProcessed: sum.MessagesProcessed,
 		MessagesAdded:     sum.MessagesAdded,
-		ErrorsCount:       sum.Errors,
+		ErrorsCount:       sum.Errors + sum.RosterRepairErrors,
 	})
 	if err == nil {
 		imp.lastCheckpoint = time.Now()

@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,20 +21,51 @@ import (
 	"go.kenn.io/msgvault/internal/documentindex"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/tasklinks"
 	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 )
 
-func TestPersonRenameHTTPRefreshesCachedPeople(t *testing.T) {
+type wiringTaskOperations struct {
+	api.TaskLinkOperations
+
+	identities []tasklinks.MessageIdentity
+}
+
+func (o *wiringTaskOperations) Lookup(_ context.Context, identity tasklinks.MessageIdentity) tasklinks.LookupResult {
+	o.identities = append(o.identities, identity)
+	return tasklinks.LookupResult{State: tasklinks.StateReady, Complete: true, Tasks: []tasklinks.TaskSummary{}}
+}
+
+func TestStoreAPIAdapterResolvesTaskMessageIdentity(t *testing.T) {
+	f := storetest.New(t)
+	id := f.CreateMessage("task-wiring-email")
+	ops := &wiringTaskOperations{}
+	srv := api.NewServerWithOptions(api.ServerOptions{
+		Config: &config.Config{}, Store: &storeAPIAdapter{store: f.Store},
+		Logger: slog.New(slog.DiscardHandler), TaskLinkOperations: ops,
+	})
+	path := fmt.Sprintf("/api/v1/messages/%d/tasks", id)
+	response := httptest.NewRecorder()
+	srv.Router().ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+	requirements.Len(ops.identities, 1)
+	uid, err := f.Store.ArchiveUID()
+	requirements.NoError(err)
+	identity := ops.identities[0]
+	assertions.Equal(uid, identity.ArchiveUID)
+}
+
+func testPersonRenameHTTPRefreshesCachedPeople(t *testing.T, binary string) {
+	t.Helper()
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "msgvault.db")
 	analyticsDir := filepath.Join(tmp, "analytics")
-	st, err := store.Open(dbPath)
-	require.NoError(err)
-	t.Cleanup(func() { require.NoError(st.Close()) })
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	alice, err := st.EnsureParticipant("alice@example.com", "Alice Observed", "example.com")
 	require.NoError(err)
 	source, err := st.GetOrCreateSource("gmail", "user@example.com")
@@ -54,44 +83,37 @@ func TestPersonRenameHTTPRefreshesCachedPeople(t *testing.T) {
 	require.NoError(err)
 	t.Cleanup(func() { require.NoError(engine.Close()) })
 
-	// Exercise the actual HTTP-to-child boundary. A lost invocation must use
-	// this owned invalid fallback, never an operator's default archive.
+	// A lost invocation must fail in an owned fallback, never open the
+	// operator's default archive. A separate config directory also detects
+	// losing --home while retaining --config.
 	fallback := t.TempDir()
-	require.NoError(os.WriteFile(filepath.Join(fallback, "config.toml"), []byte("invalid = ["), 0o600))
+	for _, home := range []string{fallback, tmp} {
+		require.NoError(os.WriteFile(filepath.Join(home, "config.toml"), []byte("invalid = ["), 0o600))
+	}
 	t.Setenv("MSGVAULT_HOME", fallback)
-	configPath := filepath.Join(tmp, "config.toml")
-	require.NoError(os.WriteFile(configPath, []byte("[analytics]\nengine = 'duckdb'\nauto_build_cache = false\n[telemetry]\nenabled = false\n"), 0o600))
+	configPath := filepath.Join(t.TempDir(), "custom.toml")
+	require.NoError(os.WriteFile(configPath, []byte("[analytics]\nengine = 'duckdb'\nauto_build_cache = false\n"), 0o600))
 	cfg, err := config.Load(configPath, tmp)
 	require.NoError(err)
-	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
-	require.NoError(err)
-	binary := filepath.Join(t.TempDir(), "msgvault")
-	if runtime.GOOS == "windows" {
-		binary += ".exe"
-	}
-	build := exec.CommandContext(t.Context(), "go", "build", "-tags", "fts5 sqlite_vec", "-o", binary, "./cmd/msgvault")
-	build.Dir = repoRoot
-	output, err := build.CombinedOutput()
-	require.NoError(err, "%s", output)
+
 	old := executeBuildCacheSubprocessMode
 	executeBuildCacheSubprocessMode = func(ctx context.Context, mode buildCacheMode) error {
 		command, commandErr := newBuildCacheSubprocessCommand(ctx, mode)
 		if commandErr != nil {
 			return commandErr
 		}
-		// The test executable is not the CLI; retain the production arguments
-		// and environment and substitute only the freshly built executable.
+		// os.Executable returns the test runner; retain production arguments
+		// and environment, substituting only the freshly built native CLI.
 		command.Path, command.Args[0] = binary, binary
-		childOutput, childErr := command.CombinedOutput()
-		if childErr != nil {
-			return fmt.Errorf("cache child: %w: %s", childErr, childOutput)
-		}
-		return nil
+		return runBuildCacheSubprocessCommand(command, nil)
 	}
 	t.Cleanup(func() { executeBuildCacheSubprocessMode = old })
 	srv := api.NewServerWithOptions(api.ServerOptions{
 		Config: cfg,
-		Store:  &storeAPIAdapter{store: st, config: cfg, options: invocationOptions{homeDir: tmp, cfgFile: configPath}, analyticsDir: analyticsDir},
+		Store: &storeAPIAdapter{
+			store: st, config: cfg, analyticsDir: analyticsDir,
+			options: invocationOptions{homeDir: tmp, cfgFile: configPath},
+		},
 		Logger: slog.New(slog.DiscardHandler),
 	})
 	for _, test := range []struct {

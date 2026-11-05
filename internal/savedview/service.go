@@ -7,8 +7,10 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"strings"
 
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -83,7 +85,7 @@ func (p *RunPage) Returned() int {
 // store.ErrSavedViewUnsupportedSchemaVersion or store.ErrSavedViewInvalidState
 // so callers can map them uniformly.
 func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error) {
-	if view.SchemaVersion != store.CurrentSavedViewSchemaVersion {
+	if view.SchemaVersion < 1 || view.SchemaVersion > store.CurrentSavedViewSchemaVersion {
 		return store.SavedViewStateEnvelope{}, fmt.Errorf(
 			"%w: Saved View %d uses schema version %d",
 			store.ErrSavedViewUnsupportedSchemaVersion, view.ID, view.SchemaVersion,
@@ -100,6 +102,9 @@ func ExecutableState(view store.SavedView) (store.SavedViewStateEnvelope, error)
 	}
 	if err := store.ValidateSavedViewState(state); err != nil {
 		return store.SavedViewStateEnvelope{}, fmt.Errorf("saved view %d: %w", view.ID, err)
+	}
+	if view.SchemaVersion == 1 && (state.SearchMode == "" || state.SearchMode == "full_text") {
+		state.Query = quoteLegacyPipes(state.Query)
 	}
 	return state, nil
 }
@@ -138,4 +143,31 @@ type EmailWorkRecovery interface {
 	PreviewEmailWorkAction(ctx context.Context, viewID, viewRevision int64, kind string, uids []string, cacheRevision string) (*EmailWorkRecoveryPlan, error)
 	ApplyEmailWorkAction(ctx context.Context, plan EmailWorkRecoveryPlan) (*EmailWorkRecoveryResult, error)
 	UndoEmailWorkAction(ctx context.Context, viewID, viewRevision int64, uid, snapshot, cacheRevision string, actionRevision int64) (*EmailWorkRecoveryResult, error)
+}
+
+// Keep legacy pipe handling in step with web/src/lib/saved-views/canonical.ts.
+func quoteLegacyPipes(query string) string {
+	query = strings.TrimSpace(query)
+	var result strings.Builder
+	var quote rune
+	escaped := false
+	for i, char := range query {
+		switch {
+		case quote != 0:
+			if escaped {
+				escaped = false
+			} else if char == '\\' {
+				escaped = true
+			} else if char == quote {
+				quote = 0
+			}
+		case char == '"' || char == '\'':
+			quote = char
+		case search.IsStandalonePipe(query, i):
+			result.WriteString(`"|"`)
+			continue
+		}
+		result.WriteRune(char)
+	}
+	return result.String()
 }

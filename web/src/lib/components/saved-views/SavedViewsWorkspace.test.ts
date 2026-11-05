@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createAPIClient } from '../../api/client';
 import { ExploreGroupDimension } from '../../api/generated/models';
 import { defaultExploreURLState, parseExploreURLState, serializeExploreURLState } from '../../explore/state.svelte';
+import { isGroupingDimension } from '../../grouping/catalog';
 import SavedViewsWorkspace from './SavedViewsWorkspace.svelte';
 const currentState = { ...defaultExploreURLState, query: 'invoice', filters: [{dimension: 'source' as const, values: ['1']}], groupingChain: ['domain' as const], columns: ['kind' as const, 'title' as const] };
 
@@ -24,13 +25,24 @@ function savedView(overrides: Record<string, unknown> = {}) {
 }
 
 describe('SavedViewsWorkspace', () => {
+  it('opens a legacy literal-pipe query without turning it into an OR search', async () => {
+    const onOpen = vi.fn();
+    render(SavedViewsWorkspace, {
+      client: createAPIClient(vi.fn<typeof fetch>(async () => Response.json({ saved_views: [savedView({
+        canonical_state: { ...savedView().canonical_state, query: 'alpha | beta' },
+      })] }))), onOpen,
+    });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Open Invoices' }));
+    expect(onOpen).toHaveBeenCalledWith(expect.objectContaining({ query: 'alpha "|" beta' }));
+  });
+
   it('is a library: no save form, and an empty state that points to Save view…', async () => {
     render(SavedViewsWorkspace, {
       client: createAPIClient(vi.fn<typeof fetch>(async () => Response.json({ saved_views: [] })))
     });
     await screen.findByText('No saved views yet');
     expect(screen.getByText(
-      'Use Save view… in Everything or Files to keep a search and layout you want to return to.'
+      'Use Save view… in Messages or Files to keep a search and layout you want to return to.'
     )).toBeDefined();
     expect(screen.queryByText('Save this view')).toBeNull();
     expect(screen.queryByLabelText('Name')).toBeNull();
@@ -80,7 +92,7 @@ describe('SavedViewsWorkspace', () => {
     expect(onOpen).not.toHaveBeenCalled();
   });
 
-  it.each(Object.values(ExploreGroupDimension))('opens %s grouping and preserves it in the analytical URL state', async (dimension) => {
+  it.each(Object.values(ExploreGroupDimension).filter(isGroupingDimension))('opens %s grouping and preserves it in the analytical URL state', async (dimension) => {
     const onOpen = vi.fn();
     render(SavedViewsWorkspace, {
       client: createAPIClient(vi.fn<typeof fetch>(async () => Response.json({ saved_views: [savedView({
@@ -221,7 +233,7 @@ describe('native executable filter compatibility', () => {
     });
     const open = await screen.findByRole('button', { name: 'Open Invoices' });
     expect((open as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByRole('alert').textContent).toContain('Select the people again in Explore and save a new view');
+    expect(screen.getByRole('alert').textContent).toContain('Select the people again in Messages and save a new view');
     expect(screen.getByRole('button', { name: 'Remove incompatible Invoices' })).toBeTruthy();
     expect(onOpen).not.toHaveBeenCalled();
     expect(requests.map((request) => request.method)).toEqual(['GET']);
@@ -287,7 +299,7 @@ describe('explicit legacy filter repair', () => {
     });
     render(SavedViewsWorkspace, { client: createAPIClient(fetchFn), currentState });
     await fireEvent.click(await screen.findByRole('button', { name: 'Repair filters for Invoices' }));
-    expect(screen.getByRole('list', { name: 'Replacement filters' }).textContent).toContain('source');
+    expect(screen.getByRole('list', { name: 'Replacement filters' }).textContent).toContain('Source: 1');
     expect(requests.map((request) => request.method)).toEqual(['GET']);
     expect(legacy).toEqual(original);
     await fireEvent.click(screen.getByRole('button', { name: 'Save repaired filters' }));

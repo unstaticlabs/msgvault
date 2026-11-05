@@ -26,7 +26,7 @@ Use the browser, terminal, CLI, HTTP API, or an AI assistant through MCP.
 
 > **Alpha software.** APIs, storage format, and CLI flags may change. Back up
 > your data. This README follows current `main`; see the
-> [0.21.0 changelog](docs/changelog.md#0210) for features and upgrade steps.
+> [0.23.0 changelog](docs/changelog.md#0230) for features and upgrade steps.
 
 ## What you can do
 
@@ -53,10 +53,10 @@ features send selected data to the endpoints you configure; local embedding
 servers are also supported. See [recommended configuration](docs/usage/recommended-configuration.md)
 for the choices and consent steps.
 
-The daemon also sends anonymous usage telemetry, a daily ping and web and terminal
-UI usage carrying the version, platform and a random install ID, never archive
-content. See [telemetry](docs/configuration.md#telemetry) for the full list and
-how to turn it off.
+The daemon also sends anonymous usage telemetry, a daily ping and web, command-line and
+terminal UI usage carrying the version, platform and a random install ID, never archive
+content. See [telemetry](docs/configuration.md#telemetry) for the full list and how to
+turn it off.
 
 ## Installation
 

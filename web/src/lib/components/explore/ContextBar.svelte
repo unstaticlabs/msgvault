@@ -1,7 +1,7 @@
 <script lang="ts">
-  import XIcon from '@lucide/svelte/icons/x';
-  import { Button, Checkbox, IconButton, SelectDropdown } from '@kenn-io/kit-ui';
   import type { Snippet } from 'svelte';
+  import XIcon from '@lucide/svelte/icons/x';
+  import { Button, Checkbox, Chip, IconButton, SelectDropdown } from '@kenn-io/kit-ui';
 
   import type { APIClient } from '../../api/client';
   import type { ExploreFilter, ExploreGroupDimension, ExploreSearchMode, ExploreURLState } from '../../explore/models';
@@ -11,6 +11,7 @@
   import { isEmailWork, withEmailWork, withHandlingState, HANDLING_LABELS } from '../../explore/email-work';
   import IdentityFilter from './IdentityFilter.svelte';
  import { filterCaption, mailboxFilterOptions, mailboxFilterValue, withMailboxFilter } from '../../explore/mailbox-state';
+  import FilterMenu from './FilterMenu.svelte';
 
   interface ExtraChip {
     key: string;
@@ -28,6 +29,10 @@
 
   let {
     client,
+    messages = false,
+    lockedFilter = undefined,
+    filterExtra = undefined,
+    extraControls = undefined,
     query,
     searchMode,
     filters,
@@ -35,7 +40,6 @@
     countLabel,
     sort = undefined,
     presentation = 'table',
-    extra = undefined,
     extraChips = [],
     onAddGroup,
     onRemoveGroup,
@@ -46,6 +50,10 @@
     onPresentationChange = undefined
   }: {
     client: APIClient;
+    messages?: boolean;
+    lockedFilter?: ExploreFilter;
+    filterExtra?: Snippet;
+    extraControls?: Snippet;
     query: string;
     searchMode: ExploreSearchMode;
     filters: ExploreFilter[];
@@ -53,7 +61,6 @@
     countLabel: string;
     sort?: SortConfig;
     presentation?: ExploreURLState['presentation'];
-    extra?: Snippet;
     extraChips?: ExtraChip[];
     onAddGroup: (dimension: ExploreGroupDimension) => void;
     onRemoveGroup: (index: number) => void;
@@ -98,6 +105,24 @@
   }
 </script>
 
+{#snippet mailboxFilters()}
+      <div class="mailbox-filters">
+        <SelectDropdown title="Inbox" value={mailboxFilterValue(filters, 'inbox_state')}
+          options={mailboxFilterOptions(filters, 'inbox_state')}
+          onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'inbox_state', value))} />
+        <SelectDropdown title="Read status" value={mailboxFilterValue(filters, 'read_state')}
+          options={mailboxFilterOptions(filters, 'read_state')}
+          onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'read_state', value))} />
+      </div>
+      {#if isEmailWork(filters)}<p class="mailbox-note">Related email is grouped within the selected accounts. Handling uses reply evidence and local confirmations; read and Inbox status remain separate.</p>{/if}
+      <p class="mailbox-note">Mailbox status reflects saved provider data. Sync to refresh it. Unknown status stays separate.</p>
+{/snippet}
+
+{#snippet messageFilterExtra()}
+  {@render mailboxFilters()}
+  {@render filterExtra?.()}
+{/snippet}
+
 <section class="context-bar" aria-label="Active analytical context">
   <div class="context-controls">
     <Checkbox checked={isEmailWork(filters)} label="Group related email"
@@ -106,6 +131,9 @@
       <SelectDropdown title="Handling" value={handlingValue} options={handlingOptions}
         onchange={(value) => onFiltersChange(value === 'needs_attention' ? [...withHandlingState(filters, ''), {dimension: 'handling_state', values: ['actionable', 'unknown']}] : withHandlingState(filters, value))} />
     {/if}
+    {#if messages}
+      <FilterMenu {client} {filters} {lockedFilter} onChange={onFiltersChange} onClear={onClearFilters} extra={messageFilterExtra} />
+    {:else}
     <Button
       size="sm"
       surface={filtersOpen || filters.length > 0 ? 'soft' : 'outline'}
@@ -114,6 +142,8 @@
       ariaExpanded={filtersOpen}
       onclick={() => { filtersOpen = !filtersOpen; }}
     />
+    {/if}
+    {#if !lockedFilter}
     <SelectDropdown
       value={presentation}
       options={presentationOptions}
@@ -127,6 +157,7 @@
         onchange={selectGrouping}
       />
     </div>
+    {/if}
     {#if sort}
       <div data-sort-menu>
         <SelectDropdown
@@ -136,50 +167,58 @@
         />
       </div>
     {/if}
-    {@render extra?.()}
+    {@render extraControls?.()}
     <span class="context-count" aria-live="polite" data-mono>{countLabel}</span>
   </div>
 
   {#if hasChips}
     <div class="context-chips">
       {#if query}
-        <span class="chip">
-          <span class="chip-label">{searchModeLabel(searchMode)}: “{query}”</span>
-          <IconButton size="sm" ariaLabel="Remove search" onclick={() => onRemoveQuery?.()}
-          ><XIcon size="12" aria-hidden="true" /></IconButton>
-        </span>
+        <Chip size="sm" uppercase={false} class="chip" title={`${searchModeLabel(searchMode)}: “${query}”`}>
+          {searchModeLabel(searchMode)}: “{query}”
+          {#snippet trailing()}
+            <IconButton size="sm" ariaLabel="Remove search" onclick={() => onRemoveQuery?.()}
+            ><XIcon size="12" aria-hidden="true" /></IconButton>
+          {/snippet}
+        </Chip>
       {/if}
       {#each filters as filter, index (`${filter.dimension}:${filter.values.join('\u0000')}`)}
-        <span class="chip chip--filter">
-          <span class="chip-label">{#if ['inbox_state', 'read_state', 'row_unit', 'handling_state'].includes(filter.dimension)}{filterCaption(filter)}{:else}{filterDimensionLabel(filter.dimension)}: {filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}{/if}</span>
-          <IconButton
-            size="sm"
-            ariaLabel={`Remove ${filterDimensionLabel(filter.dimension)} filter`}
-            onclick={() => onRemoveFilter?.(index)}
-          ><XIcon size="12" aria-hidden="true" /></IconButton>
-        </span>
+        <Chip size="sm" uppercase={false} class="chip chip--filter" title={`${filterDimensionLabel(filter.dimension)}: ${filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}`}>
+          {#if ['inbox_state', 'read_state', 'row_unit', 'handling_state'].includes(filter.dimension)}{filterCaption(filter)}{:else}{filterDimensionLabel(filter.dimension)}: {filter.values.map((value) => filterValueLabel(filter.dimension, value)).join(', ')}{/if}
+          {#snippet trailing()}
+            <IconButton
+              size="sm"
+              ariaLabel={`Remove ${filterDimensionLabel(filter.dimension)} filter`}
+              onclick={() => onRemoveFilter?.(index)}
+            ><XIcon size="12" aria-hidden="true" /></IconButton>
+          {/snippet}
+        </Chip>
       {/each}
       {#each extraChips as chip (chip.key)}
-        <span class="chip chip--filter">
-          <span class="chip-label">{chip.label}</span>
-          <IconButton size="sm" ariaLabel={chip.removeLabel} onclick={chip.onRemove}
-          ><XIcon size="12" aria-hidden="true" /></IconButton>
-        </span>
+        <Chip size="sm" uppercase={false} class="chip chip--filter" title={chip.label}>
+          {chip.label}
+          {#snippet trailing()}
+            <IconButton size="sm" ariaLabel={chip.removeLabel} onclick={chip.onRemove}
+            ><XIcon size="12" aria-hidden="true" /></IconButton>
+          {/snippet}
+        </Chip>
       {/each}
       {#each groupingChain as dimension, index (`${dimension}:${index}`)}
-        <span class="chip chip--group">
-          <span class="chip-label">{groupedByLabel([dimension])}</span>
-          <IconButton
-            size="sm"
-            ariaLabel={`Remove ${filterDimensionLabel(dimension)} grouping`}
-            onclick={() => onRemoveGroup(index)}
-          ><XIcon size="12" aria-hidden="true" /></IconButton>
-        </span>
+        <Chip size="sm" uppercase={false} class="chip chip--group" title={groupedByLabel([dimension])}>
+          {groupedByLabel([dimension])}
+          {#snippet trailing()}
+            <IconButton
+              size="sm"
+              ariaLabel={`Remove ${filterDimensionLabel(dimension)} grouping`}
+              onclick={() => onRemoveGroup(index)}
+            ><XIcon size="12" aria-hidden="true" /></IconButton>
+          {/snippet}
+        </Chip>
       {/each}
     </div>
   {/if}
 
-  {#if filtersOpen}
+  {#if filtersOpen && !messages}
     <div class="filter-panel">
       <div class="filter-summary">
         {#if filters.length === 0}
@@ -190,16 +229,7 @@
         {/if}
       </div>
       <AccountFilter {client} {filters} onChange={onFiltersChange} />
-      <div class="mailbox-filters">
-        <SelectDropdown title="Inbox" value={mailboxFilterValue(filters, 'inbox_state')}
-          options={mailboxFilterOptions(filters, 'inbox_state')}
-          onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'inbox_state', value))} />
-        <SelectDropdown title="Read status" value={mailboxFilterValue(filters, 'read_state')}
-          options={mailboxFilterOptions(filters, 'read_state')}
-          onchange={(value) => onFiltersChange(withMailboxFilter(filters, 'read_state', value))} />
-      </div>
-      {#if isEmailWork(filters)}<p class="mailbox-note">Related email is grouped within the selected accounts. Handling uses reply evidence and local confirmations; read and Inbox status remain separate.</p>{/if}
-      <p class="mailbox-note">Mailbox status reflects saved provider data. Sync to refresh it. Unknown status stays separate.</p>
+      {@render mailboxFilters()}
       <IdentityFilter {client} {filters} onChange={onFiltersChange} />
     </div>
   {/if}
@@ -212,7 +242,7 @@
     min-width: 0;
     flex-direction: column;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
+    padding: var(--pane-pad-y) var(--pane-pad-x);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-md);
     background: var(--bg-surface);
@@ -232,33 +262,17 @@
     width: 172px;
   }
 
-  .chip {
-    display: inline-flex;
-    max-width: 100%;
-    align-items: center;
-    gap: var(--space-1);
-    padding: 0 0 0 var(--space-2);
-    border-radius: var(--radius-sm);
+  .context-chips :global(.chip) {
     background: var(--bg-inset);
     color: var(--text-secondary);
-    overflow-wrap: anywhere;
   }
 
-  .chip-label {
-    min-width: 0;
-    overflow-wrap: anywhere;
-  }
-
-  .chip :global(button) {
-    flex-shrink: 0;
-  }
-
-  .chip--filter {
+  .context-chips :global(.chip--filter) {
     border: 1px solid color-mix(in srgb, var(--accent-amber) 35%, var(--border-muted));
     background: color-mix(in srgb, var(--accent-amber) 8%, var(--bg-surface));
   }
 
-  .chip--group {
+  .context-chips :global(.chip--group) {
     border: 1px solid color-mix(in srgb, var(--accent-teal) 35%, var(--border-muted));
     background: color-mix(in srgb, var(--accent-teal) 8%, var(--bg-surface));
   }

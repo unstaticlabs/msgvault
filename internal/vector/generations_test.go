@@ -75,8 +75,9 @@ func TestResolveActiveForFingerprint_Matches(t *testing.T) {
 
 func TestResolveActiveForFingerprint_Stale(t *testing.T) {
 	b := &fakeBackend{active: &Generation{Fingerprint: "m:768:p1-111111"}}
-	_, err := ResolveActiveForFingerprint(context.Background(), b, "m:1024:p1-111111")
-	assert.ErrorIs(t, err, ErrIndexStale)
+	generation, err := ResolveActiveForFingerprint(context.Background(), b, "m:1024:p1-111111")
+	require.ErrorIs(t, err, ErrIndexStale)
+	assert.Equal(t, "m:768:p1-111111", generation.Fingerprint)
 }
 
 // TestResolveActiveForFingerprint_StaleOnPreprocessFlip pins the
@@ -117,3 +118,5 @@ func TestResolveActiveForFingerprint_BuildingBackendError(t *testing.T) {
 	require.Error(t, err, "expected error wrapping building failed")
 	assert.ErrorIs(t, err, wantErr)
 }
+
+func (*fakeBackend) EmbeddingCheckpoints() EmbeddingCheckpoints { return EmbeddingCheckpoints{} }

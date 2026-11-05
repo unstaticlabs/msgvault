@@ -110,11 +110,20 @@ type PersonSummary struct {
 	PeakRelationshipTemperature    int                `json:"peak_relationship_temperature"`
 	PeakRelationshipYear           int                `json:"peak_relationship_year"`
 	SourceCounts                   []SourceCount      `json:"source_counts"`
-	FirstAt                        time.Time          `json:"first_at"`
-	LastAt                         time.Time          `json:"last_at"`
+	FirstAt                        time.Time          `json:"first_at,omitzero"`
+	LastAt                         time.Time          `json:"last_at,omitzero"`
 	CacheRevision                  string             `json:"cache_revision"`
 	Cluster                        *PersonCluster     `json:"cluster,omitzero" nullable:"false"`
 	Profile                        *PersonProfile     `json:"profile,omitzero" nullable:"false"`
+}
+
+// CanonicalID returns the ID of the contact's identity cluster, or its own ID
+// when it has no linked aliases.
+func (p PersonSummary) CanonicalID() int64 {
+	if p.Cluster != nil {
+		return p.Cluster.CanonicalID
+	}
+	return p.ID
 }
 
 type PersonSearchResponse struct {
@@ -179,7 +188,8 @@ func (e *DuckDBEngine) GetPerson(ctx context.Context, id int64, analyticalContex
 	// requested alias ID in the response contract. The lookup is not
 	// gated on a query slot: it is a point read over the compact rollup, so
 	// it can answer while the timeline occupies the slot.
-	if identityRequestIsUnfiltered(ExploreRequest{Context: analyticalContext}) {
+	unfiltered := identityRequestIsUnfiltered(ExploreRequest{Context: analyticalContext})
+	if unfiltered {
 		lookupID := id
 		if len(clusterMemberIDs) > 1 {
 			lookupID = slices.Min(clusterMemberIDs)
@@ -193,7 +203,7 @@ func (e *DuckDBEngine) GetPerson(ctx context.Context, id int64, analyticalContex
 			return row, nil
 		}
 	}
-	result, err := e.searchPeopleLegacy(ctx, PersonSearchRequest{Explore: ExploreRequest{Context: analyticalContext}, Page: PageSpec{Limit: 1}}, &id, clusterMemberIDs)
+	result, err := e.searchPeopleLegacy(ctx, PersonSearchRequest{Explore: ExploreRequest{Context: analyticalContext}, Page: PageSpec{Limit: 1}}, &id, clusterMemberIDs, unfiltered)
 	if err != nil || len(result.Rows) == 0 {
 		return nil, err
 	}
@@ -305,11 +315,11 @@ func (e *DuckDBEngine) GetPersonSummary(ctx context.Context, id int64, explore E
 	if id < 1 {
 		return nil, fmt.Errorf("%w: person ID must be positive", ErrInvalidExploreRequest)
 	}
-	return e.searchPeopleLegacy(ctx, PersonSearchRequest{Explore: explore, Page: PageSpec{Limit: 1}}, &id, clusterMemberIDs)
+	return e.searchPeopleLegacy(ctx, PersonSearchRequest{Explore: explore, Page: PageSpec{Limit: 1}}, &id, clusterMemberIDs, false)
 }
 
 func (e *DuckDBEngine) searchPeopleLegacy(
-	ctx context.Context, request PersonSearchRequest, exactID *int64, clusterMemberIDs []int64,
+	ctx context.Context, request PersonSearchRequest, exactID *int64, clusterMemberIDs []int64, keepInactive bool,
 ) (*PersonSearchResponse, error) {
 	if e.analyticsDir == "" {
 		return nil, &CacheUnavailableError{Readiness: CacheAbsent}
@@ -343,12 +353,16 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 		return nil, err
 	}
 	conditions, args := buildExploreConditions(request.Explore)
+	conditions, err = e.sentIdentityConditions(conditions)
+	if err != nil {
+		return nil, err
+	}
 	logical, _, cleanup, logicalErr := e.exploreLogicalSQLLocked(ctx, request.Explore, conditions, "NULL::BIGINT", false)
 	if logicalErr != nil {
 		return nil, logicalErr
 	}
 	defer cleanup()
-	entriesCTE, entryArgs := personEntriesCTE(exactID, clusterMemberIDs, conditions, request.Explore.Context.RowUnit == RowUnitEmailWork,
+	entriesCTE, entryArgs := personEntriesCTE(exactID, clusterMemberIDs, request.Explore.Context.RowUnit == RowUnitEmailWork,
 		e.parquetPath(datasetParticipantClusters))
 	args = append(args, entryArgs...)
 	// bestNameExpr is the shared cluster label policy (see person_label.go).
@@ -384,6 +398,10 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 	}
 	overrideExpr := sqlPersonNameOverrideExpr(e.parquetPath(datasetPersonDisplayNames), overrideFilter)
 	personWhere := []string{"true"}
+	populationFrom := "FROM person_entries pe JOIN participants p ON p.id = pe.person_id"
+	if keepInactive {
+		populationFrom = "FROM participants p LEFT JOIN person_entries pe ON pe.person_id = p.id"
+	}
 	if exactID != nil {
 		personWhere = append(personWhere, "person_id = ?")
 		args = append(args, *exactID)
@@ -456,11 +474,11 @@ func (e *DuckDBEngine) searchPeopleLegacy(
 		` + bestNameExpr + ` AS best_display_name,
 		` + overrideExpr + ` AS person_display_name,
 		` + sqlPersonIdentifierFallbackExpr("p") + ` AS fallback_label,
-		COUNT(*)::BIGINT AS activity_count,
+		COUNT(pe.person_id)::BIGINT AS activity_count,
 		COUNT(*) FILTER (WHERE pe.message_type = 'meeting_transcript')::BIGINT AS meeting_count,
 		COALESCE(SUM(pe.attachment_count), 0)::BIGINT AS file_count,
 		MIN(pe.occurred_at) AS first_at, MAX(pe.occurred_at) AS last_at
-	FROM person_entries pe JOIN participants p ON p.id = pe.person_id
+	` + populationFrom + `
 	GROUP BY p.id, p.display_name, p.email_address, p.phone_number
 ), filtered_people AS (
 	SELECT *, COALESCE(person_display_name, best_display_name, fallback_label) AS display_label,
@@ -496,14 +514,16 @@ FROM counted ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 	response := &PersonSearchResponse{Rows: make([]PersonSummary, 0), CacheRevision: state.Revision(), SearchProvenance: provenance}
 	for rows.Next() {
 		var row PersonSummary
+		var firstAt, lastAt sql.NullTime
 		var identifiersJSON, sourceCountsJSON string
 		if err := rows.Scan(&row.ID, &row.DisplayLabel, &row.DisplayName, &row.PartialLabel,
 			&identifiersJSON, &row.ActivityCount, &row.MeetingCount, &row.FileCount,
 			&row.CurrentRelationshipTemperature, &row.PeakRelationshipTemperature,
 			&row.PeakRelationshipYear, &sourceCountsJSON,
-			&row.FirstAt, &row.LastAt, &response.TotalCount); err != nil {
+			&firstAt, &lastAt, &response.TotalCount); err != nil {
 			return nil, fmt.Errorf("scan analytical person: %w", err)
 		}
+		row.FirstAt, row.LastAt = firstAt.Time, lastAt.Time
 		if err := json.Unmarshal([]byte(identifiersJSON), &row.Identifiers); err != nil {
 			return nil, fmt.Errorf("decode person identifiers: %w", err)
 		}
@@ -532,36 +552,11 @@ FROM counted ORDER BY ` + order + ` LIMIT ? OFFSET ?`
 // matched entry projects exactID as its person_id, so the aggregates and the
 // participants join downstream still key on the requested row.
 //
-// Three shapes, cheapest applicable first:
-//
-//  1. Exact-ID lookup with no analytical conditions (the person-detail
-//     endpoint): membership is resolved with semi-joins against the raw
-//     link tables, never touching logical_entries.participant_ids —
-//     unnesting that column forces the analytical_entries view to assemble
-//     per-message participant lists for the entire archive, which dominated
-//     person-detail latency. Equivalence with the fan-out shape: a non-chat
-//     entry is one message whose participants are its recipients plus its
-//     sender (the view's message_participant_links); a conversation entry's
-//     participants are the message-level participants of the group's chat
-//     messages plus the conversation's own participant rows. conversation_id
-//     is globally unique and NOT NULL, so matching it alone reproduces the
-//     (source_id, conversation_id) grouping exactly.
-//  2. Exact-ID lookup with conditions: logical entries whose
-//     relationship_activity edges carry the cluster's canonical ID, filtered
-//     inside the analytical context. The semi-join shape cannot be used
-//     because a conversation entry's membership must only reflect messages
-//     inside the filtered context — which the classified branch of
-//     sqlActivityEntryEdges preserves.
-//  3. Listing/search: direct relationship_activity edges per entry, each
-//     baking the alias-merged canonical ID, so a linked identity aggregates
-//     as ONE row keyed by its canonical ID — matching the ranked
-//     relationships list instead of splitting cluster members into partial
-//     rows. The UNION inside sqlActivityEntryEdges dedups to one
-//     (entry, canonical) row, so an entry listing several raw members of one
-//     cluster (e.g. cc'ing a contact's work and personal addresses) is never
-//     double-counted. The clusters/canon CTEs remain only for the caller's
-//     label, search-match, and identifier subqueries.
-func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work bool, clustersGlob string) (string, []any) {
+// Exact-ID lookup uses current raw participant membership within the analytical
+// context. Related-email families instead join all permitted family members
+// through activity edges, preserving family-level counts and source scope.
+// Listing/search aggregates activity edges by canonical identity.
+func personEntriesCTE(exactID *int64, memberIDs []int64, work bool, clustersGlob string) (string, []any) {
 	if exactID == nil {
 		return fmt.Sprintf(`
 ), clusters AS (
@@ -577,7 +572,7 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work
 	if len(memberIDs) == 0 {
 		memberIDs = []int64{*exactID}
 	}
-	if conditions != "true" || work {
+	if work {
 		// Membership resolves through relationship_activity's baked
 		// canonical_id rather than list_contains over aggregated member
 		// lists; the classified branch inside sqlActivityEntryEdges keeps a
@@ -622,19 +617,15 @@ func personEntriesCTE(exactID *int64, memberIDs []int64, conditions string, work
 ), person_chat_conversation_ids AS (
 	SELECT cp.conversation_id FROM conversation_participants cp WHERE cp.participant_id IN ` + memberList + `
 	UNION
-	SELECT m.conversation_id
-	FROM person_message_ids pm
-	JOIN messages m ON m.id = pm.message_id
-	LEFT JOIN conversations c ON c.id = m.conversation_id
-	WHERE ` + sqlIsChatPredicate("m.message_type", "COALESCE(c.conversation_type, '')") + `
+	SELECT f.conversation_id FROM classified f
+	WHERE f.is_chat AND f.message_id IN (SELECT message_id FROM person_message_ids)
 ), person_entries AS (
 	SELECT ?::BIGINT AS person_id, occurred_at, message_type, attachment_count, source_type
 	FROM logical_entries le
 	WHERE (le.entry_kind <> 'conversation'
 	       AND le.anchor_message_id IN (SELECT message_id FROM person_message_ids))
 	   OR (le.entry_kind = 'conversation'
-	       AND le.conversation_id IN (SELECT conversation_id FROM person_chat_conversation_ids))`,
-		args
+	       AND le.conversation_id IN (SELECT conversation_id FROM person_chat_conversation_ids))`, args
 }
 
 func (e *DuckDBEngine) SearchDomains(ctx context.Context, request DomainSearchRequest) (*DomainSearchResponse, error) {
@@ -694,15 +685,23 @@ func (e *DuckDBEngine) searchDomainsLegacy(ctx context.Context, request DomainSe
 		return nil, err
 	}
 	conditions, args := buildExploreConditions(request.Explore)
+	conditions, err = e.sentIdentityConditions(conditions)
+	if err != nil {
+		return nil, err
+	}
 	logical, _, cleanup, logicalErr := e.exploreLogicalSQLLocked(ctx, request.Explore, conditions, "NULL::BIGINT", false)
 	if logicalErr != nil {
 		return nil, logicalErr
 	}
 	defer cleanup()
 	domainWhere := []string{"domain <> ''"}
+	// An exact lookup reads only that domain's activity edges. Filtering after
+	// domain_population would first expand and aggregate every domain in the
+	// archive, which exhausts the interactive memory budget on large archives.
+	edgePredicate := "a.participant_domain <> ''"
 	if exactDomain != "" {
-		domainWhere = append(domainWhere, "domain = ?")
-		args = append(args, exactDomain)
+		edgePredicate = "a.participant_domain = ?"
+		args = append(args, exactDomain, exactDomain, exactDomain)
 	}
 	if searchText := strings.TrimSpace(request.Query); searchText != "" {
 		domainWhere = append(domainWhere, "contains(lower(domain), lower(?))")
@@ -731,7 +730,7 @@ func (e *DuckDBEngine) searchDomainsLegacy(ctx context.Context, request DomainSe
 				"a.is_direct AS is_direct, "+
 				"(le.entry_kind = 'conversation') AS is_chat_entry, "+
 				"le.occurred_at, le.attachment_count, le.source_type",
-			"a.participant_domain <> ''", "a.participant_domain <> ''") + `
+			edgePredicate, edgePredicate) + `
 ), domain_entries AS (
 	SELECT DISTINCT entry_key, domain, occurred_at, attachment_count, source_type
 	FROM domain_edges

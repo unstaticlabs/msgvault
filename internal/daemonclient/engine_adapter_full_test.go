@@ -552,23 +552,24 @@ func TestEngineGetMessagePreservesGeneratedDetailMetadata(t *testing.T) {
 	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal("/api/v1/messages/42", r.URL.Path, "path")
 		writeJSONResponse(t, w, map[string]any{
-			"id":                 42,
-			"source_message_id":  "msg-42",
-			"conversation_id":    7,
-			"subject":            "Generated detail",
-			"conversation_title": "Team chat",
-			"message_type":       "sms",
-			"from":               "Alice <alice@example.com>",
-			"from_email":         "alice@example.com",
-			"from_name":          "Alice",
-			"to":                 []string{"bob@example.com"},
-			"sent_at":            "2024-01-15T10:30:00Z",
-			"deleted_at":         deletedAt,
-			"snippet":            "preview",
-			"labels":             []string{"INBOX"},
-			"has_attachments":    true,
-			"size_bytes":         2048,
-			"body":               "Hello, generated world!",
+			"id":                  42,
+			"source_message_id":   "msg-42",
+			"conversation_id":     7,
+			"subject":             "Generated detail",
+			"conversation_title":  "Team chat",
+			"message_type":        "sms",
+			"from":                "Alice <alice@example.com>",
+			"from_email":          "alice@example.com",
+			"from_name":           "Alice",
+			"to":                  []string{"bob@example.com"},
+			"sent_at":             "2024-01-15T10:30:00Z",
+			"deleted_at":          deletedAt,
+			"snippet":             "preview",
+			"labels":              []string{"INBOX"},
+			"has_attachments":     true,
+			"size_bytes":          2048,
+			"body":                "Hello, generated world!",
+			"hidden_text_present": true,
 			"attachments": []map[string]any{{
 				"id":           52,
 				"filename":     "doc.pdf",
@@ -589,6 +590,7 @@ func TestEngineGetMessagePreservesGeneratedDetailMetadata(t *testing.T) {
 	assert.Equal("Team chat", msg.ConversationTitle, "ConversationTitle")
 	assert.Equal(store.baseURL+"/messages/42", msg.WebURL)
 	assert.Equal("sms", msg.MessageType, "MessageType")
+	assert.True(msg.HiddenTextPresent)
 	require.NotNil(msg.DeletedAt, "DeletedAt")
 	assert.Equal(deletedAt, msg.DeletedAt.UTC().Format(time.RFC3339), "DeletedAt")
 	assert.True(msg.HasAttachments, "HasAttachments")
@@ -1013,6 +1015,57 @@ func TestEngineGetDeletionTargetsBySearchUsesVersionedExactScope(t *testing.T) {
 	}}, targets)
 }
 
+func TestEngineGetDeletionTargetsBySearchBoundedGatesOnDaemonSchemaAndForwardsMaxResults(t *testing.T) {
+	for _, tc := range []struct {
+		name, schema string
+	}{
+		{"supported daemon", "3.26.0"},
+		{"older daemon", "3.25.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions := assert.New(t)
+			requirements := require.New(t)
+			var healthRequests, targetRequests int
+			store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/health":
+					healthRequests++
+					writeJSONResponse(t, w, map[string]any{"status": "ok", "api_schema_version": tc.schema})
+				case "/api/v1/messages/gmail-ids":
+					targetRequests++
+					assertions.Equal("100001", r.URL.Query().Get("max_results"))
+					writeJSONResponse(t, w, map[string]any{
+						"gmail_ids": []string{"gm-1"}, "search_query": "bodyneedle",
+						"search_mode": "fast", "matched_count": 2,
+						"targets": []map[string]any{{
+							"message_id": 1, "source_id": 7, "source_type": "gmail",
+							"source_identifier": "account@example.test", "source_message_id": "gm-1",
+						}},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			})
+
+			_, matched, err := NewEngineAdapter(store).GetDeletionTargetsBySearchBounded(
+				t.Context(), search.Parse("bodyneedle"), query.MessageFilter{},
+				query.DeletionSearchFast, query.MaxDeletionTargetSearchResults,
+			)
+			assertions.Equal(1, healthRequests)
+			if tc.schema == "3.25.0" {
+				requirements.ErrorIs(err, ErrBoundedDeletionSearchUnsupported)
+				requirements.ErrorContains(err, "requires daemon API schema 3.26.0 or newer")
+				requirements.ErrorContains(err, "upgrade the daemon and retry")
+				assertions.Zero(targetRequests)
+				return
+			}
+			requirements.NoError(err)
+			assertions.Equal(2, matched)
+			assertions.Equal(1, targetRequests)
+		})
+	}
+}
+
 func TestEngineGetDeletionTargetsByAggregateSearchForwardsDisplayedRow(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)
@@ -1144,14 +1197,14 @@ func TestEngineSearchByDomainsUsesGeneratedClientAdapter(t *testing.T) {
 		assert.Equal("example.com,test.org", r.URL.Query().Get("domains"), "domains")
 		assert.Equal(after.Format(time.RFC3339), r.URL.Query().Get("after"), "after")
 		assert.Equal(before.Format(time.RFC3339), r.URL.Query().Get("before"), "before")
-		assert.Equal("25", r.URL.Query().Get("limit"), "limit")
+		assert.Equal("1", r.URL.Query().Get("limit"), "limit")
 		assert.Equal("50", r.URL.Query().Get("offset"), "offset")
 		assert.Equal([]string{"4", "7"}, r.URL.Query()["source_ids"], "source scope")
 		writeJSONResponse(t, w, map[string]any{
 			"count":    1,
-			"has_more": false,
+			"has_more": true,
 			"offset":   50,
-			"limit":    25,
+			"limit":    1,
 			"messages": []map[string]any{
 				{
 					"id":              84,
@@ -1175,14 +1228,15 @@ func TestEngineSearchByDomainsUsesGeneratedClientAdapter(t *testing.T) {
 		[]string{"example.com", "test.org"},
 		&after,
 		&before,
-		25,
+		1,
 		50,
 		[]int64{4, 7},
 	)
 	require.NoError(err, "SearchByDomains")
-	require.Len(results, 1, "results")
-	assert.Equal(int64(84), results[0].ID, "ID")
-	assert.Equal("alice@example.com", results[0].FromEmail, "FromEmail")
+	require.Len(results.Messages, 1, "results")
+	assert.Equal(int64(84), results.Messages[0].ID, "ID")
+	assert.Equal("alice@example.com", results.Messages[0].FromEmail, "FromEmail")
+	assert.True(results.HasMore, "daemon has_more survives the adapter")
 }
 
 func TestEngineTimeFiltersPreserveUTCNanoseconds(t *testing.T) {
@@ -1713,6 +1767,7 @@ func TestEngineGetMessageSummariesByIDs_CarriesFromAndAttachmentCount(t *testing
 				{"filename": "a.pdf", "mime_type": "application/pdf", "size": 100},
 				{"filename": "b.txt", "mime_type": "text/plain", "size": 50},
 			},
+			"hidden_text_present": true,
 		})
 	}))
 	defer srv.Close()
@@ -1729,7 +1784,44 @@ func TestEngineGetMessageSummariesByIDs_CarriesFromAndAttachmentCount(t *testing
 	assert.True(s.HasAttachments, "HasAttachments")
 	require.NotNil(s.DeletedAt)
 	assert.Equal("2024-01-16T10:30:00Z", s.DeletedAt.Format(time.RFC3339))
+	assert.True(s.HiddenTextPresent, "HiddenTextPresent")
 }
+
+func TestEngineGetMessageSummariesByIDsPreservesDeletedAt(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	deletedAt, err := time.Parse(time.RFC3339Nano, "2026-03-18T15:00:00.123456789-07:00")
+	require.NoError(err)
+	epoch := time.Unix(0, 0).UTC()
+	fixtures := map[string]map[string]any{
+		"/api/v1/messages/42": {"id": 42, "deleted_at": deletedAt.Format(time.RFC3339Nano)},
+		"/api/v1/messages/7":  {"id": 7},
+		"/api/v1/messages/99": {"id": 99, "deleted_at": nil},
+		"/api/v1/messages/3":  {"id": 3, "deleted_at": epoch.Format(time.RFC3339Nano)},
+	}
+	store := newGeneratedClientAdapterStore(t, func(w http.ResponseWriter, r *http.Request) {
+		fixture, ok := fixtures[r.URL.Path]
+		assert.True(ok, "unexpected path: %s", r.URL.Path)
+		writeJSONResponse(t, w, fixture)
+	})
+	engine := NewEngineAdapter(store)
+	ids := []int64{42, 7, 99, 3, 42}
+	want := []*time.Time{&deletedAt, nil, nil, &epoch, &deletedAt}
+
+	summaries, err := engine.GetMessageSummariesByIDs(context.Background(), ids)
+	require.NoError(err)
+	require.Len(summaries, len(ids))
+	for i, summary := range summaries {
+		assert.Equal(ids[i], summary.ID)
+		if want[i] == nil {
+			assert.Nil(summary.DeletedAt, "message %d", summary.ID)
+			continue
+		}
+		require.NotNil(summary.DeletedAt, "message %d", summary.ID)
+		assert.Equal(want[i].UTC(), summary.DeletedAt.UTC(), "message %d", summary.ID)
+	}
+}
+
 func TestEngineSearchSerializesMessageTypes(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -2139,13 +2231,14 @@ func TestEngineSearchMessageBodiesForwardsAndRequiresScopeEcho(t *testing.T) {
 			"offset":      2,
 			"limit":       5,
 			"messages": []map[string]any{{
-				"id":         42,
-				"subject":    "body hit",
-				"from":       "sender@example.com",
-				"sent_at":    "2024-01-15T10:30:00Z",
-				"snippet":    "preview",
-				"labels":     []string{},
-				"size_bytes": 100,
+				"id":                  42,
+				"subject":             "body hit",
+				"hidden_text_present": true,
+				"from":                "sender@example.com",
+				"sent_at":             "2024-01-15T10:30:00Z",
+				"snippet":             "preview",
+				"labels":              []string{},
+				"size_bytes":          100,
 			}},
 			"body_contexts": []map[string]any{{
 				"message_id":                 42,
@@ -2164,6 +2257,7 @@ func TestEngineSearchMessageBodiesForwardsAndRequiresScopeEcho(t *testing.T) {
 	require.Len(t, messages.Messages, 1)
 	assert.Equal("unverified", messages.IndexState)
 	assert.Equal(int64(42), messages.Messages[0].ID, "body hit ID")
+	assert.True(messages.Messages[0].HiddenTextPresent)
 	assert.Equal([]string{"exact daemon context"}, messages.Messages[0].BodyContextSnippets)
 	assert.True(messages.Messages[0].BodyContextSnippetsTruncated)
 }

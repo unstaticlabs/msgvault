@@ -20,6 +20,7 @@ import (
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestRepairDatesAlwaysProxiesThroughDaemonCLIRunner(t *testing.T) {
@@ -66,9 +67,7 @@ func TestRunRepairDatesLocalDryRunApplyAndIdempotency(t *testing.T) {
 	_ = testCtx
 	t.Cleanup(func() { cfg = savedCfg })
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 	source, err := st.GetOrCreateSource("gmail", "archive@example.com")
 	require.NoError(err)
 	conversationID, err := st.EnsureConversation(
@@ -224,9 +223,7 @@ func TestRunRepairDatesLocalReportsUnresolvedReasons(t *testing.T) {
 	_ = testCtx
 	t.Cleanup(func() { cfg = savedCfg })
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 	source, err := st.GetOrCreateSource("apple-mail", "archive@example.com")
 	require.NoError(err)
 	conversationID, err := st.EnsureConversation(
@@ -311,10 +308,7 @@ func TestApplyPlannedDateRepairsRecordsGuardFailure(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	dataDir := t.TempDir()
-	st, err := store.OpenForTest(filepath.Join(dataDir, "msgvault.db"))
-	require.NoError(err)
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(dataDir, "msgvault.db"))
 	source, err := st.GetOrCreateSource("gmail", "archive@example.com")
 	require.NoError(err)
 	conversationID, err := st.EnsureConversation(
@@ -420,9 +414,7 @@ func TestRunRepairDatesLocalInvalidatesAndUnlocksCacheWhenApplyFails(t *testing.
 	_ = testCtx
 	t.Cleanup(func() { cfg = savedCfg })
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 	source, err := st.GetOrCreateSource("gmail", "archive@example.com")
 	require.NoError(err)
 	conversationID, err := st.EnsureConversation(
@@ -473,11 +465,11 @@ func TestRunRepairDatesLocalInvalidatesAndUnlocksCacheWhenApplyFails(t *testing.
 	_, statErr := os.Stat(statePath)
 	require.ErrorIs(statErr, os.ErrNotExist)
 
-	cacheLock, err := cacheBuildFileLock(cfg.AnalyticsDir())
+	cacheLock, err := cacheBuilderFileLock(cfg.AnalyticsDir())
 	require.NoError(err)
 	locked, err := cacheLock.TryLock()
 	require.NoError(err)
-	require.True(locked, "date repair must release the cache lock on failure")
+	require.True(locked, "date repair must release the builder lock on failure")
 	require.NoError(cacheLock.Unlock())
 }
 
@@ -496,9 +488,7 @@ func TestRunRepairDatesLocalReportsCommittedRepairWhenContactInvalidationFails(t
 	_ = testCtx
 	t.Cleanup(func() { cfg = savedCfg })
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 	source, err := st.GetOrCreateSource("gmail", "archive@example.com")
 	require.NoError(err)
 	conversationID, err := st.EnsureConversation(

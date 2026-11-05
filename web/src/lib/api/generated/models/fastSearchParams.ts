@@ -4,11 +4,11 @@
 
 export type FastSearchParams = {
   /**
-   * Search query
+   * Search query; full text accepts standalone pipe-separated OR alternatives
    */
   q: string;
   /**
-   * Stats grouping view type
+   * Request aggregate stats grouped by this view; omit to skip stats
    */
   view_type?: string;
   /**

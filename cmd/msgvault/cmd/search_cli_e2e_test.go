@@ -23,7 +23,7 @@ import (
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/query"
-	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/hybrid"
@@ -43,10 +43,7 @@ func TestSearchDiscoverabilityBuiltCLI(t *testing.T) {
 	require.NoError(err)
 	root := t.TempDir()
 	dbPath := filepath.Join(root, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err)
-	t.Cleanup(func() { require.NoError(st.Close()) })
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	source, err := st.GetOrCreateSource("gmail", "archive@example.com")
 	require.NoError(err)
 	conv, err := st.EnsureConversation(source.ID, "synthetic-thread", "Project plan")
@@ -103,8 +100,18 @@ func TestSearchDiscoverabilityBuiltCLI(t *testing.T) {
 		decoder.UseNumber()
 		require.NoError(decoder.Decode(value))
 	}
+	command := exec.CommandContext(t.Context(), binary, "--home", home, "search", "from:@a.example OR from:@b.example", "--json") //nolint:gosec // The binary path is supplied by the test operator.
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "USERPROFILE=" + home, "TMPDIR=" + root, "NO_COLOR=1"}
+	var jsonOut, warningOut bytes.Buffer
+	command.Stdout, command.Stderr = &jsonOut, &warningOut
+	require.NoError(command.Run())
+	var warningResults []map[string]any
+	decode(jsonOut.String(), &warningResults)
+	assert.Contains(warningOut.String(), `OR was matched as a literal word`)
 	// The stored preview lacks this term, so this proves --snippet reaches the daemon's include_snippet path.
 	out := run("search", "contextneedle", "--snippet")
+	assert.Contains(out, "contextneedle")
+	out = run("search", "contextneedle | missingterm", "--snippet")
 	assert.Contains(out, "contextneedle")
 	// These searches cover filename and metadata propagation across the CLI, daemon and retrieval adapters.
 	out = run("search", "filename:plan.pdf", "--json")

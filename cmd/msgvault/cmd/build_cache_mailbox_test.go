@@ -206,6 +206,44 @@ func TestBuildCacheIMAPFlagsRefreshAndCSVFallback(t *testing.T) {
 			repeated, err := buildCache(dbPath, cache, false)
 			requirements.NoError(err)
 			assertions.True(repeated.Skipped)
+			// Exercise the real DuckDB publisher rather than SQLite's different
+			// JSON predicates. Historical flags can be malformed or non-string.
+			// Such metadata never becomes positive read, Draft, or completeness
+			// evidence; valid arrays retain their original provider meaning.
+			deliveryDB, err := sql.Open("duckdb", "")
+			requirements.NoError(err)
+			defer func() { requirements.NoError(deliveryDB.Close()) }()
+			for _, flagsCase := range []struct {
+				name, flags, read string
+				draft, complete   bool
+			}{
+				{name: "draft and seen", flags: `["\\Draft","\\Seen"]`, read: "read", draft: true, complete: true},
+				{name: "lowercase seen", flags: `["\\seen"]`, read: "read", complete: true},
+				{name: "empty flags", flags: `[]`, read: "unread", complete: true},
+				{name: "object", flags: `{"seen":true}`, read: "unknown"},
+				{name: "non-string element", flags: `[1]`, read: "unknown"},
+				{name: "mixed array", flags: `["\\Seen",null]`, read: "unknown"},
+				{name: "invalid JSON", flags: `not-json`, read: "unknown"},
+				{name: "null", flags: `null`, read: "unknown"},
+			} {
+				t.Run(flagsCase.name, func(t *testing.T) {
+					assertions, requirements := assert.New(t), require.New(t)
+					_, err := st.DB().Exec("UPDATE imap_message_memberships SET flags = ? WHERE source_id = ?", flagsCase.flags, source.ID)
+					requirements.NoError(err)
+					// Raw historical rows intentionally bypass provider mutation APIs
+					// and their invalidation journal, so publish a full snapshot.
+					published, err := buildCache(dbPath, cache, true)
+					requirements.NoError(err)
+					assertions.False(published.Skipped)
+					assertions.Equal([]string{"inbox", flagsCase.read}, state())
+					var draft, complete bool
+					deliveryPath := strings.ReplaceAll(filepath.ToSlash(filepath.Join(cache, query.DatasetEmailWorkDelivery, "*.parquet")), "'", "''")
+					err = deliveryDB.QueryRow(fmt.Sprintf("SELECT native_draft, provider_complete FROM read_parquet('%s') WHERE message_id = ?", deliveryPath), id).Scan(&draft, &complete)
+					requirements.NoError(err)
+					assertions.Equal(flagsCase.draft, draft)
+					assertions.Equal(flagsCase.complete, complete)
+				})
+			}
 		})
 	}
 }

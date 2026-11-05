@@ -4,10 +4,18 @@
   import { ArchiveMessageLoader } from '../../archive/message-loader.svelte';
   import type { APIClient } from '../../api/client';
   import ConversationView from './ConversationView.svelte';
+  import { reportError } from '../../telemetry/actions';
 
-  let { client, messageID }: { client: APIClient; messageID: number } = $props();
+  let { client, messageID, onOpenPerson, onOpenSettings }: { client: APIClient; messageID: number; onOpenPerson?: (participantID: number) => void; onOpenSettings?: () => void } = $props();
   const loader = new ArchiveMessageLoader();
+  const restoredReader = window.history.state?.messageReader as { messageID: number; anchor: number } | undefined;
   let retry = $state(0);
+
+  function rememberAnchor(anchor: number): void {
+    window.history.replaceState({ ...window.history.state, messageReader: { messageID, anchor } }, '');
+  }
+
+  $effect(() => { if (loader.error) return reportError(() => client, () => 'message'); });
 
   $effect(() => {
     void retry;
@@ -25,14 +33,14 @@
     <p role="alert">{loader.error}</p>
     <Button onclick={() => retry += 1}>Retry</Button>
   {:else if loader.detail}
-    <ConversationView {client} conversationId={loader.detail.conversation_id!} anchorId={loader.detail.id!} />
+    <ConversationView {client} {onOpenPerson} {onOpenSettings} conversationId={loader.detail.conversation_id!} anchorId={restoredReader?.messageID === messageID ? restoredReader.anchor : loader.detail.id!} onAnchorChange={rememberAnchor} />
   {:else}
     <p role="status">Loading message…</p>
   {/if}
 </main>
 
 <style>
-  .message-page { display: flex; flex-direction: column; height: 100dvh; padding: 1rem; }
-  header { display: flex; align-items: center; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
-  h1 { min-width: 0; overflow-wrap: anywhere; font-size: 1rem; font-weight: 600; }
+  .message-page { display: flex; flex-direction: column; height: 100dvh; padding: var(--space-5) var(--page-gutter) var(--field-gap); }
+  header { display: flex; align-items: center; flex-wrap: wrap; gap: var(--field-gap); margin-bottom: var(--field-gap); }
+  h1 { min-width: 0; overflow-wrap: anywhere; font-size: var(--font-size-xl); font-weight: 600; }
 </style>

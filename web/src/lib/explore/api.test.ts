@@ -61,7 +61,7 @@ describe('ExploreAPI routing', () => {
     });
   });
 
-  it('passes cursors and cancellation through the session-aware entry request', async () => {
+  it.each([{ scope: undefined, path: '/api/v1/explore' }, { scope: { kind: 'person', id: 42 }, path: '/api/v1/participants/42/timeline' }, { scope: { kind: 'domain', domain: 'example.net' }, path: '/api/v1/domains/example.net/timeline' }] as const)('passes cursors and cancellation through $path requests', async ({ scope, path }) => {
     const requests: Request[] = [];
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
       const request = input instanceof Request ? input : new Request(input);
@@ -75,12 +75,12 @@ describe('ExploreAPI routing', () => {
       });
     });
     const controller = new AbortController();
-    const api = createExploreAPI(createAPIClient(fetchFn));
+    const api = createExploreAPI(createAPIClient(fetchFn), scope);
 
     await api.explore({ filters: [], presentation: 'table', limit: 500, cursor: 'page-1' }, controller.signal);
 
     expect(requests).toHaveLength(1);
-    expect(new URL(requests[0]!.url).pathname).toBe('/api/v1/explore');
+    expect(new URL(requests[0]!.url).pathname).toBe(path);
     controller.abort();
     expect(requests[0]!.signal.aborted).toBe(true);
     await expect(requests[0]!.json()).resolves.toMatchObject({ cursor: 'page-1', limit: 500 });
@@ -147,6 +147,19 @@ describe('ExploreAPI routing', () => {
       predicate: { filters: [{ dimension: 'source', values: ['7'] }], presentation: 'table', limit: 500 },
       filename_query: 'invoice', mime_families: ['pdf'], grouping: ['participant'], limit: 500
     });
+  });
+
+  it('preserves full-text warnings in entry and grouped results', async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () => Response.json({
+      rows: [], total_count: 0, cache_revision: 'cache-1', search_provenance: {},
+      warnings: ['OR was matched as a literal word; use " | " between alternatives.']
+    }));
+    const api = createExploreAPI(createAPIClient(fetchFn));
+    const predicate = { query: 'alpha OR beta', search_mode: 'full_text' as const, filters: [], presentation: 'table' as const, limit: 500 };
+    const entries = await api.explore(predicate);
+    const groups = await api.groups(predicate, 'source');
+    expect(entries.status === 'ready' && entries.result.warnings).toHaveLength(1);
+    expect(groups.status === 'ready' && groups.result.warnings).toHaveLength(1);
   });
 
   it('preserves the declared active-only deletion scope for entry and grouped results', async () => {

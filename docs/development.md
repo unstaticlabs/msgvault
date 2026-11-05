@@ -5,8 +5,8 @@ description: Build, test, lint, and code conventions.
 
 ## Build
 
-The macOS and Linux builds require Go 1.27+, Bun 1.3.14+, Node.js (20.19+ on
-20.x, 22.13+ on 22.x, or 24+), and a C/C++ compiler. The Make targets install
+The macOS and Linux builds require Go 1.27.3+, Bun 1.4.4+, Node.js (22.23.4+ on
+22.x, 24.22.1+ on 24.x, or 26.12.1+), and a C/C++ compiler. The Make targets install
 the pinned browser dependencies when `web/package.json` or `web/bun.lock`
 changes, then embed the production UI in the Go binary; Node runs the embed
 validator in that path. On Debian/Ubuntu also install `libsqlite3-dev`, which
@@ -24,7 +24,38 @@ make build-release
 
 # Install to ~/.local/bin or GOPATH
 make install
+
+# Homebrew formula build into $BINDIR (default bin/)
+make homebrew VERSION=1.2.3
 ```
+
+`make homebrew` is the normal build with `DISTRIBUTION=homebrew`, so the binary
+refuses `msgvault update` and points at `brew upgrade msgvault`. It adds the
+`duckdb_use_lib` tag, which links a system `libduckdb`; set `CGO_LDFLAGS` (and
+`CGO_CFLAGS` for headers) when that library is outside the default search path.
+
+### Share the Go build cache across worktrees
+
+Make targets compile Go with `-trimpath`, so binaries record module-relative
+source paths instead of absolute ones. Without it, Go caches every package
+separately for each checkout directory, and each git worktree grows the build
+cache by another full copy. With it, identical source in any checkout reuses
+the same cache entries.
+
+- Run `make <target> GOFLAGS=-trimpath=false` to opt out for one command.
+- Plain `go` commands outside Make do not add the flag. Run
+  `go env -w GOFLAGS=-trimpath` to make it your default; Make keeps any value
+  saved that way.
+
+Debuggers need a source mapping for trimmed binaries:
+
+- `dlv debug` and `dlv test` inherit `GOFLAGS` and cannot find source files.
+  Pass `--build-flags=-trimpath=false`. Debug builds disable optimizations, so
+  they never shared cache entries anyway.
+- For `dlv exec` or `dlv attach` on a trimmed binary, start Delve from the
+  repository root and run `config substitute-path -guess` (Delve 1.24 or
+  later). It maps the module path to your checkout, the standard library to
+  `GOROOT`, and dependencies to the module cache.
 
 ### Windows
 
@@ -96,10 +127,10 @@ config file and verifies that its minted daemon key survives a restart.
 with networking disabled. These commands build and check local artifacts; they
 do not publish them.
 
-Repository-owned release-publishing workflows and the old release/tagging
-scripts have been removed. Pushing a tag no longer invokes those publishers. The
-Docker inputs, local build commands, installers, and ordinary CI remain
-available.
+Upstream no longer publishes through its former release scripts. This downstream
+distribution retains its own binary and image publishing workflows. See the
+[downstream build](https://github.com/unstaticlabs/msgvault/blob/main/docs/internal/downstream-build.md) for repository roles, version
+tags and deployment provenance. Local build commands do not publish artifacts.
 
 ## Test
 
@@ -133,15 +164,20 @@ goroutines, channels, timers, tickers, and fakes. Advance virtual time with
 
 Keep real waits for PostgreSQL and SQLite locks, database clocks, network
 requests, subprocesses, DuckDB, and operating-system events.
+Call Kit's `stacktest.Dump(t)` before failing a timeout while waiting on goroutines.
 
 `make lint` and `make lint-ci` build a pinned golangci-lint with Kit's
 `kennlint` plugin and run its `sleeptest` and `deadlinetest` checks. Outside a
 `synctest.Test` bubble, `sleeptest` rejects `time.Sleep` and `deadlinetest`
 rejects sub-second `context.WithTimeout`, `context.WithDeadline`, `time.After`,
-`time.NewTimer`, `time.AfterFunc` and testify `Eventually` budgets, plus zero
-or negative `Never` windows. A kept real wait carries `//nolint:kennlint //
-<what it waits for>` on the flagged line; for a deadline, that is only when its
-expiry is the asserted result or a `select` shows an event does not happen.
+`time.NewTimer`, `time.AfterFunc`, and testify `Eventually` budgets, plus zero
+or negative `Never` windows. It also checks duration fields and same-module
+helper parameters whose camelCase or snake_case names contain a `timeout`,
+`deadline`, `budget`, or `wait` word, including plurals. Standalone
+`time.Now().Add` deadlines are checked too. A kept real wait carries
+`//nolint:kennlint // sleeptest: <what it waits for>` on the flagged line.
+Use `deadlinetest:` for a deadline, only when its expiry is the asserted result
+or a `select` shows an event does not happen.
 
 ### PostgreSQL tests
 
@@ -185,6 +221,13 @@ server releases when the binary exits, so the next binary reclaims whatever an
 earlier one left behind; a role without `CREATEDB` falls back to a private
 schema in the configured database.
 
+`dbtest.NewTestDB` copies an in-memory `schema.sql` template per test with
+SQLite's backup API.
+Query Parquet fixtures are built once per distinct content and copied per test,
+so each test can change its own directory freely.
+Query tests call `t.Parallel()`; a test that replaces a package global stays
+serial and explains why in a `// serial:` comment.
+
 
 ### Local test scheduling
 
@@ -214,12 +257,38 @@ The PostgreSQL targets keep their existing connection-oriented concurrency
 limits; setting `MSGVAULT_TEST_DB` disables automatic scaling in `make test` too.
 CI's explicit `test-unsharded` and package-shard jobs keep their existing layout.
 
-Windows CI also runs the store package through `scripts/test-package-shards.ps1`.
-The runner starts from four shards and adds more when needed to keep test-name
-patterns within the Windows command-line limit. The complete store suite can
-exceed its one-hour package budget on a hosted runner. Sharding keeps every test
-and gives each shard a 60-minute timeout; it increases the aggregate allowance
-while sharing the work across processes.
+Go tests run through [gotestsum](https://github.com/gotestyourself/gotestsum),
+a tool dependency in `go.mod`. `make test`, the PostgreSQL targets, and CI's
+inline test steps rerun each failed test up to twice and list rerun tests in
+`gotestsum/<suite>-reruns.txt`. Every run records its `go test -json` events in
+`gotestsum/<suite>.json`. CI uploads those files as
+`gotestsum-<suite>-attempt-<n>` artifacts when a step fails, when gotestsum
+reruns a test, and on every rerun attempt of the workflow, so a test that failed
+in one attempt can be matched with its result in the next.
+
+The shard scripts do not rerun tests. They write every shard's events to
+`gotestsum/<suite>.json`, where the suite defaults to the package's last path
+element. Successful shards print named passing and skipped test outcomes,
+including subtests, followed by the package line `go test` prints. Failed
+shards print the full verbose test output, then the package's `FAIL` line.
+
+Bash shards balance test time with recorded durations from a package's
+`testdata/shard-weights-<backend>.txt`. Only PostgreSQL store has a weights
+file; a missing file keeps round-robin assignment. Unlisted tests get the median
+recorded duration, and removed tests are ignored. Each successful shard line
+reports its summed top-level test-seconds. Refresh
+`internal/store/testdata/shard-weights-postgres.txt` from a recent successful
+main run's `test-postgres-sharded (store)` job with:
+
+```bash
+gh run view -R kenn-io/msgvault --job <job-id> --log | cut -f3- | sed 's/^[^ ]* //' | grep -E '^--- (PASS|SKIP|FAIL): ' | sort
+```
+
+In CI, Vitest and Playwright retry a failed test twice and write JSON reports
+under `web/test-results/vitest/` and `web/test-results/playwright/`. CI uploads
+each report as a `vitest-<suite>-attempt-<n>` or
+`playwright-<suite>-attempt-<n>` artifact. `MSGVAULT_PLAYWRIGHT_SUITE` names a
+Playwright run's report.
 
 ## Lint & Format
 
@@ -466,7 +535,7 @@ versions before DDL and stamps this version only after its required steps succee
 using the caller's context. Keep optional and best-effort maintenance behavior separate from that
 completion guarantee.
 
-The initial contract is new on `main`, after v0.21.0. Existing archives start at
+The contract began in 0.22.0. Existing archives start at
 `0`; successful initialization upgrades them to the binary's expected version.
 The [CLI reference](cli-reference.md#schema-version) owns the probe contract,
 and [Setup](setup.md#migrate-before-replacing-the-executable) owns the operator

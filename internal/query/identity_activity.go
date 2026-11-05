@@ -23,6 +23,7 @@ func identityRequestIsUnfiltered(request ExploreRequest) bool {
 		len(context.AdditionalParticipantGroups) == 0 &&
 		len(context.AdditionalDomainGroups) == 0 &&
 		len(context.MessageTypes) == 0 &&
+		len(context.Kinds) == 0 &&
 		context.After == nil &&
 		context.Before == nil &&
 		context.Deletion == DeletionAny &&
@@ -37,6 +38,30 @@ func identityRequestIsSourceOnly(request ExploreRequest) bool {
 	}
 	request.Context.SourceIDs = nil
 	return identityRequestIsUnfiltered(request)
+}
+
+// sentIdentityConditions filters before logical grouping so drafts cannot
+// become chat anchors or change identity counts. Explore keeps the full set.
+func sentIdentityConditions(conditions string) string {
+	return conditions + ` AND NOT EXISTS (
+		SELECT 1 FROM relationship_unsent_messages a
+		WHERE a.message_id = analytical_entries.message_id
+	)`
+}
+
+// sentIdentityConditions rejects contact reads until the committed exclusion
+// set loads successfully. Base-message lookups can keep using their Parquet.
+func (e *DuckDBEngine) sentIdentityConditions(conditions string) (string, error) {
+	if err := e.relationshipQuerySetsError(); err != nil {
+		return "", err
+	}
+	return sentIdentityConditions(conditions), nil
+}
+
+func (e *DuckDBEngine) relationshipQuerySetsError() error {
+	e.optColsMu.RLock()
+	defer e.optColsMu.RUnlock()
+	return e.unsentRefreshErr
 }
 
 // buildIdentityLogicalSQL renders the context-filtered logical-entry
@@ -65,6 +90,10 @@ func (e *DuckDBEngine) buildIdentityLogicalSQL(
 		return "", nil, nil, err
 	}
 	conditions, args := buildExploreConditions(request)
+	conditions, err = e.sentIdentityConditions(conditions)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	logical, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, request, conditions, "NULL::BIGINT", false)
 	if err != nil {
 		return "", nil, nil, err
@@ -163,6 +192,10 @@ func (e *DuckDBEngine) buildIdentityDomainLogicalSQL(
 		return "", nil, nil, err
 	}
 	conditions, args := buildExploreConditions(request)
+	conditions, err = e.sentIdentityConditions(conditions)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	logical, _, cleanup, err := e.exploreLogicalSQLLocked(ctx, request, conditions, "NULL::BIGINT", false)
 	if err != nil {
 		return "", nil, nil, err
@@ -228,11 +261,18 @@ func (e *DuckDBEngine) narrowIdentityFactCandidates(
 		!identityRequestHasEdgeFilters(request) {
 		return request, nil
 	}
-	conditions, args := buildIdentityFactConditions(request)
+	conditions, conditionArgs := buildIdentityFactConditions(request)
+	// Every message-level column of f is the same on each of a message's edge
+	// rows, and every qualifying message has an edge row matching its first
+	// participant or domain group. Matching that group on f directly lets
+	// DuckDB push it into the expanded view. With only the EXISTS conditions,
+	// f read every edge in the archive, including each expanded chat roster.
+	leading, args := identityLeadingEdgeCondition(request)
+	args = append(args, conditionArgs...)
 	queryText := `
 SELECT f.message_id
 FROM relationship_activity_expanded f
-WHERE ` + conditions + `
+WHERE ` + leading + ` AND ` + conditions + `
 GROUP BY f.message_id
 LIMIT ?`
 	args = append(args, MaxExploreCandidateMessageIDs+1)
@@ -263,6 +303,28 @@ LIMIT ?`
 	request.Context.AdditionalDomainGroups = nil
 	request.Search.CandidateMessageIDs = messageIDs
 	return request, nil
+}
+
+// identityLeadingEdgeCondition renders the request's first participant or
+// domain group as a predicate on the edge alias f.
+func identityLeadingEdgeCondition(request ExploreRequest) (string, []any) {
+	var parts []string
+	var args []any
+	switch {
+	case len(request.Context.ParticipantIDs) > 0:
+		for _, value := range request.Context.ParticipantIDs {
+			parts = append(parts, "f.canonical_id = ?")
+			args = append(args, value)
+		}
+	case len(request.Context.Domains) > 0:
+		for _, value := range request.Context.Domains {
+			parts = append(parts, "lower(f.participant_domain) = ?")
+			args = append(args, strings.ToLower(strings.TrimSpace(value)))
+		}
+	default:
+		return "true", nil
+	}
+	return "(" + strings.Join(parts, " OR ") + ")", args
 }
 
 // buildIdentityFactConditions renders the message-level filter for the alias
@@ -343,6 +405,14 @@ func buildIdentityFactConditions(request ExploreRequest) (string, []any) {
 		conditions = append(conditions, condition)
 		args = append(args, conditionArgs...)
 	}
+	if len(request.Context.Kinds) > 0 {
+		placeholders := make([]string, len(request.Context.Kinds))
+		for i, kind := range request.Context.Kinds {
+			placeholders[i] = "?"
+			args = append(args, string(kind))
+		}
+		conditions = append(conditions, "(CASE WHEN f.is_chat THEN 'conversation' ELSE f.entry_kind END) IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if request.Context.After != nil {
 		conditions = append(conditions, "f.occurred_at >= CAST(? AS TIMESTAMP)")
 		args = append(args, duckDBDateParam(*request.Context.After))
@@ -362,13 +432,8 @@ func buildIdentityFactConditions(request ExploreRequest) (string, []any) {
 		if len(request.Search.CandidateMessageIDs) == 0 {
 			conditions = append(conditions, "false")
 		} else {
-			placeholders := make([]string, len(request.Search.CandidateMessageIDs))
-			for index, messageID := range request.Search.CandidateMessageIDs {
-				placeholders[index] = "?"
-				args = append(args, messageID)
-			}
-			conditions = append(conditions,
-				"f.message_id IN ("+strings.Join(placeholders, ",")+")")
+			conditions = append(conditions, "f.message_id IN (SELECT UNNEST(?::BIGINT[]))")
+			args = append(args, request.Search.CandidateMessageIDs)
 		}
 	}
 	if len(conditions) == 0 {
@@ -395,7 +460,7 @@ func (e *DuckDBEngine) searchPeople(
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(request.Query) != "" && request.Explore.Search.Mode == SearchNone {
+	if strings.TrimSpace(request.Query) != "" && request.Explore.Search.Mode == SearchNone && (request.Sort.Field == "" || request.Sort.Field == "activity_count") {
 		order = "match_rank ASC, current_temperature DESC, last_at DESC, person_id ASC"
 	}
 	release, err := e.acquireQuerySlot(ctx)

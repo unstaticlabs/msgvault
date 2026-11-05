@@ -18,6 +18,8 @@ import (
 	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/deletion"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/visual"
 )
 
@@ -28,6 +30,7 @@ const (
 )
 
 const (
+	queryParamLocation   = "query"
 	apiKeySecurityScheme = "apiKey"
 	cliRouteTag          = "CLI"
 )
@@ -271,6 +274,7 @@ func writeHumaError(ctx huma.Context, status int, code string, message string) {
 func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 	s.registerMCPCapabilitiesRoute(api, apiV1)
 	s.registerSessionRoutes(api)
+	s.registerDocbankAttachmentRoutes(apiV1)
 	registerRawHumaJSONRoute[HealthResponse](api, huma.Operation{
 		OperationID: "health",
 		Method:      http.MethodGet,
@@ -326,12 +330,14 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 	s.registerFilesRoutes(apiV1)
 	s.registerDocumentSearchRoute(apiV1)
 	registerAPIV1RawHumaJSONRouteWithErrors[MediaSearchStatusResponse](apiV1, "getMediaSearchStatus", http.MethodGet, "/media/search/status", "Get recording transcript search configuration status", s.handleMediaSearchStatus)
-	registerAPIV1RawHumaJSONRouteWithErrors[MediaSearchResponse](apiV1, "searchMedia", http.MethodGet, "/media/search", "Search source-selected transcripts as visible messages", s.documentSearchGuard("media search", s.handleMediaSearch), http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable)
+	registerAPIV1RawHumaJSONRouteWithErrors[MediaSearchResponse](apiV1, "searchMedia", http.MethodGet, "/media/search", "Search recordings and attachments as visible messages", s.documentSearchGuard("media search", s.handleMediaSearch), http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusUnprocessableEntity, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable)
 	s.registerTelemetryRoutes(apiV1)
 	s.registerPersonProfileRoutes(apiV1)
 	s.registerPersonIdentityRoutes(apiV1)
+	s.registerContactRouteRoutes(apiV1)
 	s.registerPersonNetworkRoutes(apiV1)
 	s.registerPersonTrackingRoutes(apiV1)
+	s.registerPersonTierRoutes(apiV1)
 	s.registerEmailTagRoutes(apiV1)
 	s.registerPersonAgendaRoutes(apiV1)
 	s.registerKataIssueRoutes(apiV1)
@@ -382,6 +388,13 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 		http.StatusNotFound, http.StatusServiceUnavailable)
 	registerRawHumaRoute(apiV1, visualSearchOp, s.handleVisualSearch)
 	registerAPIV1RawHumaJSONRoute[visual.Status](apiV1, "getVisualAttachmentStatus", http.MethodGet, "/multimodal/status", "Get visual attachment embedding status", s.handleVisualStatus)
+	embeddingStatusOp := rawAPIV1Operation("getEmbeddingStatus", http.MethodGet, "/embeddings/status", "Get message embedding coverage and live batch diagnostics")
+	minimumSourceID := float64(1)
+	embeddingStatusOp.Parameters = []*huma.Param{{Name: "source_id", In: queryParamLocation, Description: "Filter eligible/current/pending by source ID; diagnostics, throughput, job, and failures remain run-wide; ETA is null", Schema: &huma.Schema{Type: "integer", Format: "int64", Minimum: &minimumSourceID}}}
+	embeddingStatusOp.Responses = jsonResponsesFor[vector.EmbeddingStatus](apiV1)
+	embeddingStatusOp.Responses["400"] = errorResponseFor(apiV1)
+	embeddingStatusOp.Responses["503"] = errorResponseFor(apiV1)
+	registerRawHumaRoute(apiV1, embeddingStatusOp, s.handleEmbeddingStatus)
 	registerAPIV1RawHumaJSONRouteWithRequest[visualBuildRequest, visual.Status](apiV1, "startVisualAttachmentBuild", http.MethodPost, "/multimodal/build", "Consent and run one bounded visual attachment embedding pass", s.handleVisualBuild)
 	registerAPIV1RawHumaJSONRoute[visual.Status](apiV1, "resumeVisualAttachmentBuild", http.MethodPost, "/multimodal/run", "Resume one bounded visual attachment embedding pass", s.handleVisualRun)
 	registerAPIV1RawHumaJSONRouteWithRequest[visualRetryRequest, visual.Status](apiV1, "retryVisualAttachmentOwner", http.MethodPost, "/multimodal/retry", "Retry one visual attachment owner", s.handleVisualRetry)
@@ -407,7 +420,7 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 	registerAPIV1RawHumaJSONRouteWithErrors[cliMessageResponse](apiV1, "getCLIMessage", http.MethodGet, "/cli/message", "Get one message for CLI output", s.handleCLIMessage, http.StatusRequestEntityTooLarge)
 	registerAPIV1RawHumaJSONRouteWithErrors[cliOriginalMessageResponse](apiV1, "getCLIMessageOriginal", http.MethodGet, "/cli/message/original", "Get one message's original MIME for export", s.handleCLIMessageOriginal,
 		http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusServiceUnavailable)
-	registerAPIV1RawHumaJSONRouteWithErrors[query.ThreadPage](apiV1, "getCLIMessageThread", http.MethodGet, "/cli/message/thread", "List one conversation in chronological order for export", s.handleCLIMessageThread,
+	registerAPIV1RawHumaJSONRouteWithErrors[query.ThreadPage](apiV1, "getCLIMessageThread", http.MethodGet, "/cli/message/thread", "List one conversation in chronological order for export. SQLite compares instants to the millisecond, with ties in message-ID order.", s.handleCLIMessageThread,
 		http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusServiceUnavailable)
 	// Agent-token management routes: owner API key required.
 	registerAPIV1RawHumaJSONRouteWithRequest[agentTokenIssueRequest, agentTokenIssueResponse](apiV1, "issueAgentToken", http.MethodPost, "/agent-tokens", "Issue a restricted agent grant", s.handleIssueAgentToken, http.StatusCreated)
@@ -465,6 +478,8 @@ func (s *Server) registerHumaRoutes(api huma.API, apiV1 huma.API) {
 	s.registerMuesliImportRoute(apiV1)
 	s.registerMeetingRoutes(apiV1)
 	s.registerCalendarControlRoute(apiV1)
+	registerAPIV1RawHumaJSONRoute[store.ChatDiscoveryPage](apiV1, "searchChats", http.MethodGet, "/conversations/search", "Find archived chats by ranked name tokens", s.handleSearchChats)
+	s.registerCalendarEventsRoute(apiV1)
 	registerAPIV1RawHumaJSONRoute[ConversationResponse](apiV1, "getConversation", http.MethodGet, "/conversations/{id}", "Get a bounded containing conversation", s.handleGetConversation)
 	registerAPIV1RawHumaJSONRoute[AttachmentInfo](apiV1, "getAttachment", http.MethodGet, "/attachments/{id}", "Get attachment metadata", s.handleGetAttachment)
 	registerAPIV1RawHumaBinaryRoute(
@@ -799,6 +814,14 @@ func rawAPIV1Operation(operationID, method, path, summary string) huma.Operation
 
 func rawRouteParameters(operationID string) []*huma.Param {
 	switch operationID {
+	case "searchChats":
+		q := queryStringParam("q", "Name or title tokens; OR matching, exact matches ranked first", true)
+		limit := queryIntegerParam("limit", "Maximum results (default 20, max 100)")
+		minimum, maximum := float64(1), float64(100)
+		limit.Schema.Minimum, limit.Schema.Maximum = &minimum, &maximum
+		source := queryIntegerParam("source_id", "Restrict to one archived source")
+		source.Schema.Minimum = &minimum
+		return []*huma.Param{q, limit, source}
 	case "listOperationRuns":
 		kind := queryStringParam("kind", "Exact operation kind", false)
 		kind.Schema.Enum = stringsToAny(operationKindValues())
@@ -837,7 +860,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 	case "searchCLI":
 		return append([]*huma.Param{
 			queryBooleanParam("include_snippet", "Include attachment names and bounded FTS match context"),
-			queryStringParam("q", "Search query", true),
+			queryStringParam("q", "Search query; full text accepts standalone pipe-separated OR alternatives", true),
 			queryIntegerParam(limitParam, "Maximum number of rows to return"),
 			queryIntegerParam("offset", "Zero-based row offset"),
 			queryStringParam("message_type", "Message type filter; repeat or comma-separate for multiple values", false),
@@ -845,7 +868,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 		}, scopeParams()...)
 	case "searchMedia":
 		return []*huma.Param{
-			queryStringParam("q", "Spoken words to find in transcripts", true),
+			queryStringParam("q", "Words to find in recordings and attachments", true),
 			queryStringParam("mode", "Lexical mode; semantic and hybrid are unavailable", false),
 			queryIntegerParam("person_id", "Durable person ID"),
 			queryIntegerParam("participant_id", "Observed participant ID; selects its current Explore identity cluster; mutually exclusive with person_id"),
@@ -1006,8 +1029,8 @@ func rawRouteParameters(operationID string) []*huma.Param {
 		}
 	case "searchMessages":
 		return mergeParams([]*huma.Param{
-			queryStringParam("q", "Search query", true),
-			queryStringParam("mode", "Search mode: fts, vector, or hybrid. conversation_id applies in every mode; other structured filter parameters require vector or hybrid", false),
+			queryStringParam("q", "Search query; fts accepts standalone pipe-separated OR alternatives; other modes read pipes as text", true),
+			queryStringParam("mode", "Search mode: fts, vector, or hybrid. fts accepts standalone pipe-separated OR alternatives; other modes read pipes as text. conversation_id applies in every mode; other structured filter parameters require vector or hybrid", false),
 			queryIntegerParam("page", "One-based page number (default 1; values below 1 are clamped to 1). Non-numeric values are rejected with 400."),
 			queryIntegerParam("page_size", "Page size (default 20, max 100; out-of-range values are clamped). Non-numeric values are rejected with 400."),
 			queryIntegerParam("offset", "Zero-based ranking offset for vector or hybrid search (default 0)"),
@@ -1036,6 +1059,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 		return append(messageFilterParams(),
 			queryStringParam("q", "Structured search query", false),
 			queryStringParam("search_mode", "Search mode: fast, deep, or aggregate; required with q", false),
+			queryIntegerParam("max_results", "Maximum results for bounded search-aware deletion resolution (max 100001)"),
 			queryStringParam("view_type", "Aggregate view type; required for aggregate search", false),
 			queryStringParam("aggregate_key", "Displayed aggregate row key; required for aggregate search", false),
 		)
@@ -1063,14 +1087,14 @@ func rawRouteParameters(operationID string) []*huma.Param {
 	case "getTotalStats":
 		return mergeParams([]*huma.Param{
 			queryIntegerArrayParam("source_ids", "Source IDs; repeat the parameter for multiple sources"),
-			queryStringParam("search_query", "Search query", false),
+			queryStringParam("search_query", "Search query; full text accepts standalone pipe-separated OR alternatives", false),
 			queryBooleanParam("search_scope", "Include all message types when the search has no explicit message_type"),
 			queryStringParam("group_by", "Aggregate view type for grouping", false),
 		}, messageFilterScopeParams())
 	case "fastSearch":
 		params := append([]*huma.Param{
-			queryStringParam("q", "Search query", true),
-			queryStringParam("view_type", "Stats grouping view type", false),
+			queryStringParam("q", "Search query; full text accepts standalone pipe-separated OR alternatives", true),
+			queryStringParam("view_type", "Request aggregate stats grouped by this view; omit to skip stats", false),
 		}, messageFilterParams()...)
 		return params
 	case "deepSearch":
@@ -1086,7 +1110,7 @@ func rawRouteParameters(operationID string) []*huma.Param {
 			}
 		}
 		return append([]*huma.Param{
-			queryStringParam("q", "Search query", true),
+			queryStringParam("q", "Search query; full text accepts standalone pipe-separated OR alternatives", true),
 			queryStringParam("scope", "Exact search scope: body; omit for composite full-text search", false),
 		}, filterParams...)
 	case "listTextConversations":
@@ -1171,7 +1195,7 @@ func aggregateOptionParams() []*huma.Param {
 		queryIntegerArrayParam("source_ids", "Source IDs; repeat or comma-separate values"),
 		queryBooleanParam("attachments_only", "Only include messages with attachments"),
 		queryBooleanParam("hide_deleted", "Exclude deleted messages"),
-		queryStringParam("search_query", "Search query", false),
+		queryStringParam("search_query", "Search query; full text accepts standalone pipe-separated OR alternatives", false),
 		queryStringParam("after", "Lower date/time bound (RFC3339 or YYYY-MM-DD)", false),
 		queryStringParam("before", "Upper date/time bound (RFC3339 or YYYY-MM-DD)", false),
 	}
@@ -1303,23 +1327,23 @@ func pathNamedIntegerParam(name, doc string) *huma.Param {
 }
 
 func queryStringParam(name, doc string, required bool) *huma.Param {
-	return param(name, "query", huma.TypeString, doc, required)
+	return param(name, queryParamLocation, huma.TypeString, doc, required)
 }
 
 func queryIntegerParam(name, doc string) *huma.Param {
-	p := param(name, "query", huma.TypeInteger, doc, false)
+	p := param(name, queryParamLocation, huma.TypeInteger, doc, false)
 	p.Schema.Format = formatInt64
 	return p
 }
 
 func queryIntegerArrayParam(name, doc string) *huma.Param {
-	p := param(name, "query", huma.TypeArray, doc, false)
+	p := param(name, queryParamLocation, huma.TypeArray, doc, false)
 	p.Schema.Items = &huma.Schema{Type: huma.TypeInteger, Format: formatInt64}
 	return p
 }
 
 func queryRefArrayParam(name, doc string) *huma.Param {
-	p := param(name, "query", huma.TypeArray, doc, false)
+	p := param(name, queryParamLocation, huma.TypeArray, doc, false)
 	p.Schema.Items = &huma.Schema{Type: huma.TypeString}
 	return p
 }
@@ -1331,11 +1355,11 @@ func queryRequiredIntegerParam(name, doc string) *huma.Param {
 }
 
 func queryBooleanParam(name, doc string) *huma.Param {
-	return param(name, "query", huma.TypeBoolean, doc, false)
+	return param(name, queryParamLocation, huma.TypeBoolean, doc, false)
 }
 
 func queryNumberParam(name, doc string) *huma.Param {
-	return param(name, "query", huma.TypeNumber, doc, false)
+	return param(name, queryParamLocation, huma.TypeNumber, doc, false)
 }
 
 func param(name, in, typ, doc string, required bool) *huma.Param {

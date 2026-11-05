@@ -18,6 +18,7 @@ const (
 	FilterAfter         = "after"
 	FilterBefore        = "before"
 	FilterDeletion      = "deletion"
+	FilterKind          = "kind"
 )
 
 var filterDimensions = [...]string{
@@ -29,6 +30,7 @@ var filterDimensions = [...]string{
 	FilterMailingList,
 	FilterAccount,
 	FilterMessageType,
+	FilterKind,
 	FilterAfter,
 	FilterBefore,
 	FilterDeletion,

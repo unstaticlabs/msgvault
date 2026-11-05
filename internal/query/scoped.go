@@ -263,12 +263,13 @@ func (s *scopedEngine) GetDeletionTargetsByFilter(ctx context.Context, filter Me
 	return s.inner.GetDeletionTargetsByFilter(ctx, s.restrictFilter(filter))
 }
 
-func (s *scopedEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) ([]MessageSummary, error) {
-	rows, err := s.inner.SearchByDomains(ctx, domains, after, before, limit, offset, s.restrict(sourceIDs))
+func (s *scopedEngine) SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) (DomainSearchResult, error) {
+	result, err := s.inner.SearchByDomains(ctx, domains, after, before, limit, offset, s.restrict(sourceIDs))
 	if err != nil {
-		return nil, err
+		return DomainSearchResult{}, err
 	}
-	return s.visibleSummaries(rows), nil
+	result.Messages = s.visibleSummaries(result.Messages)
+	return result, nil
 }
 
 func (s *scopedEngine) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
@@ -417,6 +418,14 @@ func (s *scopedTextEngine) GetDeletionTargetsBySearch(ctx context.Context, searc
 		return nil, ErrNotImplemented
 	}
 	return resolver.GetDeletionTargetsBySearch(ctx, s.restrictQuery(searchQuery), s.restrictFilter(filter), mode)
+}
+
+func (s *scopedTextEngine) GetDeletionTargetsBySearchBounded(ctx context.Context, searchQuery *search.Query, filter MessageFilter, mode DeletionSearchMode, maxResults int) ([]DeletionTarget, int, error) {
+	resolver, ok := s.inner.(BoundedDeletionTargetSearchResolver)
+	if !ok {
+		return nil, 0, ErrNotImplemented
+	}
+	return resolver.GetDeletionTargetsBySearchBounded(ctx, s.restrictQuery(searchQuery), s.restrictFilter(filter), mode, maxResults)
 }
 
 func (s *scopedTextEngine) GetDeletionTargetsByAggregateSearch(ctx context.Context, searchQuery string, filter MessageFilter, groupBy ViewType, key string) ([]DeletionTarget, error) {

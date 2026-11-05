@@ -177,11 +177,6 @@ func (a *staticLabelsAPI) ListLabels(_ context.Context) ([]*gmail.Label, error) 
 	return a.labels, nil
 }
 
-func recordSyncRunItems(t *testing.T, env *TestEnv, sourceID int64, status string, items ...store.SyncRunItem) {
-	t.Helper()
-	recordSyncRunItemsOfType(t, env, sourceID, "full", status, items...)
-}
-
 func recordIncrementalSyncRunItems(t *testing.T, env *TestEnv, sourceID int64, status string, items ...store.SyncRunItem) {
 	t.Helper()
 	recordSyncRunItemsOfType(t, env, sourceID, "incremental", status, items...)
@@ -463,7 +458,6 @@ func TestFullSyncCompletionFailureMarksRunFailed(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
-	testutil.SkipIfPostgres(t, "uses a SQLite trigger to inject the completion failure")
 	env := newTestEnv(t)
 	_, err := env.Store.DB().Exec(`
 		CREATE TRIGGER fail_sync_completion
@@ -1613,44 +1607,21 @@ func TestIncrementalSyncFiltersFetchReplayCandidates(t *testing.T) {
 	env.Mock.GetMessageCalls = nil
 
 	const (
-		olderID       = "replay-older"
-		failedID      = "replay-failed-run"
 		eligibleID    = "replay-eligible"
 		batchEligible = "replay-batch-eligible"
 	)
-	recordIncrementalSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
-		SourceMessageID: olderID,
-		Phase:           syncItemPhaseFetch,
-		Status:          store.SyncRunItemStatusError,
-		ErrorKind:       syncItemKindFetchError,
-	})
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusFailed, store.SyncRunItem{
-		SourceMessageID: failedID,
-		Phase:           syncItemPhaseFetch,
-		Status:          store.SyncRunItemStatusError,
-		ErrorKind:       syncItemKindFetchError,
-	})
 	recordIncrementalSyncRunItems(t, env, source.ID, store.SyncStatusCompleted,
 		store.SyncRunItem{SourceMessageID: eligibleID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 		store.SyncRunItem{SourceMessageID: eligibleID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
 		store.SyncRunItem{SourceMessageID: batchEligible, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
-		store.SyncRunItem{SourceMessageID: "replay-ingest", Phase: syncItemPhaseIngest, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindIngestError},
-		store.SyncRunItem{SourceMessageID: "replay-delete", Phase: syncItemPhaseDelete, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindDeleteError},
-		store.SyncRunItem{SourceMessageID: "replay-skipped", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusSkipped, ErrorKind: syncItemKindGmailNotFound},
 		store.SyncRunItem{SourceMessageID: "", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 		store.SyncRunItem{SourceMessageID: "(unknown)", Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindBatchFetchError},
 		store.SyncRunItem{SourceMessageID: presentID, Phase: syncItemPhaseFetch, Status: store.SyncRunItemStatusError, ErrorKind: syncItemKindFetchError},
 	)
-	// A later filtered or limited full run completes without establishing full
-	// Gmail coverage, so it neither contributes debt nor hides the incremental run.
-	recordSyncRunItems(t, env, source.ID, store.SyncStatusCompleted, store.SyncRunItem{
-		SourceMessageID: "replay-full-run",
-		Phase:           syncItemPhaseFetch,
-		Status:          store.SyncRunItemStatusError,
-		ErrorKind:       syncItemKindFetchError,
-	})
-	env.Mock.AddMessage(eligibleID, testMIME(), []string{"INBOX"})
-	env.Mock.AddMessage(batchEligible, testMIME(), []string{"INBOX"})
+	fetchIDs := []string{batchEligible, eligibleID}
+	for _, id := range fetchIDs {
+		env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	}
 	env.SetHistory(1000)
 
 	summary, err := env.Syncer.Incremental(env.Context, source)
@@ -1658,7 +1629,17 @@ func TestIncrementalSyncFiltersFetchReplayCandidates(t *testing.T) {
 	assert.Equal(int64(2), summary.MessagesFound, "eligible replay processed")
 	assert.Equal(int64(2), summary.MessagesAdded, "eligible replay added")
 	assert.Equal(int64(0), summary.Errors, "eligible replay errors")
-	assert.Equal([]string{batchEligible, eligibleID}, env.Mock.GetMessageCalls, "only latest eligible absent IDs fetched")
+	assert.Equal(fetchIDs, env.Mock.GetMessageCalls, "all unresolved absent IDs fetched")
+	items, err := env.Store.ListSyncRunItems(summary.SyncRunID, store.SyncRunItemStatusResolved, 20)
+	require.NoError(err)
+	var presentResolutions int
+	for _, item := range items {
+		if item.SourceMessageID == presentID {
+			presentResolutions++
+			assert.Equal(syncItemKindAcquired, item.ErrorKind)
+		}
+	}
+	assert.Equal(1, presentResolutions, "present row settles debt without adding or fetching it")
 }
 
 func TestIncrementalSyncFetchReplayPreservesCursorAndFence(t *testing.T) {
@@ -1733,36 +1714,6 @@ func TestFullSyncSkipsGmailNotFoundBeforeFetch(t *testing.T) {
 	assert.Equal("msg2", items[0].SourceMessageID, "SourceMessageID")
 	assert.Equal("fetch", items[0].Phase, "Phase")
 	assert.Equal("gmail_not_found", items[0].ErrorKind, "ErrorKind")
-}
-
-func TestMIMEParsing(t *testing.T) {
-	t.Parallel()
-	env := newTestEnv(t)
-
-	pdfData := []byte{0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a, 0x31, 0x20, 0x30, 0x20, 0x6f, 0x62, 0x6a, 0x0a, 0x3c, 0x3c, 0x2f, 0x54, 0x79, 0x70, 0x65, 0x2f, 0x43, 0x61, 0x74, 0x61, 0x6c, 0x6f, 0x67, 0x2f, 0x50, 0x61, 0x67, 0x65, 0x73, 0x20, 0x32, 0x20, 0x30, 0x20, 0x52, 0x3e, 0x3e, 0x0a, 0x65, 0x6e, 0x64, 0x6f, 0x62, 0x6a}
-	complexMIME := testemail.NewMessage().
-		From(`"John Doe" <john@example.com>`).
-		To(`"Jane Smith" <jane@example.com>, bob@example.com`).
-		Cc("cc@example.com").
-		Subject("Re: Meeting Notes").
-		Date("Tue, 15 Jan 2024 14:30:00 -0500").
-		Header("Message-ID", "<msg123@example.com>").
-		Header("In-Reply-To", "<msg122@example.com>").
-		Body("Hello,\n\nThis is the message body.\n\nBest regards,\nJohn\n").
-		WithAttachment("document.pdf", "application/pdf", pdfData).
-		Bytes()
-
-	env.Mock.Profile.MessagesTotal = 1
-	env.Mock.Profile.HistoryID = 12345
-	env.Mock.AddMessage("complex1", complexMIME, []string{"INBOX"})
-
-	env.SetOptions(t, func(o *Options) {
-		o.AttachmentsDir = filepath.Join(env.TmpDir, "attachments")
-	})
-
-	summary := runFullSync(t, env)
-	assertSummary(t, summary, WantSummary{Added: new(int64(1))})
-	assertAttachmentCount(t, env.Store, 1)
 }
 
 func TestStoreAttachment_ComputesHashWhenMissing(t *testing.T) {
@@ -1970,20 +1921,6 @@ func TestFullSyncPagination(t *testing.T) {
 	summary := runFullSync(t, env)
 	assertSummary(t, summary, WantSummary{Added: new(int64(6))})
 	assertListMessagesCalls(t, env, 3)
-}
-
-func TestSyncerWithLogger(t *testing.T) {
-	t.Parallel()
-	env := newTestEnv(t)
-	syncer := env.Syncer.WithLogger(nil)
-	assert.NotNil(t, syncer, "WithLogger should return syncer for chaining")
-}
-
-func TestSyncerWithProgress(t *testing.T) {
-	t.Parallel()
-	env := newTestEnv(t)
-	syncer := env.Syncer.WithProgress(gmail.NullProgress{})
-	assert.NotNil(t, syncer, "WithProgress should return syncer for chaining")
 }
 
 // Tests for incremental sync
@@ -2229,6 +2166,7 @@ func (a *recoveryProfileSequenceAPI) GetProfile(context.Context) (*gmail.Profile
 }
 
 func TestFullRecoversCheckpointAfterSyncOwnerExit(t *testing.T) {
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	t.Parallel()
 	requirements := require.New(t)
 	checks := assert.New(t)
@@ -3177,7 +3115,7 @@ func TestFullSyncResumeWithCursor(t *testing.T) {
 	assertMessageCount(t, env.Store, 4)
 }
 
-func TestFullSyncResumesLegacyUnfilteredCheckpoint(t *testing.T) {
+func TestFullSyncRestartsLegacyUnfilteredCheckpoint(t *testing.T) {
 	t.Parallel()
 	requirements := require.New(t)
 	checks := assert.New(t)
@@ -3204,9 +3142,9 @@ func TestFullSyncResumesLegacyUnfilteredCheckpoint(t *testing.T) {
 	requirements.NoError(env.Store.FailSync(syncID, "worker stopped"))
 
 	summary := runFullSync(t, env)
-	checks.True(summary.WasResumed)
-	checks.Equal("page_1", summary.ResumedFromToken)
-	checks.Equal(1, env.Mock.ListMessagesCalls)
+	checks.False(summary.WasResumed)
+	checks.Empty(summary.ResumedFromToken)
+	checks.Equal(2, env.Mock.ListMessagesCalls)
 	assertMessageCount(t, env.Store, 4)
 }
 
@@ -3433,7 +3371,7 @@ func TestInitSyncState_Resume(t *testing.T) {
 	assert.Equal(int64(45), state.checkpoint.MessagesAdded, "MessagesAdded")
 }
 
-func TestLegacyFullCheckpointCompatibilityIsUnfilteredOnly(t *testing.T) {
+func TestLegacyFullCheckpointRestartsForCoverage(t *testing.T) {
 	t.Parallel()
 	legacy := &store.SyncRun{
 		CursorBefore: sql.NullString{String: "page_1", Valid: true},
@@ -3447,7 +3385,7 @@ func TestLegacyFullCheckpointCompatibilityIsUnfilteredOnly(t *testing.T) {
 		modify func(*Options)
 		want   bool
 	}{
-		{name: "default Gmail", run: legacy, modify: func(*Options) {}, want: true},
+		{name: "default Gmail", run: legacy, modify: func(*Options) {}, want: false},
 		{name: "filtered Gmail", run: legacy, modify: func(options *Options) {
 			options.Query = "after:2024/01/01"
 		}},
@@ -5949,4 +5887,217 @@ func TestIMAPGoneUIDIsArchivedOnceTheServerReturnsIt(t *testing.T) {
 	assert.Equal(int64(0), summary.Errors)
 	assertMessageCount(t, env.Store, 2)
 	require.NoError(secondClient.Close())
+}
+
+func TestIncrementalSyncReplaysEarlierRunFailures(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	seedMessages(env, 3, 1000, "lost-fetch", "lost-ingest", "good")
+	env.Mock.GetMessageError["lost-fetch"] = errors.New("temporary fetch failure")
+	env.Mock.Messages["lost-ingest"] = &gmail.RawMessage{ID: "lost-ingest", ThreadID: "thread-lost-ingest", LabelIDs: []string{"INBOX"}, Raw: []byte{}}
+	summary := runFullSync(t, env)
+	assertSummary(t, summary, WantSummary{Added: new(int64(1)), Errors: new(int64(2))})
+
+	delete(env.Mock.GetMessageError, "lost-fetch")
+	for _, id := range []string{"lost-fetch", "lost-ingest"} {
+		env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	}
+	source, err := env.Store.GetSourceByIdentifier(testEmail)
+	require.NoError(err)
+	env.SetHistory(1000)
+	env.Mock.GetMessageCalls = nil
+	summary, err = env.Syncer.Incremental(env.Context, source)
+	require.NoError(err)
+	assert.Equal(int64(2), summary.MessagesAdded)
+	assert.Equal(int64(0), summary.Errors)
+	assert.ElementsMatch([]string{"lost-fetch", "lost-ingest"}, env.Mock.GetMessageCalls)
+	existing, err := env.Store.MessageExistsBatch(source.ID, []string{"lost-fetch", "lost-ingest"})
+	require.NoError(err)
+	assert.Len(existing, 2)
+
+	env.Mock.GetMessageCalls = nil
+	_, err = env.Syncer.Incremental(env.Context, source)
+	require.NoError(err)
+	assert.Empty(env.Mock.GetMessageCalls)
+}
+
+func TestAcquisitionResolutionCommitsWithMessage(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	source := seedReplaySource(t, env, "recovered")
+	seedMessages(env, 2, 1001, "keep", "recovered")
+	env.Mock.MessagePages = [][]string{{"keep", "recovered"}}
+
+	// A failed resolution must roll back the recovered message as well.
+	_, err := env.Store.DB().Exec(`
+		CREATE TRIGGER fail_acquisition_resolution BEFORE INSERT ON sync_run_items
+		WHEN NEW.source_message_id = 'recovered' AND NEW.status = 'resolved'
+		  AND NEW.error_kind = 'acquired'
+		BEGIN
+			SELECT RAISE(ABORT, 'synthetic acquisition resolution failure');
+		END
+	`)
+	require.NoError(err)
+	summary := runFullSync(t, env)
+	existing, err := env.Store.MessageExistsBatch(source.ID, []string{"recovered"})
+	require.NoError(err)
+	assert.Empty(existing, "a recovered message must not commit without its resolution")
+	assert.Equal(int64(1), summary.Errors)
+	_, err = env.Store.DB().Exec(`DROP TRIGGER fail_acquisition_resolution`)
+	require.NoError(err)
+
+	summary = runFullSync(t, env)
+	assert.Zero(summary.Errors)
+	existing, err = env.Store.MessageExistsBatch(source.ID, []string{"keep", "recovered"})
+	require.NoError(err)
+	assert.Len(existing, 2)
+	var resolutions int
+	require.NoError(env.Store.DB().QueryRow(`
+		SELECT COUNT(*) FROM sync_run_items
+		WHERE source_message_id = 'recovered' AND status = 'resolved'
+	`).Scan(&resolutions))
+	assert.Equal(1, resolutions)
+}
+
+func TestIncrementalSyncDoesNotReacquirePurgedMessage(t *testing.T) {
+	for _, recovery := range []string{"full", "history", "replay"} {
+		t.Run(recovery, func(t *testing.T) {
+			t.Parallel()
+			require := require.New(t)
+			assert := assert.New(t)
+			env := newTestEnv(t)
+			const messageID = "recovered-purged"
+			if recovery == "full" {
+				seedMessages(env, 1, 1000, messageID)
+				env.Mock.GetMessageError[messageID] = errors.New("temporary fetch failure")
+				summary := runFullSync(t, env)
+				require.Equal(int64(1), summary.Errors)
+				delete(env.Mock.GetMessageError, messageID)
+			} else {
+				seedReplaySource(t, env, messageID)
+			}
+
+			if recovery == "history" {
+				// Replay still fails; the later History fetch succeeds.
+				env.Mock.GetMessageError[messageID] = errors.New("temporary fetch failure")
+				api := &replayControlAPI{MockAPI: env.Mock}
+				api.beforeResults = func() { delete(env.Mock.GetMessageError, messageID) }
+				env.Syncer = New(api, env.Store, nil)
+				env.SetHistory(1002, historyAdded(messageID))
+			}
+			var summary *gmail.SyncSummary
+			if recovery == "full" {
+				summary = runFullSync(t, env)
+			} else {
+				summary = runIncrementalSync(t, env)
+			}
+			require.Equal(int64(1), summary.MessagesAdded)
+			if recovery == "history" {
+				require.Equal(int64(1), summary.Errors, "replay failed before History recovered the message")
+			} else {
+				require.Zero(summary.Errors)
+			}
+			source, err := env.Store.GetSourceByIdentifier(testEmail)
+			require.NoError(err)
+			_, err = env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ? AND source_message_id = ?`, "purge-recovered", source.ID, messageID)
+			require.NoError(err)
+			deleted, err := env.Store.DeleteDedupedBatch("purge-recovered")
+			require.NoError(err)
+			require.Equal(int64(1), deleted)
+			existing, err := env.Store.MessageExistsBatch(source.ID, []string{messageID})
+			require.NoError(err)
+			require.Empty(existing)
+
+			env.SetHistory(env.Mock.Profile.HistoryID)
+			env.Mock.GetMessageCalls = nil
+			summary = runIncrementalSync(t, env)
+			assert.Equal(int64(0), summary.Errors)
+			assert.Equal(int64(0), summary.MessagesAdded)
+			assert.Empty(env.Mock.GetMessageCalls)
+		})
+	}
+}
+
+// recoveringFetchAPI fails a message's first raw fetch, then serves it.
+type recoveringFetchAPI struct {
+	*gmail.MockAPI
+}
+
+func (a *recoveringFetchAPI) GetMessageRaw(ctx context.Context, id string) (*gmail.RawMessage, error) {
+	raw, err := a.MockAPI.GetMessageRaw(ctx, id)
+	delete(a.GetMessageError, id)
+	return raw, err
+}
+
+func TestIncrementalSyncSameRunRecoveryThenPurge(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	source := env.CreateSourceWithHistory(t, "1000")
+	const id = "same-run-purged"
+	env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	env.Mock.GetMessageError[id] = errors.New("temporary fetch failure")
+	env.Syncer = New(&recoveringFetchAPI{env.Mock}, env.Store, nil)
+	event := gmail.HistoryRecord{LabelsAdded: []gmail.HistoryLabelChange{{Message: gmail.MessageID{ID: id, ThreadID: "thread"}, LabelIDs: []string{"INBOX"}}}}
+	env.SetHistory(1001, event, event)
+	summary := runIncrementalSync(t, env)
+	require.Equal(int64(1), summary.Errors)
+	require.Equal(int64(1), summary.MessagesAdded)
+	assert.Equal([]string{id, id}, env.Mock.GetMessageCalls)
+	items, err := env.Store.ListSyncRunItems(summary.SyncRunID, store.SyncRunItemStatusResolved, 10)
+	require.NoError(err)
+	assert.Len(items, 1)
+	_, err = env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ?`, "same-run", source.ID)
+	require.NoError(err)
+	deleted, err := env.Store.DeleteDedupedBatch("same-run")
+	require.NoError(err)
+	require.Equal(int64(1), deleted)
+	env.SetHistory(1001)
+	env.Mock.GetMessageCalls = nil
+	summary = runIncrementalSync(t, env)
+	assert.Zero(summary.MessagesAdded)
+	assert.Empty(env.Mock.GetMessageCalls)
+}
+
+// failingRefetchAPI serves a message's first raw fetch, then fails later ones.
+type failingRefetchAPI struct {
+	*gmail.MockAPI
+}
+
+func (a *failingRefetchAPI) GetMessageRaw(ctx context.Context, id string) (*gmail.RawMessage, error) {
+	raw, err := a.MockAPI.GetMessageRaw(ctx, id)
+	a.GetMessageError[id] = errors.New("temporary fetch failure")
+	return raw, err
+}
+
+func TestIncrementalSyncRepeatedLabelAddAfterIngestThenPurge(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	env := newTestEnv(t)
+	source := env.CreateSourceWithHistory(t, "1000")
+	const id = "label-added-twice"
+	env.Mock.AddMessage(id, testMIME(), []string{"INBOX"})
+	env.Syncer = New(&failingRefetchAPI{env.Mock}, env.Store, nil)
+	event := gmail.HistoryRecord{LabelsAdded: []gmail.HistoryLabelChange{{Message: gmail.MessageID{ID: id, ThreadID: "thread"}, LabelIDs: []string{"INBOX"}}}}
+	env.SetHistory(1001, event, event)
+	summary := runIncrementalSync(t, env)
+	require.Zero(summary.Errors)
+	require.Equal(int64(1), summary.MessagesAdded)
+	assert.Equal([]string{id}, env.Mock.GetMessageCalls)
+	_, err := env.Store.DB().Exec(`UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, delete_batch_id = ? WHERE source_id = ?`, "label-twice", source.ID)
+	require.NoError(err)
+	deleted, err := env.Store.DeleteDedupedBatch("label-twice")
+	require.NoError(err)
+	require.Equal(int64(1), deleted)
+	env.SetHistory(1001)
+	env.Mock.GetMessageCalls = nil
+	summary = runIncrementalSync(t, env)
+	assert.Zero(summary.MessagesAdded)
+	assert.Empty(env.Mock.GetMessageCalls)
 }

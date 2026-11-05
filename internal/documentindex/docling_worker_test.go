@@ -113,6 +113,7 @@ func TestDoclingWorkerPublishesRealAsyncResult(t *testing.T) {
 	assertions.Equal("searchable sentinel", catalog.publication.Units[0].Text)
 	assertions.Equal(int64(len(content)), catalog.publication.SourceBytes)
 	assertions.Equal(4, catalog.publication.RequestCount)
+	assertions.Equal(1, catalog.publication.UploadCount)
 	assertions.Zero(catalog.publication.RetryCount, "normal async polling is not a provider retry")
 	assertions.Equal(int32(4), calls.Load())
 	assertions.Equal(int32(2), pollCalls.Load())
@@ -169,6 +170,7 @@ func TestDoclingWorkerRecordsRetriesWhenRenderFails(t *testing.T) {
 	requirements.NotNil(catalog.failure)
 	assertions.Equal(int32(3), requests.Load())
 	assertions.Equal(3, catalog.failure.RequestCount)
+	assertions.Equal(1, catalog.failure.UploadCount)
 	assertions.Equal(1, catalog.failure.RetryCount)
 	assertions.Positive(catalog.failure.ProviderLatencyMS)
 	assertions.Equal("provider_rejected", catalog.failure.ReasonCode)
@@ -623,6 +625,7 @@ func TestDoclingWorkerClassifiesJobFailures(t *testing.T) {
 			assertions.Nil(catalog.publication)
 			requirements.NotNil(catalog.failure)
 			assertions.Equal(int(requests.Load()), catalog.failure.RequestCount)
+			assertions.Equal(int(submissions.Load()), catalog.failure.UploadCount)
 			assertions.Equal(reason, catalog.failure.ReasonCode)
 			terminal := reason != "provider_interrupted"
 			assertions.Equal(terminal, catalog.failure.Terminal)
@@ -641,7 +644,7 @@ func TestDoclingWorkerStopsRetryingWhenJobOutlastsTotalTimeout(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	c := doclingTestConfig()
-	c.Endpoint, c.TotalTimeout, c.PollInterval, c.MaxPollAttempts = server.URL, 200*time.Millisecond, 10*time.Millisecond, 10_000
+	c.Endpoint, c.TotalTimeout, c.PollInterval, c.MaxPollAttempts = server.URL, 200*time.Millisecond, 10*time.Millisecond, 10_000 //nolint:kennlint // deadlinetest: the pending remote job must exhaust its total budget and become a terminal failure
 	provider, err := NewDoclingClient(&c)
 	requirements.NoError(err)
 	content := mistraltest.MinimalPDF("synthetic source")

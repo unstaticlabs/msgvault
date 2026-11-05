@@ -4,15 +4,19 @@
   import type { CliAccountResponse } from '../../api/generated/models';
   import type { APIClient } from '../../api/client';
   import type { ExploreFilter } from '../../explore/models';
+  import { sameFilterID } from '../../explore/models';
+  import { sourceMailbox } from '../../sources/labels';
 
   let {
     client,
     filters,
     onChange,
+    showSingleMailbox = false,
   }: {
     client: APIClient;
     filters: ExploreFilter[];
     onChange: (filters: ExploreFilter[]) => void;
+    showSingleMailbox?: boolean;
   } = $props();
   type Option = { value: string; label: string; sourceID: string };
 
@@ -33,7 +37,7 @@
   const sourceIDs = $derived(filters.filter((f) => f.dimension === 'source').flatMap((f) => f.values));
   const visibleOptions = $derived([
     { value: '', label: 'All accounts' },
-    ...options.filter((o) => sourceIDs.length === 0 || sourceIDs.includes(o.sourceID) || o.value === selected),
+    ...options.filter((o) => sourceIDs.length === 0 || includesSource(o.sourceID) || o.value === selected),
     ...(selected && !loading && !options.some((o) => o.value === selected)
       ? [known.get(selected) ?? { value: selected, label: `${selected} (unavailable)` }]
       : []),
@@ -44,21 +48,11 @@
   $effect(() => {
     if (!selected || sourceIDs.length === 0) return;
     const pick = known.get(selected);
-    if (pick && !sourceIDs.includes(pick.sourceID)) select('');
+    if (pick && !includesSource(pick.sourceID)) select('');
   });
 
-  // The username of an "imaps://user@host" identifier, or the identifier.
-  function sourceMailbox(identifier: string): string {
-    const scheme = identifier.indexOf('://');
-    if (scheme < 0) return identifier.toLowerCase();
-    const rest = identifier.slice(scheme + 3);
-    const at = rest.lastIndexOf('@');
-    if (at <= 0) return identifier.toLowerCase();
-    try {
-      return decodeURIComponent(rest.slice(0, at)).toLowerCase();
-    } catch {
-      return rest.slice(0, at).toLowerCase();
-    }
+  function includesSource(id: string): boolean {
+    return sourceIDs.some((sourceID) => sameFilterID(sourceID, id));
   }
 
   // List a source's children when they divide its mail, or when some of it
@@ -98,7 +92,7 @@
         };
       });
       for (const entry of entries) all.set(entry.value, entry);
-      return showChildren(account) ? entries : [];
+      return showSingleMailbox || showChildren(account) ? entries : [];
     });
     return { options: read, known: all, pending: pendingCount };
   }

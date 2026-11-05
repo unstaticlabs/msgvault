@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 )
 
 func TestSearchPeopleKeepsSameNamePeopleSeparateAndUnifiesExplicitIdentifiers(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -60,28 +62,10 @@ func TestSearchPeopleKeepsSameNamePeopleSeparateAndUnifiesExplicitIdentifiers(t 
 // list. An entry naming several members counts once, and unlinked
 // participants are unaffected.
 func TestSearchPeopleAggregatesLinkedIdentitiesAsOneCanonicalRow(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
-	b := NewTestDataBuilder(t)
-	source := b.AddSourceWithType("archive@example.com", "gmail")
-	alicePrimary := b.AddParticipant("alice@example.com", "example.com", "Alice Example")
-	aliceAlias := b.AddParticipant("alice@other.example", "other.example", "")
-	bob := b.AddParticipant("bob@example.com", "example.com", "Bob Example")
-	b.AddParticipantIdentifier(alicePrimary, "email", "alice@example.com", "alice@example.com", true)
-	b.AddParticipantIdentifier(aliceAlias, "email", "alice@other.example", "alice@other.example", true)
-	b.LinkCluster(alicePrimary, aliceAlias)
-
-	start := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
-	primaryMail := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 401, Subject: "From primary", SentAt: start})
-	b.AddFrom(primaryMail, alicePrimary, "Alice Example")
-	aliasMail := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 402, Subject: "From alias", SentAt: start.Add(time.Hour)})
-	b.AddFrom(aliasMail, aliceAlias, "")
-	b.AddAttachmentWithMIME(901, aliasMail, 100, "alias.pdf", "application/pdf")
-	// One entry addressed to BOTH members must count once for the cluster.
-	bothMail := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 403, Subject: "To both", SentAt: start.Add(2 * time.Hour)})
-	b.AddFrom(bothMail, bob, "Bob Example")
-	b.AddTo(bothMail, alicePrimary, "Alice Example")
-	b.AddTo(bothMail, aliceAlias, "")
+	b, _, alicePrimary, aliceAlias, bob, start := linkedPeopleFixture(t)
 	engine := b.BuildEngine()
 	ctx := context.Background()
 
@@ -123,7 +107,207 @@ func TestSearchPeopleAggregatesLinkedIdentitiesAsOneCanonicalRow(t *testing.T) {
 	assertions.Equal(int64(1), bobSearch.Rows[0].ActivityCount)
 }
 
+func TestPeopleAndDomainsExcludeUnsentActivity(t *testing.T) {
+	t.Parallel()
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	b, source, alicePrimary, aliceAlias, _, start := linkedPeopleFixture(t)
+	owner := b.AddParticipant("archive@example.com", "example.com", "Archive Owner")
+	b.AddOwnerParticipant(source, owner)
+	draft := b.AddMessage(MessageOpt{SourceID: source, Subject: "Unsent", SentAt: start.Add(3 * time.Hour), IsFromMe: true})
+	b.AddFrom(draft, owner, "Archive Owner")
+	b.AddTo(draft, alicePrimary, "Alice Example")
+	b.AddTo(draft, aliceAlias, "")
+	carol := b.AddParticipant("carol@draft.example", "draft.example", "Carol Example")
+	b.AddTo(draft, carol, "Carol Example")
+	b.unsentMessages = fmt.Sprintf("(SELECT %d::BIGINT AS message_id)", draft)
+	engine := b.BuildEngine()
+	ctx := context.Background()
+	// A date filter takes the logical-entry path instead of the source rollup.
+	after := start.Add(-time.Minute)
+	dateContext := Context{After: &after}
+	dateFiltered, err := engine.SearchPeople(ctx, PersonSearchRequest{
+		Explore: ExploreRequest{Context: dateContext}, Query: "other.example",
+	})
+	requirements.NoError(err)
+	requirements.Len(dateFiltered.Rows, 1)
+	assertions.Equal(int64(3), dateFiltered.Rows[0].ActivityCount)
+	assertions.Equal(start.Add(2*time.Hour), dateFiltered.Rows[0].LastAt)
+
+	domains, err := engine.SearchDomains(ctx, DomainSearchRequest{
+		Explore: ExploreRequest{Context: Context{SourceIDs: []int64{source}}}, Query: "example.com",
+	})
+	requirements.NoError(err)
+	requirements.Len(domains.Rows, 1)
+	assertions.Equal(int64(2), domains.Rows[0].ActivityCount)
+	assertions.Equal(start.Add(2*time.Hour), domains.Rows[0].LastAt)
+	domain, err := engine.GetDomainSummary(ctx, "example.com", ExploreRequest{})
+	requirements.NoError(err)
+	requirements.Len(domain.Rows, 1)
+	assertions.Equal(int64(2), domain.Rows[0].ActivityCount)
+	assertions.Equal(start.Add(2*time.Hour), domain.Rows[0].LastAt)
+	matching, err := engine.GetDomainSummary(ctx, "draft.example", ExploreRequest{
+		Context: Context{SourceIDs: []int64{source}},
+		Search:  SearchSpec{Mode: SearchFullText, Query: "Unsent", CandidateMessageIDs: []int64{draft}, LexicalIndexRevision: "fts5:draft"},
+	})
+	requirements.NoError(err)
+	assertions.Empty(matching.Rows)
+}
+
+func TestGetPersonDraftOnlyLinkedAlias(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	b := NewTestDataBuilder(t)
+	source := b.AddSourceWithType("owner@example.com", "gmail")
+	owner := b.AddParticipant("owner@example.com", "example.com", "Owner")
+	b.AddOwnerParticipant(source, owner)
+	primary := b.AddParticipant("draft@example.org", "example.org", "Draft recipient")
+	alias := b.AddParticipant("alias@example.org", "example.org", "Draft alias")
+	b.AddParticipantIdentifier(primary, "email", "draft@example.org", "draft@example.org", true)
+	b.AddParticipantIdentifier(alias, "email", "alias@example.org", "alias@example.org", true)
+	b.LinkCluster(primary, alias)
+	draft := b.AddMessage(MessageOpt{SourceID: source, IsFromMe: true, SentAt: time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)})
+	b.AddFrom(draft, owner, "Owner")
+	b.AddTo(draft, primary, "Draft recipient")
+	b.AddTo(draft, alias, "Draft alias")
+	b.unsentMessages = fmt.Sprintf("(SELECT %d::BIGINT AS message_id)", draft)
+	engine := b.BuildEngine()
+
+	detail, err := engine.GetPerson(t.Context(), alias, Context{}, []int64{primary, alias})
+	require.NoError(err)
+	require.NotNil(detail)
+	assert.Equal(alias, detail.ID)
+	assert.Zero(detail.ActivityCount)
+	assert.Zero(detail.FileCount)
+	assert.True(detail.FirstAt.IsZero())
+	assert.True(detail.LastAt.IsZero())
+	assert.Len(detail.Identifiers, 2)
+}
+
+func TestGetPersonDoesNotJoinChatThroughUnsentRecipient(t *testing.T) {
+	t.Parallel()
+	assert := assert.New(t)
+	require := require.New(t)
+	b := NewTestDataBuilder(t)
+	source := b.AddSourceWithType("owner@example.com", "synctech_sms")
+	owner := b.AddParticipant("owner@example.com", "example.com", "Owner")
+	b.AddOwnerParticipant(source, owner)
+	member := b.AddParticipant("member@example.net", "example.net", "Member")
+	draftRecipient := b.AddParticipant("draft@example.org", "example.org", "Draft recipient")
+	b.AddParticipantIdentifier(draftRecipient, "email", "draft@example.org", "draft@example.org", true)
+	b.AddConversationParticipant(710, owner)
+	b.AddConversationParticipant(710, member)
+	start := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	sent := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 710, ConversationType: "group_chat", MessageType: "mms", SentAt: start})
+	b.AddFrom(sent, member, "Member")
+	b.AddTo(sent, owner, "Owner")
+	draft := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 710, ConversationType: "group_chat", MessageType: "mms", SentAt: start.Add(time.Hour), IsFromMe: true})
+	b.AddFrom(draft, owner, "Owner")
+	b.AddTo(draft, draftRecipient, "Draft recipient")
+	b.unsentMessages = fmt.Sprintf("(SELECT %d::BIGINT AS message_id)", draft)
+	engine := b.BuildEngine()
+
+	detail, err := engine.GetPerson(t.Context(), draftRecipient, Context{}, nil)
+	require.NoError(err)
+	require.NotNil(detail)
+	assert.Equal("Draft recipient", detail.DisplayLabel)
+	assert.Zero(detail.ActivityCount)
+	assert.True(detail.FirstAt.IsZero())
+	assert.True(detail.LastAt.IsZero())
+	assert.NotEmpty(detail.Identifiers)
+
+	detail, err = engine.GetPerson(t.Context(), 9999, Context{}, nil)
+	require.NoError(err)
+	assert.Nil(detail)
+	detail, err = engine.GetPerson(t.Context(), draftRecipient, Context{SourceIDs: []int64{source}}, nil)
+	require.NoError(err)
+	assert.Nil(detail)
+
+	summary, err := engine.GetPersonSummary(t.Context(), draftRecipient, ExploreRequest{Context: Context{SourceIDs: []int64{source}}}, nil)
+	require.NoError(err)
+	assert.Empty(summary.Rows)
+	timeline, err := engine.RelationshipTimeline(t.Context(), RelationshipTimelineRequest{CanonicalID: draftRecipient})
+	require.NoError(err)
+	assert.Empty(timeline.Rows)
+	assert.Zero(timeline.TotalCount)
+}
+
+func linkedPeopleFixture(t *testing.T) (*TestDataBuilder, int64, int64, int64, int64, time.Time) {
+	t.Helper()
+	b := NewTestDataBuilder(t)
+	source := b.AddSourceWithType("archive@example.com", "gmail")
+	alicePrimary := b.AddParticipant("alice@example.com", "example.com", "Alice Example")
+	aliceAlias := b.AddParticipant("alice@other.example", "other.example", "")
+	bob := b.AddParticipant("bob@example.com", "example.com", "Bob Example")
+	b.AddParticipantIdentifier(alicePrimary, "email", "alice@example.com", "alice@example.com", true)
+	b.AddParticipantIdentifier(aliceAlias, "email", "alice@other.example", "alice@other.example", true)
+	b.LinkCluster(alicePrimary, aliceAlias)
+
+	start := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	primaryMail := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 401, Subject: "From primary", SentAt: start})
+	b.AddFrom(primaryMail, alicePrimary, "Alice Example")
+	aliasMail := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 402, Subject: "From alias", SentAt: start.Add(time.Hour)})
+	b.AddFrom(aliasMail, aliceAlias, "")
+	b.AddAttachmentWithMIME(901, aliasMail, 100, "alias.pdf", "application/pdf")
+	// One entry addressed to BOTH members must count once for the cluster.
+	bothMail := b.AddMessage(MessageOpt{SourceID: source, ConversationID: 403, Subject: "To both", SentAt: start.Add(2 * time.Hour)})
+	b.AddFrom(bothMail, bob, "Bob Example")
+	b.AddTo(bothMail, alicePrimary, "Alice Example")
+	b.AddTo(bothMail, aliceAlias, "")
+	return b, source, alicePrimary, aliceAlias, bob, start
+}
+
+func TestGetPersonUsesLiveMembershipAfterUnlinkWithRetainedCache(t *testing.T) {
+	t.Parallel()
+	b, source, primary, alias, _, start := linkedPeopleFixture(t)
+	draft := b.AddMessage(MessageOpt{SourceID: source, Subject: "Unsent", SentAt: start.Add(3 * time.Hour)})
+	b.AddFrom(draft, primary, "Alice Example")
+	b.AddTo(draft, alias, "")
+	b.AddAttachmentWithMIME(902, draft, 100, "draft.pdf", "application/pdf")
+	b.unsentMessages = fmt.Sprintf("(SELECT %d::BIGINT AS message_id)", draft)
+	engine := b.BuildEngine()
+
+	linked, err := engine.GetPerson(t.Context(), alias, Context{}, []int64{primary, alias})
+	require.NoError(t, err)
+	require.NotNil(t, linked)
+	require.Equal(t, int64(3), linked.ActivityCount)
+
+	// After unlinking, the caller supplies no linked members while a failed
+	// identity refresh leaves the committed Parquet cluster unchanged.
+	for _, tc := range []struct {
+		name    string
+		id      int64
+		files   int64
+		firstAt time.Time
+	}{
+		{name: "former canonical", id: primary, firstAt: start},
+		{name: "former alias", id: alias, files: 1, firstAt: start.Add(time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			detail, err := engine.GetPerson(t.Context(), tc.id, Context{}, nil)
+			require.NoError(err)
+			require.NotNil(detail)
+			summary, err := engine.GetPersonSummary(t.Context(), tc.id, ExploreRequest{
+				Context: Context{SourceIDs: []int64{source}},
+			}, nil)
+			require.NoError(err)
+			require.Len(summary.Rows, 1)
+			for _, row := range []PersonSummary{*detail, summary.Rows[0]} {
+				assert.Equal(tc.id, row.ID)
+				assert.Equal(int64(2), row.ActivityCount, "count only this participant's sent activity")
+				assert.Equal(tc.files, row.FileCount)
+				assert.Equal(tc.firstAt, row.FirstAt)
+				assert.Equal(start.Add(2*time.Hour), row.LastAt)
+			}
+		})
+	}
+}
+
 func TestSearchPeopleShowsPartialIdentityLabelsHonestly(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -142,6 +326,7 @@ func TestSearchPeopleShowsPartialIdentityLabelsHonestly(t *testing.T) {
 }
 
 func TestSearchDomainsSpansSourcesAndModalitiesWithoutOrganizationClaims(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -178,6 +363,7 @@ func TestSearchDomainsSpansSourcesAndModalitiesWithoutOrganizationClaims(t *test
 // People and Relationships views — while unlinked participants still count
 // individually and per-entry metrics stay per-entry.
 func TestSearchDomainsCountsLinkedAliasesAsOnePerson(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -208,6 +394,7 @@ func TestSearchDomainsCountsLinkedAliasesAsOnePerson(t *testing.T) {
 // on ANOTHER domain still counts on this domain, because membership is the
 // participant's own address — canonical resolution must never drop it.
 func TestSearchDomainsCountsClusterWithCanonicalOnAnotherDomain(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -235,6 +422,7 @@ func TestSearchDomainsCountsClusterWithCanonicalOnAnotherDomain(t *testing.T) {
 }
 
 func TestGetPersonAndDomainAreExactAndBounded(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -265,6 +453,7 @@ func TestGetPersonAndDomainAreExactAndBounded(t *testing.T) {
 }
 
 func TestPersonSummaryCountsMeetingTranscriptsWithoutLoadingMeetingRows(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -292,6 +481,7 @@ func TestPersonSummaryCountsMeetingTranscriptsWithoutLoadingMeetingRows(t *testi
 }
 
 func TestGetPersonWithClusterMemberIDsSpansIdentifiersAndMetricsAcrossCluster(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -363,6 +553,7 @@ func TestGetPersonWithClusterMemberIDsSpansIdentifiersAndMetricsAcrossCluster(t 
 // with no named member the requested row's identifier fallback is unchanged;
 // an unlinked participant is unaffected.
 func TestGetPersonClusterLabelPrefersNamedMember(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -412,6 +603,7 @@ func TestGetPersonClusterLabelPrefersNamedMember(t *testing.T) {
 }
 
 func TestContextualPersonAndDomainSummariesUseTheExactCanonicalPopulation(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -457,6 +649,7 @@ func TestContextualPersonAndDomainSummariesUseTheExactCanonicalPopulation(t *tes
 // Without cluster member IDs the summary stays scoped to the requested
 // participant alone, matching pre-cluster-aware behavior.
 func TestGetPersonSummaryWithClusterMemberIDsCountsAliasOnlyActivity(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -503,6 +696,7 @@ func TestGetPersonSummaryWithClusterMemberIDsCountsAliasOnlyActivity(t *testing.
 }
 
 func TestPeopleAndDomainSearchRejectUnboundedOrUnknownSorts(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	engine := NewTestDataBuilder(t).BuildEngine()
 	_, err := engine.SearchPeople(context.Background(), PersonSearchRequest{Page: PageSpec{Limit: 501}})
@@ -512,6 +706,7 @@ func TestPeopleAndDomainSearchRejectUnboundedOrUnknownSorts(t *testing.T) {
 }
 
 func TestSearchPeopleProjectsResolvedCanonicalSearchCandidates(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -555,6 +750,7 @@ func TestSearchPeopleProjectsResolvedCanonicalSearchCandidates(t *testing.T) {
 }
 
 func TestSearchDomainsProjectsResolvedCanonicalSearchCandidates(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -583,6 +779,7 @@ func TestSearchDomainsProjectsResolvedCanonicalSearchCandidates(t *testing.T) {
 // canonical ID and by its alias ID must agree and both include alias-owned
 // entries, matching Explore/Files.
 func TestGetPersonSummarySecondaryParticipantFilterExpandsClusters(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -626,6 +823,7 @@ func TestGetPersonSummarySecondaryParticipantFilterExpandsClusters(t *testing.T)
 // not appear in the count — opening a domain from the list must never change
 // its displayed person count.
 func TestGetDomainSummaryMatchesDomainListPersonCount(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -663,6 +861,7 @@ func TestGetDomainSummaryMatchesDomainListPersonCount(t *testing.T) {
 // member. Filtering by the counterpart's canonical ID and by its alias ID
 // must agree and both include alias-owned entries, matching Explore/Files.
 func TestGetDomainSummaryParticipantFilterExpandsClusters(t *testing.T) {
+	t.Parallel()
 	assertions := assert.New(t)
 	requirements := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -699,12 +898,13 @@ func TestGetDomainSummaryParticipantFilterExpandsClusters(t *testing.T) {
 		"filtering by the alias ID must agree with the canonical ID")
 }
 
-func TestSearchPeopleUsesTemperatureBeforeRecencyForEqualTextMatches(t *testing.T) {
+func TestSearchPeopleHonorsRequestedSortAndDefaultRelevance(t *testing.T) {
+	t.Parallel()
 	b := NewTestDataBuilder(t)
 	sourceID := b.AddSourceWithType("owner@example.test", "gmail")
 	ownerID := b.AddParticipant("owner@example.test", "example.test", "Owner")
-	hotID := b.AddParticipant("hot@example.test", "example.test", "Alex Hot")
-	coldID := b.AddParticipant("cold@example.test", "example.test", "Alex Cold")
+	hotID := b.AddParticipant("hot@example.test", "example.test", "Alex A Hot")
+	coldID := b.AddParticipant("cold@example.test", "example.test", "Alex Z Cold")
 	b.AddOwnerParticipant(sourceID, ownerID)
 	for index := range 4 {
 		messageID := b.AddMessage(MessageOpt{
@@ -712,20 +912,17 @@ func TestSearchPeopleUsesTemperatureBeforeRecencyForEqualTextMatches(t *testing.
 			SentAt: time.Date(2026, time.January, 1+index, 12, 0, 0, 0, time.UTC),
 		})
 		b.AddFrom(messageID, ownerID, "Owner")
-		b.AddTo(messageID, hotID, "Alex Hot")
+		b.AddTo(messageID, hotID, "Alex A Hot")
 	}
-	newerColdMessage := b.AddMessage(MessageOpt{
-		SourceID: sourceID, MessageType: "email", IsFromMe: true,
-		SentAt: time.Date(2026, time.February, 1, 12, 0, 0, 0, time.UTC),
-	})
-	b.AddFrom(newerColdMessage, ownerID, "Owner")
-	b.AddTo(newerColdMessage, coldID, "Alex Cold")
+	for range 5 {
+		newerColdMessage := b.AddMessage(MessageOpt{
+			SourceID: sourceID, MessageType: "email", IsFromMe: true,
+			SentAt: time.Date(2026, time.February, 1, 12, 0, 0, 0, time.UTC),
+		})
+		b.AddFrom(newerColdMessage, ownerID, "Owner")
+		b.AddTo(newerColdMessage, coldID, "Alex Z Cold")
+	}
 	engine := b.BuildEngine()
-	calendar, err := engine.RelationshipCalendar(t.Context(), RelationshipCalendarRequest{
-		CanonicalID: hotID, Year: 2026, Timezone: "UTC",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 100, calendar.Current.Temperature)
 
 	for _, test := range []struct {
 		name    string
@@ -736,24 +933,34 @@ func TestSearchPeopleUsesTemperatureBeforeRecencyForEqualTextMatches(t *testing.
 		{name: "logical filter", context: Context{MessageTypes: []string{"email"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			assert := assert.New(t)
-			require := require.New(t)
-			response, err := engine.SearchPeople(t.Context(), PersonSearchRequest{
-				Explore: ExploreRequest{Context: test.context}, Query: "alex",
-				Sort: SortSpec{Field: "display_label", Direction: "asc"},
-				Page: PageSpec{Limit: 25},
-			})
-			require.NoError(err)
-			require.Len(response.Rows, 2)
-			assert.Equal(hotID, response.Rows[0].ID,
-				"temperature breaks equal-quality matches before newer activity")
-			assert.Equal(100, response.Rows[0].CurrentRelationshipTemperature)
-			assert.Equal(coldID, response.Rows[1].ID)
+			for _, order := range []struct {
+				name  string
+				sort  SortSpec
+				first int64
+			}{
+				{name: "default relevance", sort: SortSpec{}, first: hotID},
+				{name: "most recent", sort: SortSpec{Field: "latest_at", Direction: "desc"}, first: coldID},
+			} {
+				t.Run(order.name, func(t *testing.T) {
+					response, err := engine.SearchPeople(t.Context(), PersonSearchRequest{
+						Explore: ExploreRequest{Context: test.context}, Query: "alex",
+						Sort: order.sort, Page: PageSpec{Limit: 1},
+					})
+					require.NoError(t, err)
+					require.Len(t, response.Rows, 1)
+					assert.Equal(t, int64(2), response.TotalCount)
+					assert.Equal(t, order.first, response.Rows[0].ID, "sort applies before the first page is selected")
+					if order.name == "default relevance" {
+						assert.Equal(t, 100, response.Rows[0].CurrentRelationshipTemperature)
+					}
+				})
+			}
 		})
 	}
 }
 
 func TestGetPersonByAliasUsesCanonicalRelationshipTemperature(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	b := NewTestDataBuilder(t)

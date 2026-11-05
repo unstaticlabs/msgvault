@@ -34,6 +34,7 @@ import (
 	"go.kenn.io/msgvault/internal/provideridentity"
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/senderauth"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -874,11 +875,18 @@ type cliAccountResponse struct {
 	LastSync           *time.Time              `json:"last_sync"`
 	// VirtualAccounts lists the source's confirmed identities and its
 	// unattributed rows, each with live counts, for account pickers.
-	VirtualAccounts []store.VirtualAccount `json:"virtual_accounts,omitempty"`
+	VirtualAccounts    []store.VirtualAccount `json:"virtual_accounts,omitempty"`
+	Identifier         string                 `json:"identifier"`
+	Alias              string                 `json:"alias"`
+	HistoryOnly        bool                   `json:"history_only"`
+	ReanchorRequired   bool                   `json:"reanchor_required"`
+	MergedIntoSourceID int64                  `json:"merged_into_source_id"`
 }
 
 type cliMessageResponse struct {
+	SenderAuth           *senderauth.Verdict       `json:"sender_auth,omitempty"`
 	RelatedMessageID     *int64                    `json:"related_message_id,omitempty"`
+	Calendar             *store.CalendarProjection `json:"calendar,omitempty"`
 	CalendarState        *store.CalendarEventState `json:"calendar_state,omitempty"`
 	SourceID             int64                     `json:"source_id,omitempty"`
 	InboxState           string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
@@ -896,6 +904,7 @@ type cliMessageResponse struct {
 	DeletedAt            *time.Time                `json:"deleted_at"`
 	SizeEstimate         int64                     `json:"size_estimate"`
 	HasAttachments       bool                      `json:"has_attachments"`
+	HiddenTextPresent    bool                      `json:"hidden_text_present"`
 	From                 []cliMessageAddress       `json:"from"`
 	To                   []cliMessageAddress       `json:"to"`
 	Cc                   []cliMessageAddress       `json:"cc"`
@@ -912,12 +921,13 @@ type cliMessageAddress struct {
 }
 
 type cliMessageAttachment struct {
-	ID          int64  `json:"id"`
-	Filename    string `json:"filename"`
-	MimeType    string `json:"mime_type"`
-	Size        int64  `json:"size"`
-	ContentHash string `json:"content_hash"`
-	URL         string `json:"url,omitempty"`
+	Docbank     []store.DocbankAttachmentRef `json:"docbank,omitempty"`
+	ID          int64                        `json:"id"`
+	Filename    string                       `json:"filename"`
+	MimeType    string                       `json:"mime_type"`
+	Size        int64                        `json:"size"`
+	ContentHash string                       `json:"content_hash"`
+	URL         string                       `json:"url,omitempty"`
 }
 
 type cliScope struct {
@@ -1402,6 +1412,15 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_args", "--grant-decided is not accepted through the daemon CLI runner")
 		return
 	}
+	// A proxied watch would keep a daemon subprocess polling until the
+	// request is cancelled; status callers poll the endpoint themselves. Only
+	// `embeddings status` has --watch, and a flag can precede the subcommand,
+	// so the whole group is checked.
+	if req.Args[0] == "embeddings" && cliRunArgsContainFlag(req.Args, "watch") {
+		writeError(w, http.StatusBadRequest, "invalid_args",
+			"--watch is not accepted through the daemon CLI runner; poll GET /api/v1/embeddings/status instead")
+		return
+	}
 	if proof := r.Header.Get(apiprotocol.DaemonRuntimeTokenHeader); proof != "" {
 		if req.Args[0] != "add-account" || s.shutdownToken == "" ||
 			subtle.ConstantTimeCompare([]byte(proof), []byte(s.shutdownToken)) != 1 {
@@ -1435,6 +1454,9 @@ func (s *Server) handleCLIRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cliRunEnvAllowedForCommand(args []string, name string) bool {
+	if name == clirun.EnvInlineOAuth {
+		return len(args) > 0 && args[0] == "add-inline"
+	}
 	if IsCLIRunDraftCreate(args) || IsCLIRunDraftLifecycle(args) || IsCLIRunDraftSendAs(args) {
 		return false
 	}
@@ -1734,6 +1756,11 @@ func cliRunCommandAllowed(args []string) bool {
 			case "run", "status", "history":
 				return true
 			}
+		case "tiers":
+			switch args[2] {
+			case "preview", "explain":
+				return true
+			}
 		}
 		return false
 	}
@@ -1748,10 +1775,12 @@ func cliRunCommandAllowed(args []string) bool {
 		"add-chatwoot",
 		"add-plaud",
 		"add-twenty",
+		"add-pocket",
 		"add-discord",
 		"add-granola",
 		"add-omi",
 		"add-imap",
+		"add-inline",
 		"add-muesli",
 		"add-notion-meetings",
 		"add-o365",
@@ -1761,6 +1790,7 @@ func cliRunCommandAllowed(args []string) bool {
 		"add-twilio",
 		"backfill-beeper-media",
 		"backfill-discord-media",
+		"backfill-inline-media",
 		"backfill-slack-media",
 		"backfill-teams-media",
 		"build-embeddings",
@@ -1783,6 +1813,7 @@ func cliRunCommandAllowed(args []string) bool {
 		"import-messenger",
 		"import-pst",
 		"import-slackdump",
+		"import-telegram",
 		"import-synctech-sms",
 		"import-whatsapp",
 		"list-deletions",
@@ -1790,6 +1821,7 @@ func cliRunCommandAllowed(args []string) bool {
 		"logs",
 		"pack-attachments",
 		"purge-excluded-media",
+		"policy",
 		"repair-dates",
 		"repair-identity",
 		"repair-labels",
@@ -1806,8 +1838,10 @@ func cliRunCommandAllowed(args []string) bool {
 		"sync-chatwoot",
 		"sync-plaud",
 		"sync-twenty",
+		"sync-pocket",
 		"sync-discord",
 		"sync-granola",
+		"sync-inline",
 		"sync-muesli",
 		"sync-omi",
 		"sync-notion-meetings",
@@ -2126,7 +2160,7 @@ func (s *Server) currentPeopleSweepConfig() (peoplesweep.Config, bool) {
 	if !snapshot.Exists {
 		return s.cfg.People.Sweep, true
 	}
-	loaded, err := config.LoadConfigFile(snapshot, s.cfg.HomeDir)
+	loaded, err := config.LoadClientConfigFile(snapshot, s.cfg.HomeDir)
 	if err != nil {
 		return peoplesweep.Config{}, false
 	}
@@ -2400,7 +2434,7 @@ func (s *Server) handleCLISearch(w http.ResponseWriter, r *http.Request) {
 	offset := max(parseCLISearchInt(r.URL.Query().Get("offset"), 0), 0)
 
 	queryStr := r.URL.Query().Get("q")
-	parsed := search.Parse(queryStr)
+	parsed := search.ParseOR(queryStr)
 	if err := parsed.Err(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 		return
@@ -2778,7 +2812,7 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	var grouped map[int64]store.SourceMessageCounts
 	var response cliAccountsResponse
-	if counter, ok := s.store.(sourceMessageCounter); ok && s.requestAuthentication(r).Grant == nil {
+	if counter, ok := s.store.(sourceMessageCounter); ok && !s.sourceScopedRead(r) {
 		grouped, response.AsOf, response.Stale, err = s.accountCountSnapshots.get(
 			r.Context(), s.importContext, "", s.statsSnapshotWait, counter.CountMessagesBySourceContext,
 		)
@@ -2830,8 +2864,8 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 		var virtual map[int64][]store.VirtualAccount
 		var stale bool
 		var err error
-		if s.requestAuthentication(r).Grant != nil {
-			// An agent reads the catalog inside its authorization snapshot:
+		if s.sourceScopedRead(r) {
+			// Scoped readers use their authorization snapshot:
 			// the shared cache may predate a source whose ID was reused.
 			virtual, err = lister.ListVirtualAccountsContext(r.Context())
 		} else {
@@ -2854,12 +2888,22 @@ func (s *Server) handleCLIAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.sourceScopedRead(r) {
+		// A merge target outside the authorized sources stays hidden.
+		for i := range accounts {
+			if !slices.ContainsFunc(sources, func(src *store.Source) bool { return src.ID == accounts[i].MergedIntoSourceID }) {
+				accounts[i].MergedIntoSourceID = 0
+			}
+		}
+	}
 	response.Accounts = accounts
 	writeJSON(w, http.StatusOK, response)
 }
 
 func newCLIAccountResponse(src *store.Source, count, sourceDeleted int64) cliAccountResponse {
 	account := cliAccountResponse{
+		Identifier: src.Identifier, Alias: src.Alias, HistoryOnly: src.HistoryOnly,
+		ReanchorRequired: src.ReanchorRequired, MergedIntoSourceID: src.MergedIntoSourceID,
 		CalendarCoverage:   store.ParseCalendarCoverage(src.SyncConfig),
 		ID:                 src.ID,
 		Email:              src.Identifier,
@@ -2890,7 +2934,13 @@ func (s *Server) updateCLIAccount(
 	}
 	cliStore = bindCLIStoreContext(ctx, cliStore)
 
-	result, err := accountops.UpdateDisplayName(cliStore, req)
+	var result accountops.UpdateResult
+	var err error
+	if settings, ok := s.store.(accountops.SettingsStore); ok {
+		result, err = accountops.UpdateAccount(ctx, settings, req)
+	} else {
+		result, err = accountops.UpdateDisplayName(cliStore, req)
+	}
 	if err != nil {
 		return accountops.UpdateResult{}, s.operationError(
 			err,
@@ -3508,6 +3558,11 @@ func (s *Server) handleCLIMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	from := ""
+	if len(msg.From) == 1 {
+		from = msg.From[0].Email
+	}
+	msg.SenderAuth = s.senderAuth(r.Context(), msg.ID, msg.SourceID, msg.MessageType, from)
 	writeJSON(w, http.StatusOK, cliMessageResponseFromQuery(msg))
 }
 
@@ -3691,6 +3746,8 @@ func (s *Server) resolveCLIMessage(r *http.Request, idStr string) (*query.Messag
 
 func cliMessageResponseFromQuery(msg *query.MessageDetail) cliMessageResponse {
 	return cliMessageResponse{
+		SenderAuth:           msg.SenderAuth,
+		Calendar:             msg.Calendar,
 		CalendarState:        msg.CalendarState,
 		ID:                   msg.ID,
 		InboxState:           providerStateValue(msg.InboxState),
@@ -3709,6 +3766,7 @@ func cliMessageResponseFromQuery(msg *query.MessageDetail) cliMessageResponse {
 		DeletedAt:            msg.DeletedAt,
 		SizeEstimate:         msg.SizeEstimate,
 		HasAttachments:       msg.HasAttachments,
+		HiddenTextPresent:    msg.HiddenTextPresent,
 		From:                 cliMessageAddresses(msg.From),
 		To:                   cliMessageAddresses(msg.To),
 		Cc:                   cliMessageAddresses(msg.Cc),
@@ -3737,6 +3795,7 @@ func cliMessageAttachments(atts []query.AttachmentInfo) []cliMessageAttachment {
 			MimeType:    att.MimeType,
 			Size:        att.Size,
 			ContentHash: att.ContentHash,
+			Docbank:     att.Docbank,
 			URL:         att.URL,
 		}
 	}

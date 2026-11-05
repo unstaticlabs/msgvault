@@ -391,6 +391,9 @@ var operationGateExemptPaths = map[string]bool{
 	// Minting an inbox-archive confirmation token reads the selection and
 	// seals it; the archive itself is a separate, gated request.
 	inboxArchiveAuthorizePath: true,
+	// MCP envelopes delegate gate acquisition to their nested API requests.
+	"/mcp":        true,
+	"/mcp/writes": true,
 	// Calendar control acquires the gate after parsing, authorization, and preview.
 	"/api/v1/calendar/control": true,
 	// Scoring coordinates the gate around local mutations, never provider I/O.
@@ -402,6 +405,7 @@ var operationGateExemptPaths = map[string]bool{
 	archiveQueryEndpointPath:           true,
 	agentTokensPath:                    true,
 	muesliImportEndpointPath:           true,
+	muesliRecordingEndpointPath:        true,
 	// Telemetry changes no archive state; gating it would make opening the app yield a running sync.
 	telemetryEventsPath: true,
 }
@@ -610,13 +614,21 @@ func cliRepairMessageGateDecision(r *http.Request) (label string, skip bool, err
 // cliRunReadOnlyCommands are proxied CLI commands that only read. Keys are
 // the leading command-path words of CLIRunRequest args (flags follow them).
 var cliRunReadOnlyCommands = map[string]bool{
-	"draft-get":        true,
-	"draft-send-as":    true,
-	"logs":             true,
-	"list-deletions":   true,
-	"show-deletion":    true,
-	"embeddings list":  true,
-	"documents search": true,
+	"export-messages":   true,
+	"export-discord":    true,
+	"list-folders":      true,
+	"policy list":       true,
+	"draft-get":         true,
+	"draft-send-as":     true,
+	"logs":              true,
+	"list-deletions":    true,
+	"show-deletion":     true,
+	"embeddings list":   true,
+	"embeddings status": true,
+	"documents search":  true,
+	// Tier previews only read.
+	"person tiers preview": true,
+	"person tiers explain": true,
 }
 
 // cliRunSelfGatedCommands are proxied CLI commands that acquire the
@@ -624,8 +636,17 @@ var cliRunReadOnlyCommands = map[string]bool{
 // create" brackets its own work with the backup freeze begin/end endpoints
 // (see handleBackupFreezeBegin), so the middleware must skip it exactly like
 // a read-only command or the two acquisitions would deadlock each other.
+// Embeddings optimize coordinates its own gate leases between copy batches.
 var cliRunSelfGatedCommands = map[string]bool{
 	"backup create": true,
+}
+
+// IsCLIRunEmbeddingsOptimize identifies the optimize command path using the
+// same flag handling as gate inspection. The daemon must handle every matched
+// invocation locally, including invalid arguments, rather than launching an
+// ungated generic CLI subprocess.
+func IsCLIRunEmbeddingsOptimize(args []string) bool {
+	return len(args) > 0 && cliRunCommandWords(args) == "embeddings optimize"
 }
 
 func cliRunGateDecision(r *http.Request, auth requestAuthentication) (label string, skip bool, err error) {
@@ -653,7 +674,7 @@ func cliRunGateDecision(r *http.Request, auth requestAuthentication) (label stri
 			return "", true, nil
 		}
 		command := cliRunCommandWords(req.Args)
-		if cliRunReadOnlyCommands[command] || cliRunSelfGatedCommands[command] {
+		if cliRunReadOnlyCommands[command] || cliRunSelfGatedCommands[command] || IsCLIRunEmbeddingsOptimize(req.Args) {
 			return "", true, nil
 		}
 		if command != "" {
@@ -670,21 +691,44 @@ func cliRunGateDecision(r *http.Request, auth requestAuthentication) (label stri
 // cliRunCommandGroups are proxied parent commands whose second arg is a
 // subcommand name rather than a positional value.
 var cliRunCommandGroups = map[string]bool{
+	"policy":     true,
 	"embeddings": true,
 	"backup":     true,
 	"documents":  true,
 }
 
-// cliRunCommandWords extracts the command path from proxied args. Positional
-// values and flags follow the command path, so only a known group consumes a
-// second word.
+// cliRunCommandWords extracts the command path while consuming supported flags and their values.
 func cliRunCommandWords(args []string) string {
 	first := args[0]
 	if strings.HasPrefix(first, "-") {
 		return ""
 	}
-	if cliRunCommandGroups[first] && len(args) > 1 && !strings.HasPrefix(args[1], "-") {
-		return first + " " + args[1]
+	if first == cliRunPersonCommand && len(args) > 2 && args[1] == "tiers" {
+		return first + " tiers " + args[2]
+	}
+	if !cliRunCommandGroups[first] {
+		return first
+	}
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			return first + " " + arg
+		}
+		name, _, hasValue := strings.Cut(arg, "=")
+		switch name {
+		case "--json", "--watch", "--verbose", "-v", "--local", "--no-log-file", "--log-sql", "--help", "-h":
+		case "--source", "--interval", "--config", "--home", "--log-file", "--log-level", "--log-sql-slow-ms":
+			if !hasValue {
+				i++
+			}
+		default:
+			// Cobra accepts repeated boolean shorthand, such as -vv.
+			if strings.HasPrefix(name, "-v") && strings.Trim(name[1:], "v") == "" {
+				continue
+			}
+			// Unknown flags stay gated because their next argument may be a value.
+			return first
+		}
 	}
 	return first
 }

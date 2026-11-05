@@ -103,6 +103,30 @@ CREATE TABLE IF NOT EXISTS sources (
     UNIQUE(source_type, identifier)
 );
 
+-- Account-level route proof failures apply to every archived chat, including
+-- quiet chats that an incremental sync does not revisit.
+CREATE TABLE IF NOT EXISTS source_messaging_route_failures (
+    source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    failure TEXT NOT NULL CHECK (failure IN ('account_lookup_failed', 'account_not_connected', 'account_binding_mismatch', 'network_unverified')),
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- Archive aliases/lifecycle never rewrite provider account identity.
+CREATE TABLE IF NOT EXISTS source_settings (
+    source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    alias TEXT NOT NULL DEFAULT '',
+    alias_key TEXT UNIQUE,
+    history_only BOOLEAN NOT NULL DEFAULT FALSE,
+    merged_into_source_id INTEGER REFERENCES sources(id),
+    retired_at DATETIME,
+    CHECK (merged_into_source_id IS NULL OR merged_into_source_id <> source_id)
+);
+CREATE TABLE IF NOT EXISTS source_maintenance_lock (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+);
+INSERT INTO source_maintenance_lock(singleton) VALUES (1) ON CONFLICT (singleton) DO NOTHING;
+
 -- External CardDAV connections. Passwords never enter this schema; the
 -- account row contains only non-secret connection identity and discovery
 -- fences used by remote-first synchronization.
@@ -140,6 +164,12 @@ CREATE INDEX IF NOT EXISTS idx_carddav_sync_runs_state_id
     ON carddav_sync_runs(state, id DESC);
 CREATE INDEX IF NOT EXISTS idx_carddav_sync_runs_operations_order
     ON carddav_sync_runs(started_at DESC, id DESC);
+
+-- A bounded operator snapshot; Operations remains the durable run ledger.
+CREATE TABLE IF NOT EXISTS embedding_diagnostics (
+    generation_id INTEGER PRIMARY KEY,
+    snapshot TEXT NOT NULL CHECK (length(CAST(snapshot AS BLOB)) <= 131072)
+);
 
 -- Operations owns one narrow archive-side ledger per bounded worker kind.
 -- Invocation keys and fixed error codes are private recorder fields; no
@@ -1236,6 +1266,7 @@ CREATE TABLE IF NOT EXISTS carddav_resources (
     mapping_status          TEXT NOT NULL CHECK (mapping_status IN ('mapped', 'unbound', 'ambiguous')),
     mapping_revision        INTEGER NOT NULL DEFAULT 1 CHECK (mapping_revision > 0),
     governance              TEXT NOT NULL CHECK (governance IN ('remote', 'local', 'none')),
+    locally_published       BOOLEAN NOT NULL DEFAULT FALSE,
     person_id               INTEGER REFERENCES persons(id) ON DELETE SET NULL,
     person_revision_at_bind INTEGER,
     owns_display_name       BOOLEAN NOT NULL DEFAULT FALSE,
@@ -1386,6 +1417,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
     -- RFC 2919 List-Id for email list membership
     list_id TEXT,
+    hidden_text_present BOOLEAN NOT NULL DEFAULT 0,
 
     -- Message classification
     message_type TEXT NOT NULL,  -- 'email', 'imessage', 'sms', 'mms', 'rcs', 'whatsapp', 'fbmessenger', 'teams'
@@ -1552,6 +1584,41 @@ CREATE TABLE IF NOT EXISTS reaction_source_events (
 );
 CREATE INDEX IF NOT EXISTS idx_reaction_source_events_reaction
     ON reaction_source_events(reaction_id);
+
+-- Matrix events archived while encrypted. The ciphertext stays after recovery,
+-- so a replay conflict can return a recovered message to its placeholder.
+CREATE TABLE IF NOT EXISTS matrix_encrypted_events (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    ciphertext TEXT NOT NULL,
+    recovered BOOLEAN NOT NULL DEFAULT FALSE,
+    tried_stamp TEXT,   -- key backup state of the last failed attempt
+    tried_at INTEGER    -- Unix seconds of the last failed attempt
+);
+CREATE INDEX IF NOT EXISTS idx_matrix_encrypted_events_pending
+    ON matrix_encrypted_events(conversation_id, message_id) WHERE NOT recovered;
+
+-- The first event to use each Megolm message index in a room. Later events
+-- with the same index are replays and stay encrypted.
+CREATE TABLE IF NOT EXISTS matrix_megolm_claims (
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    message_index INTEGER NOT NULL,
+    event_id TEXT NOT NULL,
+    PRIMARY KEY (conversation_id, session_id, message_index)
+);
+
+-- Edits that arrived for a Matrix message whose keys are still unavailable.
+CREATE TABLE IF NOT EXISTS matrix_pending_edits (
+    target_message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    origin_ts INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    PRIMARY KEY (target_message_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_matrix_pending_edits_event
+    ON matrix_pending_edits(event_id);
 
 -- ============================================================================
 -- ATTACHMENTS & MEDIA
@@ -2019,6 +2086,7 @@ CREATE INDEX IF NOT EXISTS idx_person_sweep_sync_publications_source
 -- status='error' is actionable and contributes to sync_runs.errors_count.
 -- status='skipped' records expected item churn, such as Gmail messages that
 -- were deleted between a history/list response and raw-message fetch.
+-- status='resolved' records successful acquisition after an earlier failure.
 CREATE TABLE IF NOT EXISTS sync_run_items (
     id INTEGER PRIMARY KEY,
     sync_run_id INTEGER NOT NULL REFERENCES sync_runs(id) ON DELETE CASCADE,
@@ -3445,6 +3513,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_match_candidates_edge
         left_kind, left_id, right_kind, right_id, basis,
         service_id, scope_kind, scope_value, normalized_value
     );
+CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_right
+    ON identity_match_candidates(right_kind, right_id);
 CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_state
     ON identity_match_candidates(state, id);
 CREATE INDEX IF NOT EXISTS idx_identity_match_candidates_value
@@ -3657,6 +3727,7 @@ CREATE TABLE IF NOT EXISTS document_extractions (
     lease_until           DATETIME,
     attempt_count         INTEGER NOT NULL DEFAULT 0,
     request_count         INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+    upload_count          INTEGER NOT NULL DEFAULT 0 CHECK (upload_count >= 0),
     retry_count           INTEGER NOT NULL DEFAULT 0 CHECK (retry_count >= 0 AND retry_count <= request_count),
     provider_latency_ms   INTEGER NOT NULL DEFAULT 0 CHECK (provider_latency_ms >= 0),
     next_retry_at         DATETIME,
@@ -4398,6 +4469,13 @@ CREATE TABLE IF NOT EXISTS activity_projection_queue (
     queued_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Membership writes mark one conversation; the activity drain expands its messages.
+-- No foreign key: a cascading conversation delete can leave a harmless marker.
+CREATE TABLE IF NOT EXISTS activity_projection_conversation_queue (
+    conversation_id INTEGER PRIMARY KEY,
+    after_message_id INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_activity_projection_queue_pending
     ON activity_projection_queue(message_id)
     WHERE revision > processed_revision;
@@ -4447,48 +4525,7 @@ BEGIN
         queued_at = CURRENT_TIMESTAMP;
 END;
 
-CREATE TRIGGER IF NOT EXISTS trg_activity_queue_conversation_people_insert
-AFTER INSERT ON conversation_participants FOR EACH ROW
-BEGIN
-    INSERT INTO activity_projection_queue (message_id, revision, queued_at)
-    SELECT id, 1, CURRENT_TIMESTAMP
-    FROM messages
-    WHERE conversation_id = NEW.conversation_id
-    ON CONFLICT(message_id) DO UPDATE SET
-        revision = activity_projection_queue.revision + 1,
-        queued_at = CURRENT_TIMESTAMP;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_activity_queue_conversation_people_update
-AFTER UPDATE ON conversation_participants FOR EACH ROW
-BEGIN
-    INSERT INTO activity_projection_queue (message_id, revision, queued_at)
-    SELECT id, 1, CURRENT_TIMESTAMP
-    FROM messages
-    WHERE conversation_id = OLD.conversation_id
-    ON CONFLICT(message_id) DO UPDATE SET
-        revision = activity_projection_queue.revision + 1,
-        queued_at = CURRENT_TIMESTAMP;
-    INSERT INTO activity_projection_queue (message_id, revision, queued_at)
-    SELECT id, 1, CURRENT_TIMESTAMP
-    FROM messages
-    WHERE conversation_id = NEW.conversation_id
-    ON CONFLICT(message_id) DO UPDATE SET
-        revision = activity_projection_queue.revision + 1,
-        queued_at = CURRENT_TIMESTAMP;
-END;
-
-CREATE TRIGGER IF NOT EXISTS trg_activity_queue_conversation_people_delete
-AFTER DELETE ON conversation_participants FOR EACH ROW
-BEGIN
-    INSERT INTO activity_projection_queue (message_id, revision, queued_at)
-    SELECT id, 1, CURRENT_TIMESTAMP
-    FROM messages
-    WHERE conversation_id = OLD.conversation_id
-    ON CONFLICT(message_id) DO UPDATE SET
-        revision = activity_projection_queue.revision + 1,
-        queued_at = CURRENT_TIMESTAMP;
-END;
+-- Membership triggers are installed by SQLiteDialect.EnsureActivityProjectionTriggers.
 
 -- Conversation updates are classification input: changing email/chat/channel
 -- semantics must reproject every native message already in the conversation.
@@ -4631,3 +4668,192 @@ CREATE TABLE IF NOT EXISTS recording_references (
 );
 CREATE INDEX IF NOT EXISTS idx_recording_references_due
     ON recording_references(destination_key, state, next_action_at);
+
+-- A source retirement and its report are one atomic archive mutation.
+CREATE TABLE IF NOT EXISTS source_merges (
+    from_source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    into_source_id INTEGER NOT NULL REFERENCES sources(id),
+    report TEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS source_merge_messages (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    original_source_id INTEGER NOT NULL REFERENCES sources(id),
+    original_message_id TEXT,
+    survivor_message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    archive_only BOOLEAN NOT NULL DEFAULT FALSE,
+    match_basis TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_source_merge_messages_original ON source_merge_messages(original_source_id);
+-- These owning-row markers survive subsets that omit merge provenance. The
+-- original provider message ID lets media consumers verify imported raw data.
+CREATE TABLE IF NOT EXISTS source_merge_archive_only_messages (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    original_source_message_id TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TRIGGER IF NOT EXISTS source_retired_conversations_insert
+BEFORE INSERT ON conversations
+WHEN EXISTS (SELECT 1 FROM source_settings WHERE source_id = NEW.source_id AND merged_into_source_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'source is retired');
+END;
+
+CREATE TRIGGER IF NOT EXISTS source_retired_conversations_update
+BEFORE UPDATE OF source_id ON conversations
+WHEN EXISTS (SELECT 1 FROM source_settings WHERE source_id = NEW.source_id AND merged_into_source_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'source is retired');
+END;
+
+CREATE TRIGGER IF NOT EXISTS source_retired_messages_insert
+BEFORE INSERT ON messages
+WHEN EXISTS (SELECT 1 FROM source_settings WHERE source_id = NEW.source_id AND merged_into_source_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'source is retired');
+END;
+
+CREATE TRIGGER IF NOT EXISTS source_retired_messages_update
+BEFORE UPDATE OF source_id ON messages
+WHEN EXISTS (SELECT 1 FROM source_settings WHERE source_id = NEW.source_id AND merged_into_source_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'source is retired');
+END;
+
+-- Historical conversation and attachment endpoints never become provider IDs.
+CREATE TABLE IF NOT EXISTS source_merge_conversations (
+ conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+ original_source_id INTEGER NOT NULL REFERENCES sources(id),
+ original_conversation_id TEXT,
+ destination_conversation_id INTEGER NOT NULL REFERENCES conversations(id)
+);
+CREATE TABLE IF NOT EXISTS source_merge_attachments (
+ attachment_id INTEGER PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE,
+ original_attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+ original_source_id INTEGER NOT NULL REFERENCES sources(id)
+);
+CREATE TABLE IF NOT EXISTS source_merge_preserved_attachments (
+    attachment_id INTEGER PRIMARY KEY REFERENCES attachments(id) ON DELETE CASCADE
+);
+
+-- Archived roles keep their meaning when a live provider claims their name.
+CREATE TABLE IF NOT EXISTS source_merge_preserved_labels (
+    label_id INTEGER PRIMARY KEY REFERENCES labels(id) ON DELETE CASCADE
+);
+-- The attachment mirror shares the Docbank integration and receipt lifecycle.
+-- One intent and outcome row per content digest and destination.
+CREATE TABLE IF NOT EXISTS docbank_attachment_deliveries (
+ destination_key TEXT NOT NULL,
+ content_hash TEXT NOT NULL,
+ upload_name TEXT NOT NULL,
+ mime_type TEXT NOT NULL,
+ state TEXT NOT NULL CHECK (state IN ('sending', 'delivered', 'failed')),
+ reason TEXT NOT NULL DEFAULT '',
+ attempts INTEGER NOT NULL DEFAULT 0,
+ next_action_at DATETIME,
+ node_id BIGINT NOT NULL DEFAULT 0,
+ version_id TEXT NOT NULL DEFAULT '',
+ endpoint TEXT NOT NULL,
+ folder TEXT NOT NULL,
+ PRIMARY KEY (destination_key, content_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_docbank_attachments_ready
+ ON docbank_attachment_deliveries(destination_key, state);
+CREATE INDEX IF NOT EXISTS idx_docbank_attachment_receipts
+ ON docbank_attachment_deliveries(content_hash, state);
+
+-- Staged chat policy. Missing rows remain full for backwards compatibility.
+CREATE TABLE IF NOT EXISTS conversation_policy (
+ conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+ effective_tier TEXT NOT NULL DEFAULT 'full' CHECK (effective_tier IN ('full','cold','stub','skip')),
+ override_tier TEXT CHECK (override_tier IN ('full','cold','stub','skip')),
+ last_activity_at DATETIME
+);
+
+-- Typed calendar evidence rebuilt from raw provider snapshots.
+CREATE TABLE IF NOT EXISTS calendar_events (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    projection_version INTEGER NOT NULL,
+    content_hash TEXT NOT NULL,
+    provider_event_id TEXT NOT NULL DEFAULT '',
+    series_provider_id TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL DEFAULT '',
+    original_start_at DATETIME,
+    original_start_date TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    all_day BOOLEAN NOT NULL DEFAULT FALSE,
+    start_at DATETIME,
+    end_at DATETIME,
+    start_date TEXT NOT NULL DEFAULT '',
+    end_date TEXT NOT NULL DEFAULT '',
+    event_time_zone TEXT NOT NULL DEFAULT '',
+    calendar_time_zone TEXT NOT NULL DEFAULT '',
+    recurrence_json TEXT NOT NULL DEFAULT '[]',
+    recurrence_end_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_start ON calendar_events(start_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_recurrence_end ON calendar_events(recurrence_end_at);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_provider_id ON calendar_events(provider_event_id);
+CREATE TABLE IF NOT EXISTS calendar_event_attendees (
+    message_id INTEGER NOT NULL REFERENCES calendar_events(message_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    display_name TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL,
+    rsvp TEXT NOT NULL,
+    is_copy_self BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (message_id, ordinal)
+);
+
+-- Successful PDF selections remain unpublished until the complete extraction commits.
+CREATE TABLE IF NOT EXISTS document_extraction_ranges (
+    extraction_id TEXT NOT NULL REFERENCES document_extractions(id) ON DELETE CASCADE,
+    first_page INTEGER NOT NULL CHECK (first_page >= 1),
+    last_page INTEGER NOT NULL CHECK (last_page >= first_page),
+    total_pages INTEGER NOT NULL CHECK (total_pages >= last_page),
+    evidence TEXT NOT NULL,
+    evidence_checksum TEXT NOT NULL,
+    char_count BIGINT NOT NULL CHECK (char_count >= 0),
+    PRIMARY KEY (extraction_id, first_page)
+);
+
+CREATE TABLE IF NOT EXISTS loop_decisions (
+ message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+ state TEXT NOT NULL CHECK (state IN ('done', 'snoozed')),
+ snoozed_until DATETIME,
+ CHECK ((state = 'snoozed') = (snoozed_until IS NOT NULL))
+);
+
+-- Retained message facts for bounded request-time loop detection.
+CREATE TABLE IF NOT EXISTS loop_message_evidence (
+ message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+ rule_version INTEGER NOT NULL,
+ token TEXT NOT NULL,
+ facts TEXT
+);
+CREATE TRIGGER IF NOT EXISTS trg_loop_evidence_message_raw_insert
+AFTER INSERT ON message_raw FOR EACH ROW BEGIN
+ DELETE FROM loop_message_evidence WHERE message_id = NEW.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_loop_evidence_message_raw_update
+AFTER UPDATE ON message_raw FOR EACH ROW
+WHEN OLD.message_id IS NOT NEW.message_id OR OLD.raw_data IS NOT NEW.raw_data OR OLD.raw_format IS NOT NEW.raw_format OR OLD.compression IS NOT NEW.compression OR OLD.encryption_version IS NOT NEW.encryption_version BEGIN
+ DELETE FROM loop_message_evidence WHERE message_id IN (OLD.message_id, NEW.message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_loop_evidence_message_raw_delete
+AFTER DELETE ON message_raw FOR EACH ROW BEGIN
+ DELETE FROM loop_message_evidence WHERE message_id = OLD.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_loop_evidence_message_bodies_insert
+AFTER INSERT ON message_bodies FOR EACH ROW BEGIN
+ DELETE FROM loop_message_evidence WHERE message_id = NEW.message_id;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_loop_evidence_message_bodies_update
+AFTER UPDATE ON message_bodies FOR EACH ROW
+WHEN OLD.message_id IS NOT NEW.message_id OR OLD.body_text IS NOT NEW.body_text BEGIN
+ DELETE FROM loop_message_evidence WHERE message_id IN (OLD.message_id, NEW.message_id);
+END;
+CREATE TRIGGER IF NOT EXISTS trg_loop_evidence_message_bodies_delete
+AFTER DELETE ON message_bodies FOR EACH ROW BEGIN
+ DELETE FROM loop_message_evidence WHERE message_id = OLD.message_id;
+END;

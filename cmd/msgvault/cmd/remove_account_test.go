@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -371,9 +372,7 @@ func TestRemoveAccountTypeRejectsSameTypeDisplayCollision(t *testing.T) {
 	assert := assert.New(t)
 
 	tmpDir := t.TempDir()
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	first, err := s.GetOrCreateSource("gmail", "first@example.test")
 	require.NoError(err)
 	second, err := s.GetOrCreateSource("gmail", "second@example.test")
@@ -412,9 +411,7 @@ func TestRemoveAccountMatrixLogoutFailureLeavesSourceAndCredentials(t *testing.T
 	}))
 	t.Cleanup(server.Close)
 
-	s, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	source, err := s.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
 	require.NoError(err)
 	require.NoError(s.Close())
@@ -450,9 +447,7 @@ func TestRemoveAccountSourceIDDeletesOnlyExactSource(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
-	s, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	gmail, err := s.GetOrCreateSource("gmail", "shared@example.test")
 	require.NoError(err)
 	imap, err := s.GetOrCreateSource("imap", "shared@example.test")
@@ -483,13 +478,27 @@ func TestRemoveAccountSourceIDDeletesOnlyExactSource(t *testing.T) {
 	assert.ErrorIs(err, store.ErrSourceNotFound)
 }
 
-func TestRemoveAccountPromptsBeforeDaemonCLIRunner(t *testing.T) {
+type preflightConfirmationReader struct {
+	*strings.Reader
+
+	t         *testing.T
+	completed *atomic.Bool
+}
+
+func (r *preflightConfirmationReader) Read(p []byte) (int, error) {
+	r.t.Helper()
+	require.True(r.t, r.completed.Load(), "eligibility preflight must complete before confirmation is read")
+	return r.Reader.Read(p) //nolint:wrapcheck // Test reader transparently delegates after checking ordering.
+}
+
+func TestRemoveAccountChecksEligibilityBeforePrompt(t *testing.T) {
 	cfg := testConfigValue()
 	useLocal := false
 
 	require := require.New(t)
 	assert := assert.New(t)
 	requests := &atomic.Int32{}
+	preflightCompleted := &atomic.Bool{}
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/ping", daemon.NewPingHandler(daemon.PingHandlerOptions{
@@ -505,6 +514,13 @@ func TestRemoveAccountPromptsBeforeDaemonCLIRunner(t *testing.T) {
 		}
 		if !assert.NoError(json.NewDecoder(r.Body).Decode(&req), "decode request") {
 			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if requests.Load() == 1 {
+			assert.Equal([]string{"remove-account", "--dry-run", "alice@example.com"}, req.Args)
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			_, _ = w.Write([]byte(`{"type":"complete"}` + "\n"))
+			preflightCompleted.Store(true)
 			return
 		}
 		assert.Equal([]string{"remove-account", "--confirmed", "alice@example.com"}, req.Args, "args")
@@ -537,14 +553,14 @@ func TestRemoveAccountPromptsBeforeDaemonCLIRunner(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd := newRemoveAccountCmd()
 	cmd.SetContext(testCtx)
-	cmd.SetIn(bytes.NewBufferString("y\n"))
+	cmd.SetIn(&preflightConfirmationReader{Reader: strings.NewReader("y\n"), t: t, completed: preflightCompleted})
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"alice@example.com"})
 
 	require.NoError(cmd.Execute(), "remove-account")
 
-	assert.Equal(1, int(requests.Load()), "runner endpoint calls")
+	assert.Equal(2, int(requests.Load()), "runner endpoint calls")
 	assert.Contains(stdout.String(), "Remove this account and all its data?", "prompt")
 	assert.Contains(stdout.String(), "Account removed\n", "daemon stdout")
 	assert.Empty(stderr.String(), "stderr")
@@ -557,9 +573,7 @@ func TestRemoveAccountCmd_DeletesUniqueAttachmentFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 	attachmentsDir := filepath.Join(tmpDir, "attachments")
 
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	seedMessageWithAttachment(t, s,
 		"alice@example.com", "thread-a", "msg-a",
 		"aa/hashA", "hashA")
@@ -584,7 +598,7 @@ func TestRemoveAccountCmd_DeletesUniqueAttachmentFiles(t *testing.T) {
 	root.SetArgs([]string{"remove-account", "alice@example.com", "--yes"})
 	require.NoError(root.Execute(), "remove-account")
 
-	_, err = os.Stat(filePath)
+	_, err := os.Stat(filePath)
 	assert.True(t, os.IsNotExist(err), "expected attachment file deleted, err = %v", err)
 	assert.FileExists(t, orphanPath, "account removal keeps unrelated orphan files")
 }
@@ -596,9 +610,7 @@ func TestRemoveAccountCmd_PreservesSharedAttachments(t *testing.T) {
 	tmpDir := t.TempDir()
 	attachmentsDir := filepath.Join(tmpDir, "attachments")
 
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	// Both accounts reference the same content_hash/storage_path.
 	seedMessageWithAttachment(t, s,
 		"alice@example.com", "thread-a", "msg-a",
@@ -625,7 +637,7 @@ func TestRemoveAccountCmd_PreservesSharedAttachments(t *testing.T) {
 	root.SetArgs([]string{"remove-account", "alice@example.com", "--yes"})
 	require.NoError(root.Execute(), "remove-account")
 
-	_, err = os.Stat(filePath)
+	_, err := os.Stat(filePath)
 	assert.NoError(t, err, "shared attachment file should be preserved")
 }
 
@@ -642,12 +654,10 @@ func TestRemoveAccountCmd_DeletesUniquePackedMappings(t *testing.T) {
 	thumbnailHash := fmt.Sprintf("%x", sha256.Sum256(thumbnail))
 	thumbnailPath := thumbnailHash[:2] + "/" + thumbnailHash
 
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	seedMessageWithAttachment(t, s,
 		"alice@example.com", "thread-a", "msg-a", storagePath, hash)
-	_, err = s.DB().Exec(s.Rebind(`UPDATE attachments SET size = ? WHERE content_hash = ?`), len(content), hash)
+	_, err := s.DB().Exec(s.Rebind(`UPDATE attachments SET size = ? WHERE content_hash = ?`), len(content), hash)
 	require.NoError(err)
 	_, err = s.DB().Exec(s.Rebind(`
 		UPDATE attachments SET thumbnail_hash = ?, thumbnail_path = ?
@@ -707,9 +717,7 @@ func TestRemoveAccountCmd_SkipsDeletionDuringActiveSync(t *testing.T) {
 	tmpDir := t.TempDir()
 	attachmentsDir := filepath.Join(tmpDir, "attachments")
 
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	seedMessageWithAttachment(t, s,
 		"alice@example.com", "thread-a", "msg-a",
 		"cc/hashA", "hashA")
@@ -763,9 +771,7 @@ func TestRemoveAccountCmd_SkipsDeletionWhenRemovedAccountHasActiveSync(t *testin
 	tmpDir := t.TempDir()
 	attachmentsDir := filepath.Join(tmpDir, "attachments")
 
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	seedMessageWithAttachment(t, s,
 		"alice@example.com", "thread-a", "msg-a",
 		"dd/hashA", "hashA")
@@ -776,7 +782,6 @@ func TestRemoveAccountCmd_SkipsDeletionWhenRemovedAccountHasActiveSync(t *testin
 	// RemoveSource cascades away.
 	_, err = s.StartSync(aliceSrc.ID, "full")
 	require.NoError(err, "StartSync")
-	t.Cleanup(func() { _ = s.Close() })
 
 	filePath := seedAttachmentFile(t, attachmentsDir, "dd/hashA", "content-a")
 
@@ -807,9 +812,7 @@ func TestRemoveAccountConfirmedDoesNotBypassActiveSyncGuard(t *testing.T) {
 	require := require.New(t)
 	tmpDir := t.TempDir()
 
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	seedMessageWithAttachment(t, s,
 		"alice@example.com", "thread-a", "msg-a",
 		"ee/hashA", "hashA")
@@ -817,7 +820,6 @@ func TestRemoveAccountConfirmedDoesNotBypassActiveSyncGuard(t *testing.T) {
 	require.NoError(err, "GetSourceByIdentifier")
 	_, err = s.StartSync(aliceSrc.ID, "full")
 	require.NoError(err, "StartSync")
-	t.Cleanup(func() { _ = s.Close() })
 
 	savedCfg := cfg
 	defer func() { cfg = savedCfg }()
@@ -853,9 +855,7 @@ func TestRemoveAccountCmd_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/msgvault.db"
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	_ = s.Close()
 
 	savedCfg := cfg
@@ -875,7 +875,7 @@ func TestRemoveAccountCmd_NotFound(t *testing.T) {
 		"remove-account", "nobody@example.com", "--yes",
 	})
 
-	err = root.Execute()
+	err := root.Execute()
 	require.Error(err, "expected error for unknown email")
 	assert.ErrorContains(t, err, "no account found")
 }
@@ -887,11 +887,9 @@ func TestRemoveAccountCmd_WithYesFlag(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/msgvault.db"
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
-	_, err = s.GetOrCreateSource("gmail", "test@example.com")
+	_, err := s.GetOrCreateSource("gmail", "test@example.com")
 	require.NoError(err, "create source")
 	_ = s.Close()
 
@@ -928,10 +926,8 @@ func TestRemoveAccountCmd_WithYesFlag(t *testing.T) {
 func TestRemoveNonMatrixAccountDoesNotWaitForMatrixLifecycleLock(t *testing.T) {
 	require := require.New(t)
 	tmpDir := t.TempDir()
-	s, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(s.InitSchema())
-	_, err = s.GetOrCreateSource(sourceTypeGmail, "test@example.com")
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
+	_, err := s.GetOrCreateSource(sourceTypeGmail, "test@example.com")
 	require.NoError(err)
 	require.NoError(s.Close())
 	testCfg := &config.Config{HomeDir: tmpDir, Data: config.DataConfig{DataDir: tmpDir}}
@@ -965,71 +961,84 @@ func TestRemoveNonMatrixAccountDoesNotWaitForMatrixLifecycleLock(t *testing.T) {
 	require.NoError(<-lockDone)
 }
 
-func TestRemoveAccountCmd_HoldsCacheLockThroughRebuild(t *testing.T) {
+func TestRemoveAccountCmd_LiveSQLWhileRemovalPausedAfterCascade(t *testing.T) {
 	cfg := testConfigValue()
-
 	require := require.New(t)
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
-
-	s, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	seedQueryableMessageWithAttachment(t, s)
-	require.NoError(s.Close())
-
+	src, err := s.GetOrCreateSource(sourceTypeGmail, "kept@example.com")
+	require.NoError(err)
+	convID, err := s.EnsureConversation(src.ID, "kept-thread", "Kept")
+	require.NoError(err)
+	senderID, err := s.EnsureParticipant("kept@example.com", "Kept", "example.com")
+	require.NoError(err)
+	msgID, err := s.UpsertMessage(&store.Message{
+		ConversationID:  convID,
+		SourceID:        src.ID,
+		SourceMessageID: "kept-message",
+		MessageType:     "email",
+		SentAt:          sql.NullTime{Time: time.Date(2024, time.January, 2, 3, 4, 5, 0, time.UTC), Valid: true},
+		SenderID:        sql.NullInt64{Int64: senderID, Valid: true},
+	})
+	require.NoError(err)
+	require.NoError(s.ReplaceMessageRecipients(msgID, "from", []int64{senderID}, []string{""}))
+	t.Cleanup(func() { require.NoError(s.Close()) })
 	savedCfg := cfg
 	t.Cleanup(func() { cfg = savedCfg })
 	cfg = &config.Config{HomeDir: tmpDir, Data: config.DataConfig{DataDir: tmpDir}}
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
 	_, err = buildCache(dbPath, cfg.AnalyticsDir(), true)
-	require.NoError(err, "initial cache build")
-
-	engine, err := query.NewDuckDBEngine(cfg.AnalyticsDir(), "", nil)
-	require.NoError(err, "open pre-removal cache engine")
-	t.Cleanup(func() { _ = engine.Close() })
-
+	require.NoError(err)
+	engine, err := query.NewDuckDBEngine(cfg.AnalyticsDir(), "", s.DB(), query.DuckDBOptions{DisableSQLiteScanner: true, LiveSQLWhenCacheUnavailable: true})
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(engine.Close()) })
+	strict, err := query.NewDuckDBEngine(cfg.AnalyticsDir(), "", s.DB(), query.DuckDBOptions{DisableSQLiteScanner: true})
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(strict.Close()) })
 	cascadePaused := make(chan struct{})
 	resumeRemoval := make(chan struct{})
 	removeAccountAfterCascadeHook = func() {
 		close(cascadePaused)
 		<-resumeRemoval
 	}
-	t.Cleanup(func() { removeAccountAfterCascadeHook = nil })
-
 	removeDone := make(chan error, 1)
 	go func() { removeDone <- executeRemoveAccount(t, testCtx) }()
-
+	resumed := false
+	t.Cleanup(func() {
+		if !resumed {
+			close(resumeRemoval)
+			require.NoError(<-removeDone)
+		}
+		removeAccountAfterCascadeHook = nil
+	})
 	select {
 	case <-cascadePaused:
 	case <-time.After(5 * time.Second):
 		require.FailNow("timed out waiting after account cascade")
 	}
-
-	type aggregateResult struct {
-		rows []query.AggregateRow
-		err  error
-	}
-	aggregateDone := make(chan aggregateResult, 1)
-	go func() {
-		rows, err := engine.Aggregate(context.Background(), query.ViewSenders, query.DefaultAggregateOptions())
-		aggregateDone <- aggregateResult{rows: rows, err: err}
-	}()
-
-	select {
-	case result := <-aggregateDone:
-		close(resumeRemoval)
-		require.FailNow("cache reader passed the removal writer lock", "rows=%v err=%v", result.rows, result.err)
-	case <-time.After(150 * time.Millisecond): //nolint:kennlint // absence check: the paused removal holds the writer lock
-	}
-
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	releaseRead, err := query.AcquireCacheReadLock(ctx, cfg.AnalyticsDir())
+	require.NoError(err, "removal must release the reader lock before rebuilding")
+	_, markerErr := os.Stat(query.CacheStatePath(cfg.AnalyticsDir()))
+	releaseRead()
+	require.ErrorIs(markerErr, os.ErrNotExist, "removal must invalidate the cache before the cascade")
+	rows, err := engine.Aggregate(ctx, query.ViewSenders, query.DefaultAggregateOptions())
+	require.NoError(err, "analytics must answer while removal is paused")
+	// Keep the paused result check: the rebuilt cache cannot prove the cascade
+	// had already removed the source while maintenance was still in progress.
+	require.Len(rows, 1)
+	assert.Equal("kept@example.com", rows[0].Key)
 	close(resumeRemoval)
-	require.NoError(<-removeDone, "remove account")
-	result := <-aggregateDone
-	require.NoError(result.err, "first aggregate after rebuild")
-	assert.Empty(result.rows, "removed source must not remain in the rebuilt cache")
+	resumed = true
+	require.NoError(<-removeDone)
+	rows, err = strict.Aggregate(t.Context(), query.ViewSenders, query.DefaultAggregateOptions())
+	require.NoError(err)
+	require.Len(rows, 1)
+	assert.Equal("kept@example.com", rows[0].Key)
 }
 
 // TestRemoveAccountCmd_FailedCacheRebuildInvalidatesSyncState pins that a
@@ -1045,9 +1054,7 @@ func TestRemoveAccountCmd_FailedCacheRebuildInvalidatesSyncState(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	seedMessageWithAttachment(t, s, "test@example.com",
 		"thread1", "msg1", "aa/bb/a.pdf", "hash-a")
 	_ = s.Close()
@@ -1061,7 +1068,7 @@ func TestRemoveAccountCmd_FailedCacheRebuildInvalidatesSyncState(t *testing.T) {
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
 	_ = testCtx
 
-	_, err = buildCache(dbPath, cfg.AnalyticsDir(), true)
+	_, err := buildCache(dbPath, cfg.AnalyticsDir(), true)
 	require.NoError(err, "initial cache build")
 	stateFile := filepath.Join(cfg.AnalyticsDir(), "_last_sync.json")
 	_, err = os.Stat(stateFile)
@@ -1107,11 +1114,9 @@ func TestRemoveAccountCmd_CascadeFailureRestoresCache(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
 	attachmentPath := seedAttachmentFile(t, filepath.Join(tmpDir, "attachments"), "aa/bb/a.pdf", "attachment")
 
-	s, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	seedQueryableMessageWithAttachment(t, s)
-	_, err = s.DB().Exec(`
+	_, err := s.DB().Exec(`
 		CREATE TRIGGER abort_source_delete
 		BEFORE DELETE ON sources
 		BEGIN
@@ -1159,11 +1164,9 @@ func TestRemoveAccountCmd_CascadeFailureJoinsRecoveryFailure(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
 
-	s, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	seedQueryableMessageWithAttachment(t, s)
-	_, err = s.DB().Exec(`
+	_, err := s.DB().Exec(`
 		CREATE TRIGGER abort_source_delete
 		BEFORE DELETE ON sources
 		BEGIN
@@ -1201,9 +1204,7 @@ func TestRemoveAccountCmd_LockFailureLeavesSourceUntouched(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
 
-	s, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(s.InitSchema())
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	seedQueryableMessageWithAttachment(t, s)
 	require.NoError(s.Close())
 
@@ -1212,7 +1213,7 @@ func TestRemoveAccountCmd_LockFailureLeavesSourceUntouched(t *testing.T) {
 	cfg = &config.Config{HomeDir: tmpDir, Data: config.DataConfig{DataDir: tmpDir}}
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
 	_ = testCtx
-	_, err = buildCache(dbPath, cfg.AnalyticsDir(), true)
+	_, err := buildCache(dbPath, cfg.AnalyticsDir(), true)
 	require.NoError(err, "initial cache build")
 
 	statePath := query.CacheStatePath(cfg.AnalyticsDir())
@@ -1242,9 +1243,7 @@ func TestRemoveAccountCmd_LastAccountLeavesReadableEmptyCache(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	seedMessageWithAttachment(t, s, "test@example.com",
 		"thread1", "msg1", "aa/bb/a.pdf", "hash-a")
 	_ = s.Close()
@@ -1258,7 +1257,7 @@ func TestRemoveAccountCmd_LastAccountLeavesReadableEmptyCache(t *testing.T) {
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
 	_ = testCtx
 
-	_, err = buildCache(dbPath, cfg.AnalyticsDir(), true)
+	_, err := buildCache(dbPath, cfg.AnalyticsDir(), true)
 	require.NoError(err, "initial cache build")
 
 	root := newTestRootCmd()
@@ -1281,11 +1280,9 @@ func TestRemoveAccountCmd_DuplicateIdentifierRequiresType(
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/msgvault.db"
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
-	_, err = s.GetOrCreateSource("gmail", "dup@example.com")
+	_, err := s.GetOrCreateSource("gmail", "dup@example.com")
 	require.NoError(err, "create gmail source")
 	_, err = s.GetOrCreateSource("mbox", "dup@example.com")
 	require.NoError(err, "create mbox source")
@@ -1336,93 +1333,107 @@ func TestRemoveAccountCmd_DuplicateIdentifierRequiresType(
 	assert.Equal("gmail", sources[0].SourceType, "remaining source type")
 }
 
-func TestRemoveAccountCmd_GmailRemovesToken(t *testing.T) {
-	cfg := testConfigValue()
-
-	require := require.New(t)
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/msgvault.db"
-	tokensDir := filepath.Join(tmpDir, "tokens")
-	require.NoError(os.MkdirAll(tokensDir, 0700), "mkdir tokens")
-
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
-	_, err = s.GetOrCreateSource("gmail", "tok@example.com")
-	require.NoError(err, "create source")
-	_ = s.Close()
-
-	// Create a fake token file
-	tokenPath := oauth.TokenFilePath(tokensDir, "tok@example.com")
-	require.NoError(os.WriteFile(tokenPath, []byte(`{}`), 0600), "write token")
-
-	savedCfg := cfg
-	defer func() { cfg = savedCfg }()
-
-	cfg = &config.Config{
-		HomeDir: tmpDir,
-		Data:    config.DataConfig{DataDir: tmpDir},
-	}
-	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
-
-	root := newTestRootCmd()
-	root.SetContext(testCtx)
-	root.AddCommand(newRemoveAccountLocalTestCmd())
-	root.SetArgs([]string{
-		"remove-account", "tok@example.com", "--yes",
-	})
-
-	require.NoError(root.Execute(), "remove-account")
-
-	_, err = os.Stat(tokenPath)
-	assert.True(t, os.IsNotExist(err), "token file should be removed for gmail source")
-}
-
-func TestRemoveAccountCmd_TeamsRemovesGraphToken(t *testing.T) {
-	cfg := testConfigValue()
-
-	require := require.New(t)
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/msgvault.db"
-	tokensDir := filepath.Join(tmpDir, "tokens")
-	require.NoError(os.MkdirAll(tokensDir, 0700), "mkdir tokens")
-
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
-	_, err = s.GetOrCreateSource("teams", "tok@example.com")
-	require.NoError(err, "create source")
-	_ = s.Close()
-
-	mgr := microsoft.NewGraphManager("client-id", "", "", tokensDir, nil)
-	tokenPath := mgr.TokenPath("tok@example.com")
-	require.NoError(os.WriteFile(tokenPath, []byte(`{}`), 0600), "write teams token")
-
-	savedCfg := cfg
-	defer func() { cfg = savedCfg }()
-
-	cfg = &config.Config{
-		HomeDir: tmpDir,
-		Data:    config.DataConfig{DataDir: tmpDir},
-		Microsoft: config.MicrosoftConfig{
-			ClientID: "client-id",
+func TestRemoveAccountCmd_RemovesTokenPerSourceType(t *testing.T) {
+	tests := []struct {
+		name        string
+		sourceType  string
+		identifier  string
+		args        []string
+		microsoft   config.MicrosoftConfig
+		writeToken  func(t *testing.T, tokensDir string) string
+		wantRemoved bool
+	}{
+		{
+			name: "gmail", sourceType: "gmail", identifier: "tok@example.com",
+			args: []string{"remove-account", "tok@example.com", "--yes"},
+			writeToken: func(t *testing.T, tokensDir string) string {
+				t.Helper()
+				path := oauth.TokenFilePath(tokensDir, "tok@example.com")
+				require.NoError(t, os.WriteFile(path, []byte(`{}`), 0600), "write token")
+				return path
+			},
+			wantRemoved: true,
+		},
+		{
+			name: "teams graph token", sourceType: "teams", identifier: "tok@example.com",
+			args:      []string{"remove-account", "tok@example.com", "--yes", "--type", "teams"},
+			microsoft: config.MicrosoftConfig{ClientID: "client-id"},
+			writeToken: func(t *testing.T, tokensDir string) string {
+				t.Helper()
+				path := microsoft.NewGraphManager("client-id", "", "", tokensDir, nil).TokenPath("tok@example.com")
+				require.NoError(t, os.WriteFile(path, []byte(`{}`), 0600), "write teams token")
+				return path
+			},
+			wantRemoved: true,
+		},
+		{
+			name: "circleback", sourceType: sourceTypeCircleback, identifier: "tok@example.com",
+			args: []string{"remove-account", "tok@example.com", "--yes", "--type", sourceTypeCircleback},
+			writeToken: func(t *testing.T, tokensDir string) string {
+				t.Helper()
+				path := circleback.NewManager("", tokensDir, nil).TokenPath("tok@example.com")
+				require.NoError(t, os.WriteFile(path, []byte(`{}`), 0600), "write circleback token")
+				return path
+			},
+			wantRemoved: true,
+		},
+		{
+			name: "slack", sourceType: sourceTypeSlack, identifier: "T01:UME",
+			args: []string{"remove-account", "T01:UME", "--yes", "--type", sourceTypeSlack},
+			writeToken: func(t *testing.T, tokensDir string) string {
+				t.Helper()
+				require.NoError(t, slack.SaveToken(tokensDir, "T01", "testers", "UME", "xoxp-test"), "write slack token")
+				path := filepath.Join(tokensDir, "slack_T01_UME.json")
+				require.FileExists(t, path, "slack token file must exist before removal")
+				return path
+			},
+			wantRemoved: true,
+		},
+		{
+			name: "non-gmail source keeps the token", sourceType: "mbox", identifier: "imp@example.com",
+			args: []string{"remove-account", "imp@example.com", "--yes"},
+			writeToken: func(t *testing.T, tokensDir string) string {
+				t.Helper()
+				path := oauth.TokenFilePath(tokensDir, "imp@example.com")
+				require.NoError(t, os.WriteFile(path, []byte(`{}`), 0600), "write token")
+				return path
+			},
+			wantRemoved: false,
 		},
 	}
-	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfigValue()
+			require := require.New(t)
+			tmpDir := t.TempDir()
+			tokensDir := filepath.Join(tmpDir, "tokens")
+			require.NoError(os.MkdirAll(tokensDir, 0700), "mkdir tokens")
 
-	root := newTestRootCmd()
-	root.SetContext(testCtx)
-	root.AddCommand(newRemoveAccountLocalTestCmd())
-	root.SetArgs([]string{
-		"remove-account", "tok@example.com", "--yes", "--type", "teams",
-	})
+			s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
+			_, err := s.GetOrCreateSource(tt.sourceType, tt.identifier)
+			require.NoError(err, "create source")
+			require.NoError(s.Close(), "close store")
+			tokenPath := tt.writeToken(t, tokensDir)
 
-	require.NoError(root.Execute(), "remove-account")
+			savedCfg := cfg
+			t.Cleanup(func() { cfg = savedCfg })
+			cfg = &config.Config{
+				HomeDir:   tmpDir,
+				Data:      config.DataConfig{DataDir: tmpDir},
+				Microsoft: tt.microsoft,
+			}
+			testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
 
-	_, err = os.Stat(tokenPath)
-	assert.True(t, os.IsNotExist(err), "Graph token file should be removed for teams source")
+			root := newTestRootCmd()
+			root.SetContext(testCtx)
+			root.AddCommand(newRemoveAccountLocalTestCmd())
+			root.SetArgs(tt.args)
+			require.NoError(root.Execute(), "remove-account")
+
+			_, err = os.Stat(tokenPath)
+			assert.Equal(t, tt.wantRemoved, os.IsNotExist(err), "token file removal")
+		})
+	}
 }
 
 func TestRemoveAccountCmd_DiscordDeletesTokenOnlyAfterFinalBotReference(t *testing.T) {
@@ -1431,9 +1442,7 @@ func TestRemoveAccountCmd_DiscordDeletesTokenOnlyAfterFinalBotReference(t *testi
 	require := require.New(t)
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
-	st, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	first, err := st.GetOrCreateSource(sourceTypeDiscord, "113456789012345678")
 	require.NoError(err)
 	second, err := st.GetOrCreateSource(sourceTypeDiscord, "223456789012345678")
@@ -1475,14 +1484,11 @@ func TestRemoveAccountCmd_DiscordPreservesTokenDuringActiveSync(t *testing.T) {
 
 	require := require.New(t)
 	tmpDir := t.TempDir()
-	st, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	source, err := st.GetOrCreateSource(sourceTypeDiscord, "113456789012345678")
 	require.NoError(err)
 	_, err = st.StartSync(source.ID, "discord")
 	require.NoError(err)
-	t.Cleanup(func() { _ = st.Close() })
 
 	manager := discord.NewTokenManager(filepath.Join(tmpDir, "tokens"))
 	require.NoError(manager.Save(discord.NewTokenRecord(
@@ -1510,9 +1516,7 @@ func TestRemoveAccountCmd_DiscordPreservesTokenWhenRemainingBindingCannotResolve
 	require := require.New(t)
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
-	st, err := store.Open(filepath.Join(tmpDir, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmpDir, "msgvault.db"))
 	removed, err := st.GetOrCreateSource(sourceTypeDiscord, "113456789012345678")
 	require.NoError(err)
 	remaining, err := st.GetOrCreateSource(sourceTypeDiscord, "223456789012345678")
@@ -1552,9 +1556,7 @@ func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t
 	assert := assert.New(t)
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	first, err := st.GetOrCreateSource(sourceTypeDiscord, "113456789012345678")
 	require.NoError(err)
 	require.NoError(st.UpdateSourceOAuthApp(first.ID, sql.NullString{String: "archive", Valid: true}))
@@ -1623,7 +1625,7 @@ func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t
 	select {
 	case err := <-removeDone:
 		require.FailNow("removal bypassed Discord lifecycle lock", "error: %v", err)
-	case <-time.After(100 * time.Millisecond): //nolint:kennlint // absence check: the paused Discord add holds the lifecycle lock
+	case <-time.After(100 * time.Millisecond): //nolint:kennlint // deadlinetest: absence check: the paused Discord add holds the lifecycle lock
 	}
 
 	close(resumeAdd)
@@ -1652,58 +1654,14 @@ func TestDiscordAddLifecycleBlocksFinalCredentialRemovalUntilGuildRegistration(t
 	assert.Equal(sourceTypeDiscord, second.SourceType)
 }
 
-func TestRemoveAccountCmd_CirclebackRemovesToken(t *testing.T) {
-	cfg := testConfigValue()
-
-	require := require.New(t)
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/msgvault.db"
-	tokensDir := filepath.Join(tmpDir, "tokens")
-	require.NoError(os.MkdirAll(tokensDir, 0700), "mkdir tokens")
-
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
-	_, err = s.GetOrCreateSource(sourceTypeCircleback, "tok@example.com")
-	require.NoError(err, "create source")
-	require.NoError(s.Close(), "close store")
-
-	mgr := circleback.NewManager("", tokensDir, nil)
-	tokenPath := mgr.TokenPath("tok@example.com")
-	require.NoError(os.WriteFile(tokenPath, []byte(`{}`), 0600), "write circleback token")
-
-	savedCfg := cfg
-	t.Cleanup(func() { cfg = savedCfg })
-	cfg = &config.Config{
-		HomeDir: tmpDir,
-		Data:    config.DataConfig{DataDir: tmpDir},
-	}
-	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
-
-	root := newTestRootCmd()
-	root.SetContext(testCtx)
-	root.AddCommand(newRemoveAccountLocalTestCmd())
-	root.SetArgs([]string{
-		"remove-account", "tok@example.com", "--yes", "--type", sourceTypeCircleback,
-	})
-
-	require.NoError(root.Execute(), "remove-account")
-
-	_, err = os.Stat(tokenPath)
-	assert.True(t, os.IsNotExist(err), "token file should be removed for Circleback source")
-}
-
 func TestRemoveAccountCmd_RemovesNotionMeetingSource(t *testing.T) {
 	cfg := testConfigValue()
 
 	require := require.New(t)
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(err)
-	require.NoError(st.InitSchema())
-	_, err = st.GetOrCreateSource(sourceTypeNotionMeetings, "notion-personal")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
+	_, err := st.GetOrCreateSource(sourceTypeNotionMeetings, "notion-personal")
 	require.NoError(err)
 	require.NoError(st.Close())
 
@@ -1727,100 +1685,12 @@ func TestRemoveAccountCmd_RemovesNotionMeetingSource(t *testing.T) {
 	require.ErrorIs(err, store.ErrSourceNotFound)
 }
 
-func TestRemoveAccountCmd_SlackRemovesToken(t *testing.T) {
-	cfg := testConfigValue()
-
-	require := require.New(t)
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/msgvault.db"
-	tokensDir := filepath.Join(tmpDir, "tokens")
-	require.NoError(os.MkdirAll(tokensDir, 0700), "mkdir tokens")
-
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
-	_, err = s.GetOrCreateSource(sourceTypeSlack, "T01:UME")
-	require.NoError(err, "create source")
-	require.NoError(s.Close(), "close store")
-
-	require.NoError(slack.SaveToken(tokensDir, "T01", "testers", "UME", "xoxp-test"), "write slack token")
-	tokenPath := filepath.Join(tokensDir, "slack_T01_UME.json")
-	_, err = os.Stat(tokenPath)
-	require.NoError(err, "slack token file must exist before removal")
-
-	savedCfg := cfg
-	t.Cleanup(func() { cfg = savedCfg })
-	cfg = &config.Config{
-		HomeDir: tmpDir,
-		Data:    config.DataConfig{DataDir: tmpDir},
-	}
-	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
-
-	root := newTestRootCmd()
-	root.SetContext(testCtx)
-	root.AddCommand(newRemoveAccountLocalTestCmd())
-	root.SetArgs([]string{
-		"remove-account", "T01:UME", "--yes", "--type", sourceTypeSlack,
-	})
-
-	require.NoError(root.Execute(), "remove-account")
-
-	_, err = os.Stat(tokenPath)
-	assert.True(t, os.IsNotExist(err), "token file should be removed for Slack source")
-}
-
-func TestRemoveAccountCmd_NonGmailSkipsToken(t *testing.T) {
-	cfg := testConfigValue()
-
-	require := require.New(t)
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/msgvault.db"
-	tokensDir := filepath.Join(tmpDir, "tokens")
-	require.NoError(os.MkdirAll(tokensDir, 0700), "mkdir tokens")
-
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
-	_, err = s.GetOrCreateSource("mbox", "imp@example.com")
-	require.NoError(err, "create source")
-	_ = s.Close()
-
-	// Create a token file that should NOT be removed
-	tokenPath := oauth.TokenFilePath(tokensDir, "imp@example.com")
-	require.NoError(os.WriteFile(tokenPath, []byte(`{}`), 0600), "write token")
-
-	savedCfg := cfg
-	defer func() { cfg = savedCfg }()
-
-	cfg = &config.Config{
-		HomeDir: tmpDir,
-		Data:    config.DataConfig{DataDir: tmpDir},
-	}
-	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
-
-	root := newTestRootCmd()
-	root.SetContext(testCtx)
-	root.AddCommand(newRemoveAccountLocalTestCmd())
-	root.SetArgs([]string{
-		"remove-account", "imp@example.com", "--yes",
-	})
-
-	require.NoError(root.Execute(), "remove-account")
-
-	_, err = os.Stat(tokenPath)
-	assert.False(t, os.IsNotExist(err), "token file should NOT be removed for non-gmail source")
-}
-
 func TestResolveSource_IMAPDisplayName(t *testing.T) {
 	require := require.New(t)
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/msgvault.db"
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
 
 	// Create an IMAP source whose identifier is a URL, display_name is the email.
 	src, err := s.GetOrCreateSource("imap", "imaps://user%40outlook.com@outlook.office365.com:993")
@@ -1845,10 +1715,8 @@ func TestRemoveAccountCmd_ClosedStdinReturnsError(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := tmpDir + "/msgvault.db"
 
-	s, err := store.Open(dbPath)
-	require.NoError(err, "open store")
-	require.NoError(s.InitSchema(), "init schema")
-	_, err = s.GetOrCreateSource("gmail", "eof@example.com")
+	s := testutil.NewSQLiteTestStoreAt(t, dbPath)
+	_, err := s.GetOrCreateSource("gmail", "eof@example.com")
 	require.NoError(err, "create source")
 	_ = s.Close()
 
@@ -1925,9 +1793,7 @@ func TestRemoveAccountCommandStorePreservesSharedGrant(t *testing.T) {
 			token := []byte(`{"access_token":"expired","refresh_token":"example-refresh","expiry":"2000-01-01T00:00:00Z","client_id":"example-client","scopes":["https://www.googleapis.com/auth/gmail.readonly"]}`)
 			const removedEmail, remainingEmail = "user.name@gmail.com", "username@gmail.com"
 			require.NoError(tokenStore.Write(t.Context(), removedEmail, token))
-			st, err := store.Open(cfg.DatabaseDSN())
-			require.NoError(err)
-			require.NoError(st.InitSchema())
+			st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 			removed, err := st.GetOrCreateSource("gmail", removedEmail)
 			require.NoError(err)
 			if shared {
@@ -1961,4 +1827,130 @@ func TestRemoveAccountCommandStorePreservesSharedGrant(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemoveAccountMatrixPreservesMergedDestinationCredentials(t *testing.T) {
+	for _, merged := range []bool{false, true} {
+		name := "ordinary"
+		if merged {
+			name = "merged"
+		}
+		t.Run(name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			dir := t.TempDir()
+			dbPath := filepath.Join(dir, "msgvault.db")
+			var logouts atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(http.MethodPost, r.Method)
+				assert.Equal("/_matrix/client/v3/logout", r.URL.Path)
+				logouts.Add(1)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			t.Cleanup(server.Close)
+			st := testutil.NewSQLiteTestStoreAt(t, dbPath)
+			destination, err := st.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
+			require.NoError(err)
+			if merged {
+				history, err := st.GetOrCreateSource(sourceTypeMatrix, "@history:example.org")
+				require.NoError(err)
+				_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{FromSourceID: history.ID, IntoSourceID: destination.ID})
+				require.NoError(err)
+			}
+			testCfg := &config.Config{HomeDir: dir, Data: config.DataConfig{DataDir: dir}}
+			credentials := matrixsource.Credentials{
+				Homeserver: server.URL, UserID: destination.Identifier,
+				DeviceID: "ARCHIVEDEVICE", AccessToken: "synthetic-token",
+			}
+			require.NoError(matrixsource.SaveCredentials(testCfg.TokensDir(), credentials))
+			root := newTestRootCmd()
+			root.SetContext(testInvocationContext(t.Context(), testCfg, invocationOptions{}))
+			root.AddCommand(newRemoveAccountLocalTestCmd())
+			root.SetArgs([]string{"remove-account", destination.Identifier, "--type", sourceTypeMatrix, "--yes"})
+
+			if merged {
+				// Refusal must precede stdin confirmation, even without --yes.
+				root.SetArgs([]string{"remove-account", destination.Identifier, "--type", sourceTypeMatrix})
+			}
+
+			removeErr := root.Execute()
+
+			_, sourceErr := st.GetSourceByID(destination.ID)
+			if merged {
+				require.ErrorIs(removeErr, store.ErrSourceMergeParticipant)
+				require.NoError(sourceErr)
+				assert.Zero(logouts.Load(), "refused removal must not revoke the device")
+				retained, err := matrixsource.LoadCredentials(testCfg.TokensDir(), destination.Identifier)
+				require.NoError(err)
+				assert.Equal(credentials, retained)
+			} else {
+				require.NoError(removeErr)
+				require.ErrorIs(sourceErr, store.ErrSourceNotFound)
+				exists, err := matrixsource.CredentialsExist(testCfg.TokensDir(), destination.Identifier)
+				require.NoError(err)
+				assert.False(exists)
+				assert.Equal(int64(1), logouts.Load())
+			}
+		})
+	}
+}
+
+func TestRemoveAccountMatrixFencesMergeDuringLogout(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "msgvault.db")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
+	destination, err := st.GetOrCreateSource(sourceTypeMatrix, "@archive:example.org")
+	require.NoError(err)
+	history, err := st.GetOrCreateSource(sourceTypeMatrix, "@history:example.org")
+	require.NoError(err)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	logoutStarted := make(chan struct{})
+	resumeLogout := make(chan struct{})
+	releaseLogout := sync.OnceFunc(func() { close(resumeLogout) })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(http.MethodPost, r.Method)
+		assert.Equal("/_matrix/client/v3/logout", r.URL.Path)
+		close(logoutStarted)
+		select {
+		case <-resumeLogout:
+			_, _ = w.Write([]byte(`{}`))
+		case <-ctx.Done():
+		}
+	}))
+	defer server.Close()
+	defer releaseLogout()
+	testCfg := &config.Config{HomeDir: dir, Data: config.DataConfig{DataDir: dir}}
+	require.NoError(matrixsource.SaveCredentials(testCfg.TokensDir(), matrixsource.Credentials{
+		Homeserver: server.URL, UserID: destination.Identifier,
+		DeviceID: "ARCHIVEDEVICE", AccessToken: "synthetic-token",
+	}))
+	root := newTestRootCmd()
+	root.SetContext(testInvocationContext(ctx, testCfg, invocationOptions{}))
+	root.AddCommand(newRemoveAccountLocalTestCmd())
+	root.SetArgs([]string{"remove-account", destination.Identifier, "--type", sourceTypeMatrix, "--yes"})
+	removed := make(chan error, 1)
+	go func() { removed <- root.Execute() }()
+	select {
+	case <-logoutStarted:
+	case <-ctx.Done():
+		require.FailNow("removal did not reach Matrix logout")
+	}
+
+	_, mergeErr := st.MergeSourcesContext(ctx, store.MergeSourcesRequest{FromSourceID: history.ID, IntoSourceID: destination.ID})
+	releaseLogout()
+	select {
+	case err := <-removed:
+		require.NoError(err)
+	case <-ctx.Done():
+		require.FailNow("removal did not finish after logout")
+	}
+	require.ErrorIs(mergeErr, store.ErrSyncAlreadyActive, "logout must own the destination until removal commits")
+	_, err = st.GetSourceByID(destination.ID)
+	require.ErrorIs(err, store.ErrSourceNotFound)
+	history, err = st.GetSourceByID(history.ID)
+	require.NoError(err)
+	assert.Zero(history.MergedIntoSourceID, "the refused merge must not retire its source")
 }

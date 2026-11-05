@@ -288,20 +288,65 @@ func draftEvidenceSQL(m, src string) string {
 	return draftEvidenceInSchemaSQL("", m, src)
 }
 
+// UnsentMessageSQL returns the activity projector's SQLite predicate for aliases
+// m (messages) and src (sources).
+func UnsentMessageSQL() string {
+	return activityUnsentInSchemaSQL(&SQLiteDialect{}, "")
+}
+
+// UnsentCandidateMessageIDsSQL starts from draft evidence before evaluating
+// the shared predicate. Explicit send-state overrides need no draft evidence.
+func UnsentCandidateMessageIDsSQL() string {
+	var queries []string
+	for _, evidence := range draftEvidenceSources("", "draft_src") {
+		from := evidence.from
+		if evidence.sourceID != "" {
+			from += " JOIN sources draft_src ON draft_src.id = " + evidence.sourceID
+		}
+		query := "SELECT " + evidence.messageID + " FROM " + from
+		if evidence.condition != "" {
+			query += " WHERE " + evidence.condition
+		}
+		queries = append(queries, query)
+	}
+	return strings.Join(queries, " UNION ") + " UNION SELECT id FROM messages WHERE is_sent = FALSE"
+}
+
+type draftEvidenceSource struct {
+	from, messageID, sourceID, condition string
+}
+
+// draftEvidenceSources defines each evidence arm once for both correlated
+// message checks and the cache's evidence-first candidate scan.
+func draftEvidenceSources(schema, src string) []draftEvidenceSource {
+	return []draftEvidenceSource{
+		{from: schema + "message_labels ml JOIN " + schema + "labels l ON l.id = ml.label_id",
+			messageID: "ml.message_id", sourceID: "l.source_id",
+			condition: "(l.system_role = '" + LabelSystemRoleDrafts + "' OR (" + src + ".source_type = 'gmail' AND l.source_label_id = 'DRAFT'))"},
+		{from: schema + "imap_message_memberships imm", messageID: "imm.message_id", sourceID: "imm.source_id",
+			condition: `LOWER(CAST(imm.flags AS TEXT)) LIKE '%"\\draft"%' ESCAPE '!'`},
+		{from: schema + "imap_drafts d", messageID: "d.current_message_id"},
+		{from: schema + "imap_drafts d", messageID: "d.pending_original_message_id"},
+		{from: schema + "gmail_drafts d", messageID: "d.current_message_id"},
+		{from: schema + "gmail_drafts d", messageID: "d.pending_original_message_id"},
+	}
+}
+
 // draftEvidenceInSchemaSQL is draftEvidenceSQL reading its evidence tables
 // from schema, such as "src." for an attached source archive.
 func draftEvidenceInSchemaSQL(schema, m, src string) string {
-	return `(EXISTS (SELECT 1 FROM ` + schema + `message_labels ml JOIN ` + schema + `labels l ON l.id = ml.label_id
-		WHERE ml.message_id = ` + m + `.id AND l.source_id = ` + m + `.source_id
-		  AND (l.system_role = '` + LabelSystemRoleDrafts + `'
-		       OR (` + src + `.source_type = 'gmail' AND l.source_label_id = 'DRAFT')))
-		OR EXISTS (SELECT 1 FROM ` + schema + `imap_message_memberships imm
-		WHERE imm.message_id = ` + m + `.id AND imm.source_id = ` + m + `.source_id
-		  AND LOWER(CAST(imm.flags AS TEXT)) LIKE '%"\\draft"%' ESCAPE '!')
-		OR EXISTS (SELECT 1 FROM ` + schema + `imap_drafts d WHERE d.current_message_id = ` + m + `.id)
-		OR EXISTS (SELECT 1 FROM ` + schema + `imap_drafts d WHERE d.pending_original_message_id = ` + m + `.id)
-		OR EXISTS (SELECT 1 FROM ` + schema + `gmail_drafts d WHERE d.current_message_id = ` + m + `.id)
-		OR EXISTS (SELECT 1 FROM ` + schema + `gmail_drafts d WHERE d.pending_original_message_id = ` + m + `.id))`
+	var predicates []string
+	for _, evidence := range draftEvidenceSources(schema, src) {
+		where := evidence.messageID + " = " + m + ".id"
+		if evidence.sourceID != "" {
+			where += " AND " + evidence.sourceID + " = " + m + ".source_id"
+		}
+		if evidence.condition != "" {
+			where += " AND " + evidence.condition
+		}
+		predicates = append(predicates, "EXISTS (SELECT 1 FROM "+evidence.from+" WHERE "+where+")")
+	}
+	return "(" + strings.Join(predicates, " OR ") + ")"
 }
 
 // sourceHasSentFolderSQL is true when source src has a Sent folder, so
@@ -410,11 +455,15 @@ func headerBlock(raw []byte) []byte {
 }
 
 func parseDeliveryBlock(block []byte) (emailattribution.Headers, bool, error) {
+	return emailattribution.ParseHeaders(terminateHeaderBlock(block))
+}
+
+func terminateHeaderBlock(block []byte) []byte {
 	if mimeHeaderEnd(block) == 0 {
 		// A header-only payload has no blank line; terminate it for the reader.
 		block = append(slices.Clip(block), "\r\n\r\n"...)
 	}
-	return emailattribution.ParseHeaders(block)
+	return block
 }
 
 // refreshAccountAttributionTx is the one owner of messages.account_address
@@ -514,6 +563,11 @@ func (s *Store) refreshAccountAttributionTx(
 	}
 	if draft && !authored {
 		if err := markDraftAuthoredTx(ctx, tx, id); err != nil {
+			return malformed, err
+		}
+	}
+	if draft || authored {
+		if err := s.requeueActivityProjectionTx(ctx, tx, id); err != nil {
 			return malformed, err
 		}
 	}
@@ -629,19 +683,29 @@ func (s *Store) calendarAccountAddressTx(
 	return address, nil
 }
 
+// MessageHeaderBlockContext returns a bounded outer MIME header block.
+func (s *Store) MessageHeaderBlockContext(ctx context.Context, id int64) ([]byte, error) {
+	prefix, compression, err := s.messageRawHeaderPrefix(ctx, ReadDBContext(ctx, s.db.DB), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read raw MIME headers for message %d: %w", id, err)
+	}
+	block, err := decodeMessageRawHeaderBounded(prefix, compression, emailattribution.MaxHeaderBytes)
+	if err != nil {
+		return nil, err
+	}
+	return terminateHeaderBlock(block), nil
+}
+
 // readDeliveryHeadersTx reads a bounded prefix of the stored MIME and parses
 // its delivery headers. Undecodable payloads report malformed with no
 // evidence; SQL errors return.
 func (s *Store) readDeliveryHeadersTx(
 	ctx context.Context, tx *loggedTx, id int64,
 ) (emailattribution.Headers, bool, error) {
-	var prefix []byte
-	var compression sql.NullString
-	err := tx.QueryRowContext(ctx, `
-		SELECT `+s.dialect.BlobPrefixSQL("raw_data")+`, compression
-		FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`,
-		accountHeaderRawPrefix, id,
-	).Scan(&prefix, &compression)
+	prefix, compression, err := s.messageRawHeaderPrefix(ctx, tx.Tx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return emailattribution.Headers{}, false, nil
 	}
@@ -650,6 +714,15 @@ func (s *Store) readDeliveryHeadersTx(
 	}
 	headers, malformed := decodeDeliveryHeaders(prefix, compression)
 	return headers, malformed, nil
+}
+
+func (s *Store) messageRawHeaderPrefix(ctx context.Context, reader SQLReader, id int64) ([]byte, sql.NullString, error) {
+	var prefix []byte
+	var compression sql.NullString
+	err := reader.QueryRowContext(ctx, s.Rebind(`
+		SELECT `+s.dialect.BlobPrefixSQL("raw_data")+`, compression
+		FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`), accountHeaderRawPrefix, id).Scan(&prefix, &compression)
+	return prefix, compression, err
 }
 
 // decodeDeliveryHeaders reads delivery evidence from a stored blob prefix.
@@ -803,23 +876,53 @@ func (s *Store) refreshAccountAttributionIfOutboundChangedTx(
 		return err
 	}
 	var path sql.NullString
-	var outbound bool
+	var outbound, authored bool
 	err := tx.QueryRowContext(ctx, `
-		SELECT m.account_path, `+outboundEvidenceExistsSQL("m", "src")+`
+		SELECT m.account_path, `+outboundEvidenceExistsSQL("m", "src")+`, m.draft_authored
 		FROM messages m JOIN sources src ON src.id = m.source_id
-		WHERE m.id = ?`, messageID).Scan(&path, &outbound)
+		WHERE m.id = ?`, messageID).Scan(&path, &outbound, &authored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read outbound evidence for message %d: %w", messageID, err)
 	}
-	if !path.Valid || (path.String != accountPathInbound && path.String != accountPathSent) ||
-		(path.String == accountPathSent) == outbound {
+	if path.Valid && (path.String == accountPathInbound || path.String == accountPathSent) &&
+		(path.String == accountPathSent) != outbound {
+		_, err = s.refreshAccountAttributionTx(ctx, tx, messageID, deliveryInput{})
+		return err
+	}
+	if authored {
+		return s.requeueActivityProjectionTx(ctx, tx, messageID)
+	}
+	return nil
+}
+
+func (s *Store) requeueActivityProjectionTx(ctx context.Context, tx *loggedTx, messageID int64) error {
+	if err := s.lockMeetingEvidenceWith(ctx, tx, messageID); err != nil {
+		return fmt.Errorf("lock draft activity for message %d: %w", messageID, err)
+	}
+	candidates, err := s.loadActivityCandidateRowsByIDQueryerContext(ctx, tx, []int64{messageID})
+	if err != nil {
+		return fmt.Errorf("load draft activity for message %d: %w", messageID, err)
+	}
+	if len(candidates) == 0 {
 		return nil
 	}
-	_, err = s.refreshAccountAttributionTx(ctx, tx, messageID, deliveryInput{})
-	return err
+	candidate := candidates[0]
+	var hasEvent bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM activity_events WHERE message_id = ?)`, messageID).Scan(&hasEvent); err != nil {
+		return fmt.Errorf("read draft activity event for message %d: %w", messageID, err)
+	}
+	if candidate.Queue.Revision > candidate.Queue.ProcessedRevision || (candidate.Eligible && !hasEvent) || (candidate.Unsent && hasEvent) {
+		_, err = tx.ExecContext(ctx, requeueActivityProjectionSQL(`
+			SELECT ?, 1, CURRENT_TIMESTAMP`), messageID)
+		if err != nil {
+			return fmt.Errorf("requeue draft activity for message %d: %w", messageID, err)
+		}
+	}
+	return nil
 }
 
 // labelOutboundFlips collects messages of one source whose labels changed

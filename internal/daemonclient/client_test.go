@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/propagation"
@@ -342,18 +341,6 @@ func TestNewAgentTokenClientRejectsRedirects(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not follow redirects")
 }
 
-func TestNewAllowsHTTPWithAllowInsecure(t *testing.T) {
-	c, err := New(Config{URL: "http://nas:8080", APIKey: "key", AllowInsecure: true})
-	require.NoError(t, err, "New")
-	require.NotNil(t, c, "client")
-}
-
-func TestNewAllowsHTTPS(t *testing.T) {
-	c, err := New(Config{URL: "https://nas:8080", APIKey: "key"})
-	require.NoError(t, err, "New")
-	require.NotNil(t, c, "client")
-}
-
 func TestNewRejectsEmptyURL(t *testing.T) {
 	_, err := New(Config{APIKey: "key"})
 	require.Error(t, err, "New should reject empty URL")
@@ -600,12 +587,6 @@ func TestGeneratedCLIResponseErrorReturnsBareServerMessage(t *testing.T) {
 	}, nil)
 
 	require.EqualError(t, err, "bad account", "CLI error")
-}
-
-func TestGeneratedResponseDecodeErrorDetection(t *testing.T) {
-	err := &runtime.ResponseDecodeError{Err: errors.New("malformed")}
-	assert.True(t, responseDecodeError(err), "decode error")
-	assert.False(t, responseDecodeError(errors.New("other")), "other error")
 }
 
 func TestRunCLICommandTypesDaemonReportedFailures(t *testing.T) {

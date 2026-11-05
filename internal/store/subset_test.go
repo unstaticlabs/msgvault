@@ -1231,6 +1231,145 @@ func createTestSourceDB(t *testing.T, dir string, msgCount int) string {
 	return dbPath
 }
 
+// Route freshness reads only sources.last_sync_at, which an importer sets after
+// a complete pass. Sync history can include stopped runs, so a subset must not
+// derive freshness from it.
+func TestCopySubsetCopiesStoredSourceSyncTimeOnly(t *testing.T) {
+	stored := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	completed := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name          string
+		stored        *time.Time
+		completedRuns bool
+		want          sql.NullTime
+	}{
+		{"stored timestamp is copied", &stored, true, sql.NullTime{Time: stored, Valid: true}},
+		{"completed runs do not set freshness", nil, true, sql.NullTime{}},
+		{"no stored timestamp", nil, false, sql.NullTime{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requirements := require.New(t)
+			sourcePath := createTestSourceDB(t, t.TempDir(), 1)
+			source, err := Open(sourcePath)
+			requirements.NoError(err)
+			t.Cleanup(func() { requirements.NoError(source.Close()) })
+			_, err = source.DB().Exec(`UPDATE sources SET last_sync_at=? WHERE id=1`, test.stored)
+			requirements.NoError(err)
+			_, err = source.DB().Exec(`INSERT INTO sources (id, source_type, identifier)
+				VALUES (2, 'beeper', 'other-account')`)
+			requirements.NoError(err)
+			for _, run := range []struct {
+				sourceID int
+				status   string
+				errors   int
+			}{
+				{1, "completed", 1},
+				{1, "failed", 0},
+				{1, "cancelled", 0},
+				{2, "completed", 0},
+			} {
+				_, err = source.DB().Exec(`INSERT INTO sync_runs
+					(source_id, started_at, completed_at, status, errors_count)
+					VALUES (?, ?, ?, ?, ?)`, run.sourceID, stored, completed.Add(time.Hour), run.status, run.errors)
+				requirements.NoError(err)
+			}
+			if test.completedRuns {
+				for _, timestamp := range []time.Time{completed, stored} {
+					_, err = source.DB().Exec(`INSERT INTO sync_runs
+						(source_id, started_at, completed_at, status, errors_count)
+						VALUES (1, ?, ?, 'completed', 0)`, stored, timestamp)
+					requirements.NoError(err)
+				}
+			}
+
+			destinationDir := filepath.Join(t.TempDir(), "subset")
+			_, err = CopySubset(sourcePath, destinationDir, 1, false)
+			requirements.NoError(err)
+			destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+			requirements.NoError(err)
+			t.Cleanup(func() { requirements.NoError(destination.Close()) })
+			copied, err := destination.GetSourceByID(1)
+			requirements.NoError(err)
+			assert.Equal(t, test.want, copied.LastSyncAt)
+		})
+	}
+}
+
+func TestCopySubsetPreservesSourceMessagingRouteFailure(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := t.Context()
+	sourcePath := createTestSourceDB(t, t.TempDir(), 5)
+	source, err := Open(sourcePath)
+	require.NoError(err)
+	_, err = source.DB().ExecContext(ctx, `
+		UPDATE sources
+		SET source_type='beeper', identifier='account-a', last_sync_at=CURRENT_TIMESTAMP
+		WHERE id=1`)
+	require.NoError(err)
+	_, err = source.DB().ExecContext(ctx, `
+		UPDATE conversations
+		SET conversation_type='direct_chat', source_conversation_id='!quiet:example.test'
+		WHERE id=1`)
+	require.NoError(err)
+	person, _, err := source.CreatePersonFromParticipant(1)
+	require.NoError(err)
+	require.NoError(source.SetConversationMessagingRouteEvidence(ctx, 1, MessagingRouteEvidence{
+		ChatID: "!quiet:example.test", AccountID: "account-a", Network: "whatsapp",
+		ProviderType: "single", ObservedAt: time.Now().UTC(), MembershipComplete: true,
+		ParticipantIDs: []int64{1, 2}, SelfParticipantIDs: []int64{}, MemberChatIDs: []string{},
+	}))
+	require.NoError(source.SetSourceMessagingRouteFailureContext(ctx, 1, "account_lookup_failed"))
+	before, err := source.GetPersonMessagingRoutesContext(ctx, PersonMessagingRouteQuery{
+		PersonUID: person.VCardUID,
+	})
+	require.NoError(err)
+	require.Len(before.Routes.Items, 1)
+	assert.Equal("unresolved", before.Routes.Items[0].Status)
+	assert.Contains(before.Routes.Items[0].Reasons, "account_lookup_failed")
+	personUID := person.VCardUID
+	require.NoError(source.Close())
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubsetWithOptions(sourcePath, destinationDir, 5, CopySubsetOptions{
+		IncludeIdentity: true,
+	})
+	require.NoError(err)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+	after, err := destination.GetPersonMessagingRoutesContext(ctx, PersonMessagingRouteQuery{
+		PersonUID: personUID,
+	})
+	require.NoError(err)
+	require.Len(after.Routes.Items, 1)
+	assert.Equal("unresolved", after.Routes.Items[0].Status)
+	assert.Contains(after.Routes.Items[0].Reasons, "account_lookup_failed")
+}
+
+func TestCopySubsetSupportsSourceWithoutMessagingRouteFailuresTable(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	sourcePath := createTestSourceDB(t, t.TempDir(), 5)
+	sourceDB, err := sql.Open("sqlite3", sourcePath+"?_foreign_keys=OFF")
+	require.NoError(err)
+	_, err = sourceDB.Exec(`DROP TABLE source_messaging_route_failures`)
+	require.NoError(err)
+	require.NoError(sourceDB.Close())
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destinationDir, 5, false)
+	require.NoError(err)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+	var failures int
+	require.NoError(destination.DB().QueryRow(
+		`SELECT COUNT(*) FROM source_messaging_route_failures`,
+	).Scan(&failures))
+	assert.Zero(failures)
+}
+
 func seedAcceptedSubsetParticipantLink(t *testing.T, srcDB string) int64 {
 	t.Helper()
 	require := require.New(t)
@@ -1315,6 +1454,199 @@ func TestCopySubset_Basic(t *testing.T) {
 	hasViolation := fkRows.Next()
 	require.NoError(fkRows.Err(), "foreign_key_check rows")
 	assert.False(hasViolation, "foreign key violations found in destination database")
+}
+
+func TestCopySubsetCopiesPortableSourceMergeMarkersForSelectedRows(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	sourcePath := createTestSourceDB(t, t.TempDir(), 2)
+	sourceDB, err := sql.Open("sqlite3", sourcePath+"?_foreign_keys=ON")
+	require.NoError(err)
+	_, err = sourceDB.Exec(`
+		INSERT INTO attachments (id, message_id, storage_path)
+		VALUES (11, 1, '11/attachment'), (22, 2, '22/attachment');
+		INSERT INTO source_merge_archive_only_messages (message_id)
+		VALUES (1), (2);
+		INSERT INTO source_merge_preserved_attachments (attachment_id)
+		VALUES (11), (22);
+	`)
+	require.NoError(err)
+	require.NoError(sourceDB.Close())
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destinationDir, 1, false)
+	require.NoError(err)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+
+	var selectedMessageMarker, excludedMessageMarker int
+	require.NoError(destination.DB().QueryRow(`
+		SELECT COUNT(*) FROM source_merge_archive_only_messages WHERE message_id = 2
+	`).Scan(&selectedMessageMarker))
+	require.NoError(destination.DB().QueryRow(`
+		SELECT COUNT(*) FROM source_merge_archive_only_messages WHERE message_id = 1
+	`).Scan(&excludedMessageMarker))
+	assert.Equal(1, selectedMessageMarker, "the selected message marker must survive the subset")
+	assert.Zero(excludedMessageMarker, "a marker for an unselected message must not cross the subset")
+
+	var selectedAttachmentMarker, excludedAttachmentMarker int
+	require.NoError(destination.DB().QueryRow(`
+		SELECT COUNT(*) FROM source_merge_preserved_attachments WHERE attachment_id = 22
+	`).Scan(&selectedAttachmentMarker))
+	require.NoError(destination.DB().QueryRow(`
+		SELECT COUNT(*) FROM source_merge_preserved_attachments WHERE attachment_id = 11
+	`).Scan(&excludedAttachmentMarker))
+	assert.Equal(1, selectedAttachmentMarker, "the selected attachment marker must survive the subset")
+	assert.Zero(excludedAttachmentMarker, "a marker for an unselected attachment must not cross the subset")
+}
+
+func TestCopySubsetPreservesSourceMergeLifecycleMarkers(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := t.Context()
+	sourcePath := filepath.Join(t.TempDir(), "source", "msgvault.db")
+	source, err := Open(sourcePath)
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(source.Close()) })
+	require.NoError(source.InitSchema())
+
+	history, err := source.GetOrCreateSource("gmail", "history@example.test")
+	require.NoError(err)
+	destination, err := source.GetOrCreateSource("gmail", "current@example.test")
+	require.NoError(err)
+	alias := "Primary mailbox"
+	_, err = source.UpdateSourceSettingsContext(ctx, destination.ID, SourceSettingsUpdate{
+		Alias: &alias,
+	})
+	require.NoError(err)
+
+	senderID, err := source.EnsureParticipant(
+		"sender@example.test", "Example Sender", "example.test")
+	require.NoError(err)
+	createMessage := func(sourceID int64, conversationID, providerID, rfc822ID string, sentAt time.Time) int64 {
+		t.Helper()
+		conversation, err := source.EnsureConversationWithType(
+			sourceID, conversationID, "email_thread", "Example subject")
+		require.NoError(err)
+		messageID, err := source.UpsertMessage(&Message{
+			SourceID: sourceID, ConversationID: conversation,
+			SourceMessageID: providerID,
+			RFC822MessageID: sql.NullString{String: rfc822ID, Valid: rfc822ID != ""},
+			MessageType:     "email",
+			SentAt:          sql.NullTime{Time: sentAt, Valid: true},
+			SenderID:        sql.NullInt64{Int64: senderID, Valid: true},
+			Subject:         sql.NullString{String: "Example subject", Valid: true},
+		})
+		require.NoError(err)
+		require.NoError(source.UpsertMessageBody(messageID,
+			sql.NullString{String: "Synthetic message body", Valid: true}, sql.NullString{}))
+		return messageID
+	}
+
+	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	survivorMessageID := createMessage(
+		destination.ID, "destination-thread", "destination-copy", "<shared@example.test>", baseTime)
+	duplicateMessageID := createMessage(
+		history.ID, "history-thread", "history-copy", "<shared@example.test>", baseTime)
+	historicalMessageID := createMessage(
+		history.ID, "unique-history-thread", "history-unique", "<unique@example.test>", baseTime.Add(time.Hour))
+	recipientID, err := source.EnsureParticipant(
+		"recipient@example.test", "Example Recipient", "example.test")
+	require.NoError(err)
+	for _, messageID := range []int64{survivorMessageID, duplicateMessageID} {
+		_, err = source.DB().Exec(source.Rebind(`
+			INSERT INTO message_recipients(message_id, participant_id, recipient_type, email_address)
+			VALUES (?, ?, 'to', 'recipient@example.test')
+		`), messageID, recipientID)
+		require.NoError(err)
+	}
+	for _, attachment := range []struct {
+		messageID int64
+		partKey   string
+		path      string
+	}{
+		{messageID: survivorMessageID, partKey: "mime:destination", path: "d/" + strings.Repeat("c", 64)},
+		{messageID: duplicateMessageID, partKey: "mime:history", path: strings.Repeat("c", 2) + "/" + strings.Repeat("c", 64)},
+	} {
+		_, err = source.DB().Exec(source.Rebind(`
+			INSERT INTO attachments (
+				message_id, filename, mime_type, size, content_hash, storage_path,
+				source_part_key, attachment_state, attachment_role, role_source
+			) VALUES (?, 'history.txt', 'text/plain', 17, ?, ?, ?, 'stored', 'standalone', 'mime_disposition')
+		`), attachment.messageID, strings.Repeat("c", 64), attachment.path, attachment.partKey)
+		require.NoError(err)
+	}
+
+	_, err = source.DB().Exec(source.Rebind(`UPDATE attachments SET filename = 'destination.txt' WHERE message_id = ?`), survivorMessageID)
+	require.NoError(err)
+
+	_, err = source.MergeSourcesContext(ctx, MergeSourcesRequest{
+		FromSourceID: history.ID, IntoSourceID: destination.ID,
+	})
+	require.NoError(err)
+	countRows := func(db *sql.DB, query string, args ...any) int64 {
+		t.Helper()
+		var count int64
+		require.NoError(db.QueryRow(query, args...).Scan(&count))
+		return count
+	}
+	for _, record := range []struct {
+		table string
+		count int64
+	}{
+		{table: "source_merge_messages", count: 2},
+		{table: "source_merge_conversations", count: 2},
+		{table: "source_merge_attachments", count: 1},
+		{table: "source_merges", count: 1},
+		{table: "source_settings", count: 2},
+	} {
+		require.Equal(record.count, countRows(source.DB(), "SELECT COUNT(*) FROM "+record.table),
+			"the merge fixture must contain source %s rows", record.table)
+	}
+	var archiveOnlyMarkerCount, protectedAttachmentMarkerCount int
+	require.NoError(source.DB().QueryRow(source.Rebind(`
+		SELECT COUNT(*) FROM source_merge_archive_only_messages WHERE message_id = ?
+	`), historicalMessageID).Scan(&archiveOnlyMarkerCount))
+	require.NoError(source.DB().QueryRow(source.Rebind(`
+		SELECT COUNT(*) FROM source_merge_preserved_attachments marker
+		JOIN attachments attachment ON attachment.id = marker.attachment_id
+		WHERE attachment.message_id = ?
+	`), survivorMessageID).Scan(&protectedAttachmentMarkerCount))
+	require.Equal(1, archiveOnlyMarkerCount)
+	require.Equal(1, protectedAttachmentMarkerCount)
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destinationDir, 2, false)
+	require.NoError(err)
+	subset, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(subset.Close()) })
+
+	settings, err := subset.GetSourceSettingsContext(ctx, destination.ID)
+	require.NoError(err)
+	assert.Equal(alias, settings.Alias)
+	assert.Equal(int64(1), countRows(subset.DB(), `
+		SELECT COUNT(*) FROM source_settings
+	`), "only the selected source's settings should cross the subset boundary")
+	assert.Equal(int64(2), countRows(subset.DB(), `
+		SELECT COUNT(*) FROM messages WHERE id IN (?, ?)
+	`, survivorMessageID, historicalMessageID))
+	assert.Equal(int64(1), countRows(subset.DB(), `
+		SELECT COUNT(*) FROM source_merge_archive_only_messages WHERE message_id = ?
+	`, historicalMessageID))
+	assert.Equal(int64(1), countRows(subset.DB(), `
+		SELECT COUNT(*) FROM source_merge_preserved_attachments marker
+		JOIN attachments attachment ON attachment.id = marker.attachment_id
+		WHERE attachment.message_id = ?
+	`, survivorMessageID))
+	for _, table := range []string{
+		"source_merge_messages", "source_merge_conversations",
+		"source_merge_attachments", "source_merges",
+	} {
+		assert.Equal(int64(0), countRows(subset.DB(), "SELECT COUNT(*) FROM "+table),
+			"incomplete %s provenance must not be copied", table)
+	}
 }
 
 func TestCopySubsetExcludesDocumentDerivativesAndHostedConsent(t *testing.T) {
@@ -1536,17 +1868,20 @@ func TestCopySubset_UpgradedMessageColumnOrder(t *testing.T) {
 
 	st, err := Open(srcDB)
 	require.NoError(err, "open source for upgrade")
-	// A pre-attribution archive predates both triggers that name source_is_from_me.
-	// The upgrade below reinstalls them through their migrations.
+	// A pre-attribution archive predates both triggers and the chat owner
+	// index that name source_is_from_me. The upgrade below reinstalls them
+	// through their migrations.
 	_, err = st.DB().Exec(`
 		DROP TRIGGER trg_activity_queue_messages_update;
 		DROP TRIGGER trg_cache_message_facts_update;
+		DROP INDEX idx_messages_source_owner;
 		ALTER TABLE messages DROP COLUMN identity_is_from_me;
 		ALTER TABLE messages DROP COLUMN source_is_from_me;
 		DELETE FROM applied_migrations
 		WHERE name IN ('message_attribution_provenance_v3',
-		               'activity_projection_triggers_v4',
-		               'cache_message_source_attribution');
+		               'activity_projection_triggers_v6',
+		               'cache_message_source_attribution',
+		               'chat_members_v1');
 	`)
 	require.NoError(err, "simulate pre-attribution schema")
 	require.NoError(st.InitSchema(), "upgrade source schema")
@@ -3503,8 +3838,9 @@ func TestCopySubset_LegacySourceMissingAttributionColumns(t *testing.T) {
 	require.NoError(err, "open source db")
 
 	_, err = db.Exec(`DROP TRIGGER trg_activity_queue_messages_update;
-		DROP TRIGGER trg_cache_message_facts_update`)
-	require.NoError(err, "drop triggers that name source_is_from_me")
+		DROP TRIGGER trg_cache_message_facts_update;
+		DROP INDEX idx_messages_source_owner`)
+	require.NoError(err, "drop triggers and index that name source_is_from_me")
 
 	for _, col := range []string{"source_is_from_me", "identity_is_from_me"} {
 		_, err = db.Exec(
@@ -3548,6 +3884,38 @@ func TestCopySubset_LegacySourceMissingAttributionColumns(t *testing.T) {
 	).Scan(&identityDefaults), "count identity_is_from_me defaults")
 	assert.Equal(dstCount, identityDefaults,
 		"identity_is_from_me should hold its schema default (FALSE)")
+}
+
+// TestCopySubset_LegacySourceMissingHiddenTextFlag covers a source archive
+// written before messages.hidden_text_present. The copy must derive the flag
+// from the copied HTML bodies instead of leaving the column at its default.
+func TestCopySubset_LegacySourceMissingHiddenTextFlag(t *testing.T) {
+	require := require.New(t)
+	srcDB := createTestSourceDB(t, t.TempDir(), 1)
+
+	db, err := sql.Open(sqliteutil.DriverName(), srcDB+"?_foreign_keys=OFF")
+	require.NoError(err, "open source db")
+	_, err = db.Exec(`UPDATE message_bodies SET body_html = '<p>Hi</p><div style="display:none">Hidden</div>'`)
+	require.NoError(err, "store hidden HTML body")
+	var triggers string
+	require.NoError(db.QueryRow(`SELECT group_concat('DROP TRIGGER "' || name || '"', ';') FROM sqlite_master
+		WHERE type = 'trigger' AND sql LIKE '%hidden_text_present%'`).Scan(&triggers), "list triggers that name hidden_text_present")
+	_, err = db.Exec(triggers)
+	require.NoError(err, "drop triggers that name hidden_text_present")
+	_, err = db.Exec(`ALTER TABLE messages DROP COLUMN hidden_text_present`)
+	require.NoError(err, "drop messages.hidden_text_present")
+	require.NoError(db.Close(), "close source db")
+
+	dstDir := filepath.Join(t.TempDir(), "dst")
+	_, err = CopySubset(srcDB, dstDir, 1, false)
+	require.NoError(err, "CopySubset from a source without hidden_text_present")
+	dstDB, err := sql.Open(sqliteutil.DriverName(), filepath.Join(dstDir, "msgvault.db"))
+	require.NoError(err, "open destination db")
+	defer func() { _ = dstDB.Close() }()
+
+	var flagged int
+	require.NoError(dstDB.QueryRow(`SELECT COUNT(*) FROM messages WHERE hidden_text_present`).Scan(&flagged))
+	assert.Equal(t, 1, flagged, "copied hidden HTML must set hidden_text_present")
 }
 
 // TestCopySubset_SourceOnlyColumnWithQuoteInName covers a source archive whose
@@ -3858,6 +4226,7 @@ func TestCopySubset_LegacySourceWithoutContentChangedAt(t *testing.T) {
 		`DROP TRIGGER IF EXISTS trg_message_bodies_content_changed_ins`,
 		`DROP TRIGGER IF EXISTS trg_message_bodies_content_changed_upd`,
 		`DROP INDEX IF EXISTS idx_messages_content_changed_at`,
+		`DROP INDEX IF EXISTS idx_messages_conversation_content_changed`,
 		`ALTER TABLE messages DROP COLUMN content_changed_at`,
 	} {
 		_, err = srcDB.Exec(stmt)
@@ -4069,6 +4438,11 @@ func TestCopySubset_UpgradedAuxiliaryColumnOrder(t *testing.T) {
 		`DROP INDEX IF EXISTS idx_conversations_type`,
 		`DROP TRIGGER IF EXISTS trg_embedding_changes_conversation_title`,
 		`DROP TRIGGER IF EXISTS trg_activity_queue_conversation_type_update`,
+		`DROP TRIGGER IF EXISTS trg_chat_members_messages_update`,
+		`DROP TRIGGER IF EXISTS trg_chat_members_messages_delete`,
+		`DROP TRIGGER IF EXISTS trg_chat_members_recipients_update`,
+		`DROP TRIGGER IF EXISTS trg_chat_members_recipients_delete`,
+		`DROP TRIGGER IF EXISTS trg_chat_members_conversation_type`,
 		`ALTER TABLE conversations DROP COLUMN conversation_type`,
 		`ALTER TABLE conversations DROP COLUMN title`,
 		`ALTER TABLE conversations ADD COLUMN title TEXT`,
@@ -5089,4 +5463,371 @@ func TestCopySubsetKeepsPendingDraftOutOfReceived(t *testing.T) {
 		Scan(&authored, &path))
 	assert.True(authored, "the subset keeps the draft mark its IMAP flag gave it")
 	assert.Equal(accountPathSent, path.String, "a copied draft is written, not received")
+}
+
+func TestCopySubsetPreservesUnsentDraft(t *testing.T) {
+	for _, evidence := range []struct {
+		name, sourceType, statement string
+	}{
+		{"imap-flags", "imap", `INSERT INTO imap_message_memberships
+			(source_id, mailbox, uidvalidity, uid, message_id, flags)
+			VALUES (1, 'Scratch', 7, 1, 1, '["\\Draft"]')`},
+		{"imap-record", "imap", `INSERT INTO imap_drafts
+			(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision)
+			VALUES ('managed-draft', 1, 1, 'Scratch', 7, 1, 1)`},
+		{"imap-pending-record", "imap", `INSERT INTO imap_drafts
+			(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision,
+			 pending_operation, pending_original_message_id, pending_original_mailbox,
+			 pending_original_uidvalidity, pending_original_uid, pending_raw)
+			VALUES ('managed-draft', 1, 2, 'Scratch', 7, 2, 2, 'edit', 1, 'Scratch', 7, 1, X'78')`},
+		{"gmail-record", "gmail", `INSERT INTO gmail_drafts
+			(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision)
+			VALUES ('managed-draft', 1, 'provider-draft', 1, 'msg_1', 'thread_1', 1)`},
+		{"gmail-pending-record", "gmail", `INSERT INTO gmail_drafts
+			(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision,
+			 pending_operation, pending_original_message_id, pending_original_gmail_message_id, pending_raw)
+			VALUES ('managed-draft', 1, 'provider-draft', 2, 'msg_2', 'thread_1', 2, 'edit', 1, 'msg_1', X'78')`},
+	} {
+		for _, sentEvidence := range []string{"none", "label", "origin"} {
+			if evidence.sourceType == "gmail" && sentEvidence == "origin" {
+				continue
+			}
+			t.Run(evidence.name+"/"+sentEvidence, func(t *testing.T) {
+				require := require.New(t)
+				assert := assert.New(t)
+				srcDB := createTestSourceDB(t, t.TempDir(), 3)
+				src, err := Open(srcDB)
+				require.NoError(err)
+				_, err = src.DB().Exec(`UPDATE sources SET source_type = ?`, evidence.sourceType)
+				require.NoError(err)
+				_, err = src.DB().Exec(evidence.statement)
+				require.NoError(err)
+				// A colliding user label must not turn an ordinary message into a draft.
+				_, err = src.DB().Exec(`INSERT INTO labels(source_id, name, label_type)
+					VALUES (1, 'msgvault-archive:1:draft', 'user')`)
+				require.NoError(err)
+				_, err = src.DB().Exec(`INSERT INTO message_labels(message_id, label_id)
+					SELECT 3, id FROM labels WHERE source_id = 1 AND name = 'msgvault-archive:1:draft'`)
+				require.NoError(err)
+				if sentEvidence == "label" {
+					labels, err := src.EnsureLabelsBatch(1, map[string]LabelInfo{
+						"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
+					})
+					require.NoError(err)
+					require.NoError(src.AddMessageLabels(1, []int64{labels["sent"]}))
+				}
+				if sentEvidence == "origin" {
+					require.NoError(src.SetMessageMetadata(1, sql.NullString{String: `{"imap_content_origin":"sent"}`, Valid: true}))
+				}
+				before, err := src.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 3})
+				require.NoError(err)
+				require.Len(before, 2)
+				require.Equal(sentEvidence == "none", before[0].Unsent)
+				require.True(before[1].Eligible)
+				var originalIsSent sql.NullBool
+				require.NoError(src.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&originalIsSent))
+				require.NoError(src.Close())
+
+				dstDir := filepath.Join(t.TempDir(), "dst")
+				_, err = CopySubset(srcDB, dstDir, 3, false)
+				require.NoError(err)
+				dst, err := Open(filepath.Join(dstDir, "msgvault.db"))
+				require.NoError(err)
+				t.Cleanup(func() { _ = dst.Close() })
+				after, err := dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1, 3})
+				require.NoError(err)
+				require.Len(after, 2)
+				assert.Equal(sentEvidence == "none", after[0].Unsent)
+				assert.Equal(sentEvidence != "none", after[0].Eligible)
+				assert.True(after[1].Eligible, "ordinary messages remain contact activity")
+				var isSent sql.NullBool
+				require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
+				assert.Equal(originalIsSent, isSent)
+
+				labels, err := dst.EnsureLabelsBatch(1, map[string]LabelInfo{
+					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
+				})
+				require.NoError(err)
+				require.NoError(dst.AddMessageLabels(1, []int64{labels["sent"]}))
+				after, err = dst.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+				require.NoError(err)
+				require.Len(after, 1)
+				assert.False(after[0].Unsent)
+				assert.True(after[0].Eligible, "Sent evidence makes the former draft contact activity")
+				require.NoError(dst.DB().QueryRow(`SELECT is_sent FROM messages WHERE id = 1`).Scan(&isSent))
+				assert.Equal(originalIsSent, isSent)
+			})
+		}
+	}
+}
+
+func TestCopySubsetPreservesBeeperReanchorMarker(t *testing.T) {
+	requirements := require.New(t)
+	sourcePath := createTestSourceDB(t, t.TempDir(), 1)
+	source, err := Open(sourcePath)
+	requirements.NoError(err)
+	t.Cleanup(func() { requirements.NoError(source.Close()) })
+	requirements.NoError(source.SetArchiveMarker(t.Context(), BeeperReanchorMarkerKey(1), "re-anchor required"))
+	requirements.NoError(source.SetArchiveMarker(t.Context(), BeeperReanchorMarkerKey(99), "unrelated source"))
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destinationDir, 1, false)
+	requirements.NoError(err)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	requirements.NoError(err)
+	t.Cleanup(func() { requirements.NoError(destination.Close()) })
+	value, found, err := destination.GetArchiveMarker(t.Context(), BeeperReanchorMarkerKey(1))
+	requirements.NoError(err)
+	assert.True(t, found)
+	assert.Equal(t, "re-anchor required", value)
+	_, found, err = destination.GetArchiveMarker(t.Context(), BeeperReanchorMarkerKey(99))
+	requirements.NoError(err)
+	assert.False(t, found, "markers for sources outside the subset stay behind")
+}
+
+func TestCopySubsetPreservesSelectedMessageEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, evidence string
+		merged, sent             bool
+	}{
+		{name: "flag_only_imap", provider: "imap", evidence: "flag"},
+		{name: "imap_record_only", provider: "imap", evidence: "record"},
+		{name: "gmail_record_only", provider: "gmail", evidence: "record"},
+		{name: "imap_pending_original_only", provider: "imap", evidence: "pending"},
+		{name: "gmail_pending_original_only", provider: "gmail", evidence: "pending"},
+		{name: "record_on_merged_away_source", provider: "imap", evidence: "record", merged: true},
+		{name: "draft_and_sent", provider: "imap", evidence: "flag", sent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			sourcePath := createTestSourceDB(t, t.TempDir(), 1)
+			source, err := Open(sourcePath)
+			require.NoError(err)
+			t.Cleanup(func() { require.NoError(source.Close()) })
+			_, err = source.DB().Exec(`UPDATE sources SET source_type = ?`, tc.provider)
+			require.NoError(err)
+			currentID := int64(1)
+			if tc.evidence == "pending" {
+				// Only the old snapshot is selected; the newer, undated replacement stays behind.
+				currentID, err = source.UpsertMessage(&Message{
+					SourceID: 1, ConversationID: 2, SourceMessageID: "replacement", MessageType: MessageTypeEmail,
+				})
+				require.NoError(err)
+				require.NotEqual(int64(1), currentID)
+			}
+			switch tc.evidence {
+			case "flag":
+				_, err = source.DB().Exec(`INSERT INTO imap_message_memberships
+					(source_id, mailbox, uidvalidity, uid, message_id, flags)
+					VALUES (1, 'Scratch', 7, 1, 1, '["\\Draft"]')`)
+				require.NoError(err)
+			case "record", "pending":
+				if tc.provider == "imap" {
+					_, err = source.DB().Exec(`INSERT INTO imap_drafts
+						(draft_id, source_id, current_message_id, current_mailbox, current_uidvalidity, current_uid, revision)
+						VALUES ('draft', 1, ?, 'Scratch', 7, 2, 2)`, currentID)
+				} else {
+					_, err = source.DB().Exec(`INSERT INTO gmail_drafts
+						(draft_id, source_id, gmail_draft_id, current_message_id, current_gmail_message_id, thread_id, revision)
+						VALUES ('draft', 1, 'provider-draft', ?, 'replacement', 'thread', 2)`, currentID)
+				}
+				require.NoError(err)
+				if tc.evidence == "pending" {
+					if tc.provider == "imap" {
+						_, err = source.DB().Exec(`UPDATE imap_drafts SET pending_operation = 'edit',
+							pending_original_message_id = 1, pending_original_mailbox = 'Scratch',
+							pending_original_uidvalidity = 7, pending_original_uid = 1, pending_raw = X'01'`)
+					} else {
+						_, err = source.DB().Exec(`UPDATE gmail_drafts SET pending_operation = 'edit',
+							pending_original_message_id = 1, pending_original_gmail_message_id = 'msg_1', pending_raw = X'01'`)
+					}
+					require.NoError(err)
+				}
+			}
+			if tc.sent {
+				labels, err := source.EnsureLabelsBatch(1, map[string]LabelInfo{
+					"sent": {Name: "Sent", Type: "system", SystemRole: LabelSystemRoleSent},
+				})
+				require.NoError(err)
+				require.NoError(source.AddMessageLabels(1, []int64{labels["sent"]}))
+			}
+			if tc.merged {
+				// A retained, discarded draft record permits the account merge.
+				_, err = source.DB().Exec(`UPDATE imap_drafts SET discarded_at = CURRENT_TIMESTAMP`)
+				require.NoError(err)
+				destination, err := source.GetOrCreateSource(tc.provider, "destination@example.com")
+				require.NoError(err)
+				_, err = source.MergeSourcesContext(t.Context(), MergeSourcesRequest{FromSourceID: 1, IntoSourceID: destination.ID})
+				require.NoError(err)
+				var evidenceSourceID int64
+				require.NoError(source.DB().QueryRow(`SELECT source_id FROM imap_drafts WHERE current_message_id = 1`).Scan(&evidenceSourceID))
+				require.Equal(int64(1), evidenceSourceID, "the only draft evidence belongs to the retired source")
+			}
+			before, err := source.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+			require.NoError(err)
+			require.Len(before, 1)
+			require.Equal(!tc.sent, before[0].Unsent)
+			require.Equal(tc.sent, before[0].Eligible)
+
+			destinationDir := filepath.Join(t.TempDir(), "subset")
+			_, err = CopySubset(sourcePath, destinationDir, 1, false)
+			require.NoError(err, "export must succeed with the selected draft evidence")
+			subset, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+			require.NoError(err)
+			t.Cleanup(func() { require.NoError(subset.Close()) })
+			after, err := subset.LoadActivityCandidatesByIDContext(t.Context(), []int64{1})
+			require.NoError(err)
+			require.Len(after, 1)
+			assert.Equal(t, !tc.sent, after[0].Unsent, "the selected snapshot must retain its unsent status")
+			assert.Equal(t, tc.sent, after[0].Eligible, "only sent messages may count as contact")
+			if tc.evidence == "pending" {
+				var replacementCount int
+				require.NoError(subset.DB().QueryRow(`SELECT COUNT(*) FROM messages WHERE id = ?`, currentID).Scan(&replacementCount))
+				assert.Zero(t, replacementCount, "the original must stay unsent without copying its replacement")
+			}
+		})
+	}
+}
+
+func TestSubsetCopiesLoopDecisions(t *testing.T) {
+	require := require.New(t)
+	ctx := context.Background()
+	sourcePath := createTestSourceDB(t, t.TempDir(), 4)
+	source, err := Open(sourcePath)
+	require.NoError(err)
+	require.NoError(source.MarkMessageDeleted(1, "msg_4"))
+	_, err = source.DB().ExecContext(ctx, `INSERT INTO loop_decisions(message_id,state,snoozed_until) VALUES (1,'snoozed','2026-10-25T12:00:00Z'),(2,'done',NULL),(4,'done',NULL)`)
+	require.NoError(err)
+	require.NoError(source.Close())
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destinationDir, 3, false)
+	require.NoError(err)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+	var state string
+	require.NoError(destination.DB().QueryRowContext(ctx, `SELECT state FROM loop_decisions WHERE message_id = 2`).Scan(&state))
+	require.Equal(LoopStateDone, state)
+	var count int
+	require.NoError(destination.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM loop_decisions`).Scan(&count))
+	require.Equal(2, count, "only selected questions carry their decisions")
+	var until time.Time
+	require.NoError(destination.DB().QueryRowContext(ctx, `SELECT snoozed_until FROM loop_decisions WHERE message_id = 1`).Scan(&until))
+	require.Equal(time.Date(2026, time.October, 25, 12, 0, 0, 0, time.UTC), until.UTC())
+}
+
+func TestSubsetCopiesMatrixRecoveryStateForSelectedMessages(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	sourceDir := t.TempDir()
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	sourcePath := createTestSourceDB(t, sourceDir, 2)
+	db, err := sql.Open(sqliteutil.DriverName(), sourcePath+"?_foreign_keys=OFF")
+	require.NoError(err)
+	for _, messageID := range []int64{1, 2} {
+		_, err = db.Exec(`INSERT INTO matrix_encrypted_events (message_id, conversation_id, session_id, ciphertext) VALUES (?, ?, 'session', '{}')`, messageID, messageID)
+		require.NoError(err)
+		_, err = db.Exec(`INSERT INTO matrix_pending_edits (target_message_id, event_id, origin_ts, event) VALUES (?, ?, 1, '{}')`, messageID, fmt.Sprintf("$edit-%d", messageID))
+		require.NoError(err)
+		_, err = db.Exec(`INSERT INTO matrix_megolm_claims (conversation_id, session_id, message_index, event_id) VALUES (?, 'session', 0, ?)`, messageID, fmt.Sprintf("$event-%d", messageID))
+		require.NoError(err)
+	}
+	require.NoError(db.Close())
+
+	// The newest message is message 2, in conversation 2.
+	_, err = CopySubset(sourcePath, destinationDir, 1, false)
+	require.NoError(err)
+
+	destination, err := sql.Open(sqliteutil.DriverName(), filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+	for table, column := range map[string]string{
+		"matrix_encrypted_events": "message_id",
+		"matrix_pending_edits":    "target_message_id",
+		"matrix_megolm_claims":    "conversation_id",
+	} {
+		ids := func() []int64 {
+			rows, err := destination.Query(`SELECT ` + column + ` FROM ` + table)
+			require.NoError(err)
+			defer func() { require.NoError(rows.Close()) }()
+			var ids []int64
+			for rows.Next() {
+				var id int64
+				require.NoError(rows.Scan(&id))
+				ids = append(ids, id)
+			}
+			require.NoError(rows.Err())
+			return ids
+		}()
+		assert.Equal([]int64{2}, ids, table)
+	}
+}
+
+func TestSubsetRegistersPlaceholdersFromSourceWithoutMatrixTables(t *testing.T) {
+	require := require.New(t)
+	sourceDir := t.TempDir()
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	sourcePath := createTestSourceDB(t, sourceDir, 2)
+	db, err := sql.Open(sqliteutil.DriverName(), sourcePath+"?_foreign_keys=OFF")
+	require.NoError(err)
+	// Message 2 is the newest, so the one-row subset selects it.
+	_, err = db.Exec(`UPDATE messages SET message_type = 'matrix', snippet = ? WHERE id = 2`, MatrixEncryptedPlaceholder)
+	require.NoError(err)
+	_, err = db.Exec(`INSERT INTO message_raw (message_id, raw_data, raw_format, compression) VALUES (2, ?, 'matrix_json', NULL)`,
+		[]byte(`{"type":"m.room.encrypted","content":{"session_id":"session","ciphertext":"opaque"}}`))
+	require.NoError(err)
+	for _, table := range []string{"matrix_encrypted_events", "matrix_megolm_claims", "matrix_pending_edits"} {
+		_, err = db.Exec(`DROP TABLE ` + table)
+		require.NoError(err)
+	}
+	require.NoError(db.Close())
+
+	_, err = CopySubset(sourcePath, destinationDir, 1, false)
+	require.NoError(err)
+
+	destination, err := sql.Open(sqliteutil.DriverName(), filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+	var registered int64
+	require.NoError(destination.QueryRow(`SELECT message_id FROM matrix_encrypted_events`).Scan(&registered))
+	assert.Equal(t, int64(2), registered)
+}
+
+func TestSubsetKeepsMergedMatrixRoomsOutOfSync(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	ctx := context.Background()
+	sourcePath := filepath.Join(t.TempDir(), "msgvault.db")
+	st, err := Open(sourcePath)
+	require.NoError(err)
+	require.NoError(st.InitSchema())
+	into, err := st.GetOrCreateSource("matrix", "@archive:example.org")
+	require.NoError(err)
+	old, err := st.GetOrCreateSource("matrix", "@old:example.org")
+	require.NoError(err)
+	room, err := st.EnsureConversationWithType(old.ID, "!dm:example.org", "direct_chat", "Old DM")
+	require.NoError(err)
+	_, err = st.PersistMatrixMessageContext(ctx, &MessagePersistData{
+		Message: &Message{SourceID: old.ID, ConversationID: room, SourceMessageID: "$old", MessageType: "matrix", Snippet: sql.NullString{String: MatrixEncryptedPlaceholder, Valid: true}},
+		RawMIME: []byte(`{"type":"m.room.encrypted","content":{"session_id":"session","ciphertext":"opaque"}}`), RawFormat: "matrix_json",
+	}, MatrixPersist{SessionID: "session"})
+	require.NoError(err)
+	_, err = st.MergeSourcesContext(ctx, MergeSourcesRequest{FromSourceID: old.ID, IntoSourceID: into.ID})
+	require.NoError(err)
+	require.NoError(st.Close())
+
+	destinationDir := filepath.Join(t.TempDir(), "subset")
+	_, err = CopySubset(sourcePath, destinationDir, 10, false)
+	require.NoError(err)
+	destination, err := Open(filepath.Join(destinationDir, "msgvault.db"))
+	require.NoError(err)
+	t.Cleanup(func() { require.NoError(destination.Close()) })
+
+	rooms, err := destination.ListMatrixRoomIDsContext(ctx, into.ID)
+	require.NoError(err)
+	assert.Empty(rooms, "the merged room keeps its stored type")
+	pending, err := destination.CountMatrixPending(ctx, into.ID, nil, nil)
+	require.NoError(err)
+	assert.Zero(pending, "the merged room's placeholder is not retried")
 }

@@ -16,6 +16,7 @@ import (
 )
 
 func TestArchiveDuckDBEngineCanceledStartupCleansOwnedSpill(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	spillDir := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -30,6 +31,7 @@ func TestArchiveDuckDBEngineCanceledStartupCleansOwnedSpill(t *testing.T) {
 }
 
 func TestArchiveDuckDBEngineStartupHonorsDeadlineDuringPublication(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	builder := NewTestDataBuilder(t)
 	builder.AddSource("owner@example.com")
@@ -39,7 +41,7 @@ func TestArchiveDuckDBEngineStartupHonorsDeadlineDuringPublication(t *testing.T)
 	publicationLock := flock.New(CacheBuildLockPath(dir))
 	requirements.NoError(publicationLock.Lock())
 	spillDir := filepath.Join(t.TempDir(), "spill")
-	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the held publication lock keeps startup waiting
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond) //nolint:kennlint // deadlinetest: the deadline is the expected result; the held publication lock keeps startup waiting
 	defer cancel()
 	done := make(chan error, 1)
 	finished := make(chan struct{})
@@ -73,6 +75,7 @@ func TestArchiveDuckDBEngineStartupHonorsDeadlineDuringPublication(t *testing.T)
 }
 
 func TestArchiveDuckDBEngineRestrictsSQLToAnalytics(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	t.Run("missing analytics directory", func(t *testing.T) {
 		_, err := NewArchiveDuckDBEngine(t.Context(), "")
@@ -135,6 +138,7 @@ func TestArchiveDuckDBEngineRestrictsSQLToAnalytics(t *testing.T) {
 }
 
 func TestArchiveDuckDBEngineFollowsPublication(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	builder := NewTestDataBuilder(t)

@@ -5,14 +5,19 @@ import type { CalendarCoverage } from "./calendarCoverage";
 import type { VirtualAccount } from "./virtualAccount";
 
 export interface CliAccountResponse {
+  alias: string;
   calendar_coverage?: CalendarCoverage;
   display_name: string;
   email: string;
+  history_only: boolean;
   id: number;
+  identifier: string;
   /** @nullable */
   last_sync: string | null;
+  merged_into_source_id: number;
   message_count: number;
   oauth_app?: string;
+  reanchor_required: boolean;
   source_deleted_count: number;
   type: string;
   virtual_accounts?: VirtualAccount[];

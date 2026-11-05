@@ -264,6 +264,8 @@ func TestDirectoryPeopleHTTPMapsEveryQueryParameter(t *testing.T) {
 		path string
 	}{
 		{name: "query", path: peoplePath + "/directory?q=alcie"},
+		{name: "address", path: peoplePath + "/directory?address=ALICE%40example.test"},
+		{name: "combined query and address", path: peoplePath + "/directory?q=alcie&address=alice%40example.test"},
 		{name: "contact state", path: peoplePath + "/directory?contact_state=active"},
 		{name: "category", path: peoplePath + "/directory?category=friend"},
 		{name: "organization", path: peoplePath + "/directory?organization=Acme"},
@@ -751,7 +753,6 @@ func TestSemanticPersonSearchMapsGenerationAndEmbeddingErrors(t *testing.T) {
 			wantCode:    "person_embedding_policy_unavailable",
 			wantMessage: "cannot verify the current semantic person embedding policy",
 		},
-		{name: "stale", err: vector.ErrIndexStale, wantCode: "index_stale"},
 		{name: "building", err: vector.ErrIndexBuilding, wantCode: "index_building"},
 		{
 			name: "person coverage incomplete", err: personsearch.ErrPersonCoverageIncomplete,
@@ -785,6 +786,47 @@ func TestSemanticPersonSearchMapsGenerationAndEmbeddingErrors(t *testing.T) {
 			}
 			if test.wantDetail != "" {
 				assertions.Contains(body.Message, test.wantDetail)
+			}
+		})
+	}
+}
+
+func TestSemanticPersonSearchDistinguishesIndexStaleFromProviderRuntimeStale(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name       string
+		err        error
+		wantStatus VectorStatus
+	}{
+		{name: "index stale", err: vector.ErrIndexStale, wantStatus: VectorStatusStale},
+		{name: "provider runtime stale", err: vector.ErrSemanticPersonEmbeddingRuntimeStale, wantStatus: VectorStatusReady},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			cfg := vector.Config{Enabled: true}
+			backend := &resolvingVectorBackend{fingerprint: cfg.GenerationFingerprint()}
+			engine := &fakePersonSearchEngine{err: test.err}
+			srv := NewServerWithOptions(ServerOptions{
+				Config: &config.Config{}, Logger: testLogger(),
+				Backend: backend, VectorCfg: cfg, VectorStatus: VectorStatusReady,
+				PersonSearchEngine: engine,
+			})
+			srv.refreshVectorStatus(t.Context())
+			backend.fingerprint = "rebuilt"
+			srv.SetVectorRestartFingerprint(func(context.Context) (string, error) { return "rebuilt", nil })
+
+			response := semanticPersonSearchRequest(t, srv, []byte(`{"query":"synthetic"}`), "")
+			require.Equal(http.StatusServiceUnavailable, response.Code, response.Body.String())
+			var body ErrorResponse
+			require.NoError(json.Unmarshal(response.Body.Bytes(), &body))
+			assert.Equal("index_stale", body.Error)
+			assert.Equal([]string{"synthetic"}, engine.queries)
+			status, detail := srv.VectorStatus()
+			assert.Equal(test.wantStatus, status)
+			if test.wantStatus == VectorStatusReady {
+				assert.Equal("The vector index does not match configured embedding settings", body.Message)
+				assert.Empty(detail)
 			}
 		})
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestGCAlwaysProxiesThroughDaemonCLIRunner(t *testing.T) {
@@ -109,6 +110,7 @@ func TestRunGCLocalBacksUpBeforeDeleteAndCompacts(t *testing.T) {
 	orphanBlob := seedGCLooseBlob(t, cfg, deletedID, strings.Repeat("0a", 32))
 	sharedBlob := seedGCLooseBlob(t, cfg, deletedID, strings.Repeat("0b", 32))
 	seedGCAttachmentRow(t, cfg, activeID, strings.Repeat("0b", 32))
+	beforePages := gcArchivePageCount(t, cfg.DatabaseDSN())
 
 	require.NoError(runGCLocal(cmd, gcOptions{yes: true}))
 	assert.Contains(output.String(), "Source-deleted messages to purge: 1")
@@ -131,13 +133,11 @@ func TestRunGCLocalBacksUpBeforeDeleteAndCompacts(t *testing.T) {
 	assert.True(gcMessageExists(t, backups[0], deletedID),
 		"backup must capture the source-deleted row before purge")
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err, "open compacted archive")
-	defer func() { _ = st.Close() }()
-	var freelist int64
-	require.NoError(st.DB().QueryRow(`PRAGMA freelist_count`).Scan(&freelist),
-		"read compacted freelist")
-	assert.Zero(freelist)
+	// Store.Close refreshes planner statistics after VACUUM. Those small
+	// maintenance writes may leave free pages; the command's contract is that
+	// the deleted payload no longer occupies the SQLite archive.
+	assert.Less(gcArchivePageCount(t, cfg.DatabaseDSN()), beforePages,
+		"compaction must reclaim physical pages from the deleted payload")
 }
 
 func TestRunGCLocalSweepsOrphanBlobsWhenNothingToPurge(t *testing.T) {
@@ -212,9 +212,7 @@ func seedGCCommandArchive(t *testing.T) (deletedID, activeID, dedupID int64, tes
 	t.Cleanup(func() { cfg = savedCfg })
 	testCtx = testInvocationContext(t.Context(), cfg, invocationOptions{})
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err, "OpenForTest")
-	require.NoError(st.InitSchema(), "InitSchema")
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 	source, err := st.GetOrCreateSource("gmail", "gc@example.test")
 	require.NoError(err, "GetOrCreateSource")
 	conversationID, err := st.EnsureConversation(source.ID, "gc-thread", "GC")
@@ -283,4 +281,15 @@ func gcMessageExists(t *testing.T, dbPath string, messageID int64) bool {
 		`SELECT COUNT(*) FROM messages WHERE id = ?`), messageID).Scan(&count),
 		"count GC message")
 	return count == 1
+}
+
+func gcArchivePageCount(t *testing.T, databasePath string) int64 {
+	t.Helper()
+	requirements := require.New(t)
+	st, err := store.OpenReadOnly(databasePath)
+	requirements.NoError(err, "open GC archive without changing planner statistics")
+	defer func() { requirements.NoError(st.Close()) }()
+	var pages int64
+	requirements.NoError(st.DB().QueryRow(`PRAGMA page_count`).Scan(&pages))
+	return pages
 }

@@ -270,7 +270,8 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 			BatchSize:     vectorCfg.Embeddings.BatchSize, BuildScope: vectorCfg.Embed.Scope.BuildScope(),
 			Rebind: deps.Rebind, LastModifiedExpr: deps.LastModifiedExpr,
 			TotalPending: deps.TotalPending, Progress: deps.Progress, Log: deps.Log,
-			Recorder: deps.Store,
+			Recorder:    deps.Store,
+			Diagnostics: deps.Store,
 		})
 		personWorker := embed.NewPersonWorker(embed.PersonWorkerDeps{
 			Store: deps.Store, Backend: personBackend, Client: personClient,
@@ -319,6 +320,7 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 			ReconcileBatchSize:      vectorCfg.Embeddings.BatchSize,
 			DocumentPrefixUTF8Bytes: len(vectorCfg.Embeddings.DocumentPrefix),
 			Recorder:                deps.Store, Log: deps.Log,
+			Diagnostics: deps.Store,
 		})
 		personWorker := embed.NewPersonWorker(embed.PersonWorkerDeps{
 			Store: deps.Store, Backend: personBackend, Client: personClient,
@@ -508,9 +510,13 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 	// config is a local copy: this runs on the daemon's background init
 	// goroutine while HTTP handlers may already be reading the global cfg,
 	// so the global must stay unmutated.
-	vecCfg, err := resolvedVectorConfig(mainStore, cfg.Vector)
+	vecCfg, err := resolvedVectorConfig(ctx, mainStore, cfg.Vector)
 	if err != nil {
 		return nil, fmt.Errorf("vector embed scope: %w", err)
+	}
+	vecCfg, err = resolveLocalVectorConfig(ctx, vecCfg)
+	if err != nil {
+		return nil, err
 	}
 	credentialSnapshot, err := providercredentials.Read(cfg.TokensDir())
 	if err != nil {
@@ -518,10 +524,7 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 	}
 	var embeddingAPIKey string
 	if vecCfg.Enabled {
-		embeddingAPIKey, err = resolveProviderCredentialFromSnapshot(
-			credentialSnapshot, providercredentials.VectorEmbeddingsID,
-			vecCfg.Embeddings.Endpoint, vecCfg.Embeddings.APIKeyEnv,
-		)
+		embeddingAPIKey, err = resolveTextEmbeddingCredential(credentialSnapshot, vecCfg)
 		if err != nil {
 			return nil, fmt.Errorf("resolve text embedding credential: %w", err)
 		}
@@ -941,8 +944,8 @@ func visualScopeCheck(s *store.Store, accounts []string, expected []int64) func(
 	}
 	want := slices.Clone(expected)
 	slices.Sort(want)
-	return func(context.Context) error {
-		ids, err := resolveEmbedAccountList(s, accounts, true)
+	return func(ctx context.Context) error {
+		ids, err := resolveEmbedAccountList(ctx, s, accounts, true)
 		if err != nil {
 			return fmt.Errorf("[vector.multimodal.scope] accounts: %w", err)
 		}

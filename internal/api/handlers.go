@@ -12,12 +12,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"go.kenn.io/msgvault/internal/attachmentstore"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/deletion"
@@ -26,6 +27,7 @@ import (
 	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/senderauth"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/chunkmatch"
@@ -134,8 +136,10 @@ type SourceStatus struct {
 	NextSyncAt            *string                 `json:"next_sync_at"`
 	SchedulerLastError    string                  `json:"scheduler_last_error,omitempty"`
 	// SchedulerQueued reports a scheduled run waiting for another job to
-	// finish; SchedulerPending a follow-up run requested while one executes;
+	// finish; SchedulerQueuedAt gives when the wait began.
+	// SchedulerPending reports a follow-up run requested while one executes;
 	// SchedulerStartedAt when the executing run began.
+	SchedulerQueuedAt  *string `json:"scheduler_queued_at,omitempty"`
 	SchedulerQueued    bool    `json:"scheduler_queued,omitempty"`
 	SchedulerPending   bool    `json:"scheduler_pending,omitempty"`
 	SchedulerStartedAt *string `json:"scheduler_started_at,omitempty"`
@@ -277,10 +281,12 @@ type GmailIDsResponse struct {
 	Targets          []query.DeletionTarget `json:"targets,omitempty"`
 	SearchQuery      string                 `json:"search_query,omitempty"`
 	SearchMode       string                 `json:"search_mode,omitempty"`
+	MatchedCount     *int64                 `json:"matched_count,omitempty"`
 	AppliedSourceIDs []int64                `json:"applied_source_ids,omitempty"`
 }
 
 type DeepSearchResponse struct {
+	Warnings     []string            `json:"warnings,omitempty"`
 	IndexState   string              `json:"index_state,omitempty"`
 	Query        string              `json:"query"`
 	Scope        string              `json:"scope,omitempty"`
@@ -305,40 +311,47 @@ type BodySearchContext struct {
 
 // MessageSummary represents a message in list responses.
 type MessageSummary struct {
-	InboxState      string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
-	ReadState       string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
-	ID              int64    `json:"id"`
-	SourceID        int64    `json:"source_id,omitzero"`
-	SourceMessageID string   `json:"source_message_id,omitempty"`
-	ConversationID  int64    `json:"conversation_id,omitzero"`
-	Subject         string   `json:"subject"`
-	MessageType     string   `json:"message_type,omitempty"`
-	From            string   `json:"from"`
-	FromEmail       string   `json:"from_email,omitempty"`
-	FromName        string   `json:"from_name,omitempty"`
-	FromPhone       string   `json:"from_phone,omitempty"`
-	To              []string `json:"to"`
-	Cc              []string `json:"cc,omitempty"`
-	Bcc             []string `json:"bcc,omitempty"`
-	SentAt          string   `json:"sent_at"`
-	DeletedAt       string   `json:"deleted_at,omitempty"`
-	Snippet         string   `json:"snippet"`
-	Labels          []string `json:"labels"`
-	HasAttach       bool     `json:"has_attachments"`
-	SizeBytes       int64    `json:"size_bytes"`
+	ID                int64    `json:"id"`
+	SourceID          int64    `json:"source_id,omitzero"`
+	SourceMessageID   string   `json:"source_message_id,omitempty"`
+	ConversationID    int64    `json:"conversation_id,omitzero"`
+	Subject           string   `json:"subject"`
+	MessageType       string   `json:"message_type,omitempty"`
+	From              string   `json:"from"`
+	FromEmail         string   `json:"from_email,omitempty"`
+	FromName          string   `json:"from_name,omitempty"`
+	FromPhone         string   `json:"from_phone,omitempty"`
+	To                []string `json:"to"`
+	Cc                []string `json:"cc,omitempty"`
+	Bcc               []string `json:"bcc,omitempty"`
+	SentAt            string   `json:"sent_at"`
+	DeletedAt         string   `json:"deleted_at,omitempty"`
+	Snippet           string   `json:"snippet"`
+	Labels            []string `json:"labels"`
+	HasAttach         bool     `json:"has_attachments"`
+	HiddenTextPresent bool     `json:"hidden_text_present"`
+	SizeBytes         int64    `json:"size_bytes"`
+	InboxState        string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState         string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
 }
 
 // MessageDetail represents a full message response.
 type MessageDetail struct {
 	MessageSummary
 
-	RelatedMessageID  *int64                    `json:"related_message_id,omitempty"`
+	FromParticipantID int64                     `json:"from_participant_id,omitzero" doc:"Sender participant ID, populated for conversation windows."`
+	ToParticipants    []ConversationParticipant `json:"to_participants,omitempty" doc:"Recipient participants, populated for conversation windows."`
 	CalendarState     *store.CalendarEventState `json:"calendar_state,omitempty"`
-	ConversationTitle string                    `json:"conversation_title,omitempty" doc:"Conversation title, when available."`
 
-	Body     string `json:"body"`
-	BodyHTML string `json:"body_html,omitempty"`
-	IsFromMe bool   `json:"is_from_me,omitzero"`
+	RelatedMessageID  *int64                    `json:"related_message_id,omitempty"`
+	ConversationTitle string                    `json:"conversation_title,omitempty" doc:"Conversation title, when available."`
+	SenderAuth        *senderauth.Verdict       `json:"sender_auth,omitempty"`
+	Calendar          *store.CalendarProjection `json:"calendar,omitempty" doc:"Calendar state for calendar events: status, sequence, start, end, all-day, time zone, and iCal UID. A field is null when the stored event does not carry it; calendar sync does not store a sequence of 0."`
+
+	Body     string  `json:"body"`
+	BodyText *string `json:"body_text,omitzero" nullable:"false" doc:"Stored plain-text body of a single message, which can be generated from HTML and is empty when no plain text is stored; conversation windows leave it unset. Older servers omit this field; body keeps its HTML fallback."`
+	BodyHTML string  `json:"body_html,omitempty"`
+	IsFromMe bool    `json:"is_from_me,omitzero"`
 	// BodyOmitted marks a conversation-window message whose body was left
 	// out to keep the response within the cumulative inline-body budget.
 	// The snippet is still present; fetch the full body via
@@ -349,12 +362,13 @@ type MessageDetail struct {
 
 // AttachmentInfo represents attachment metadata in API responses.
 type AttachmentInfo struct {
-	ID          int64  `json:"id"`
-	Filename    string `json:"filename"`
-	MimeType    string `json:"mime_type"`
-	Size        int64  `json:"size_bytes"`
-	ContentHash string `json:"content_hash,omitempty"`
-	URL         string `json:"url,omitempty"`
+	Docbank     []store.DocbankAttachmentRef `json:"docbank,omitempty"`
+	ID          int64                        `json:"id"`
+	Filename    string                       `json:"filename"`
+	MimeType    string                       `json:"mime_type"`
+	Size        int64                        `json:"size_bytes"`
+	ContentHash string                       `json:"content_hash,omitempty"`
+	URL         string                       `json:"url,omitempty"`
 }
 
 func attachmentInfoFromStore(att store.APIAttachment) AttachmentInfo {
@@ -364,12 +378,14 @@ func attachmentInfoFromStore(att store.APIAttachment) AttachmentInfo {
 		MimeType:    att.MimeType,
 		Size:        att.Size,
 		ContentHash: att.ContentHash,
+		Docbank:     att.Docbank,
 		URL:         att.URL,
 	}
 }
 
 // SearchResult represents search results.
 type SearchResult struct {
+	Warnings   []string         `json:"warnings,omitempty"`
 	IndexState string           `json:"index_state,omitempty"`
 	Query      string           `json:"query"`
 	Total      int64            `json:"total"`
@@ -482,7 +498,7 @@ func writeError(w http.ResponseWriter, status int, err string, message string) {
 	writeJSON(w, status, ErrorResponse{Error: err, Message: message})
 }
 
-// writeIfContextError converts a context deadline/cancellation into a
+// writeIfContextError converts context and cache-unavailable errors into a
 // structured 503 response and returns true. A request that overran its
 // server-side query budget (see requestTimeoutForPath) or was abandoned by
 // the client surfaces here as context.DeadlineExceeded/Canceled; without this
@@ -496,6 +512,10 @@ func (s *Server) writeIfContextError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, context.Canceled):
 		writeError(w, http.StatusServiceUnavailable, "query_canceled",
 			"the query was canceled before it completed")
+		return true
+	case errors.Is(err, query.ErrCacheUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "analytical_cache_unavailable",
+			"The committed analytical cache is unavailable")
 		return true
 	default:
 		return false
@@ -556,6 +576,7 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 			MimeType:    att.MimeType,
 			Size:        att.Size,
 			ContentHash: att.ContentHash,
+			Docbank:     att.Docbank,
 			URL:         att.URL,
 		})
 	}
@@ -565,30 +586,33 @@ func messageDetailFromQuery(qMsg *query.MessageDetail) MessageDetail {
 		RelatedMessageID:  qMsg.RelatedMessageID,
 		ConversationTitle: qMsg.ConversationTitle,
 
-		ID:              qMsg.ID,
-		InboxState:      providerStateValue(qMsg.InboxState),
-		ReadState:       providerStateValue(qMsg.ReadState),
-		SourceID:        qMsg.SourceID,
-		SourceMessageID: qMsg.SourceMessageID,
-		ConversationID:  qMsg.ConversationID,
-		Subject:         qMsg.Subject,
-		MessageType:     qMsg.MessageType,
-		From:            from,
-		FromEmail:       fromEmail,
-		FromName:        fromName,
-		To:              toAddrs,
-		Cc:              ccAddrs,
-		Bcc:             bccAddrs,
-		SentAt:          qMsg.SentAt.UTC().Format(time.RFC3339),
-		DeletedAt:       formatDeletedAt(qMsg.DeletedAt),
-		Snippet:         qMsg.Snippet,
-		Labels:          labels,
-		HasAttach:       qMsg.HasAttachments,
-		SizeBytes:       qMsg.SizeEstimate,
-		IsFromMe:        qMsg.IsFromMe,
-		Body:            body,
-		BodyHTML:        qMsg.BodyHTML,
-		Attachments:     attachments,
+		ID:                qMsg.ID,
+		SourceID:          qMsg.SourceID,
+		SourceMessageID:   qMsg.SourceMessageID,
+		ConversationID:    qMsg.ConversationID,
+		Subject:           qMsg.Subject,
+		MessageType:       qMsg.MessageType,
+		From:              from,
+		FromEmail:         fromEmail,
+		FromName:          fromName,
+		To:                toAddrs,
+		Cc:                ccAddrs,
+		Bcc:               bccAddrs,
+		SentAt:            qMsg.SentAt.UTC().Format(time.RFC3339),
+		DeletedAt:         formatDeletedAt(qMsg.DeletedAt),
+		Snippet:           qMsg.Snippet,
+		Labels:            labels,
+		HasAttach:         qMsg.HasAttachments,
+		HiddenTextPresent: qMsg.HiddenTextPresent,
+		SizeBytes:         qMsg.SizeEstimate,
+		IsFromMe:          qMsg.IsFromMe,
+		Calendar:          qMsg.Calendar,
+		Body:              body,
+		BodyText:          new(qMsg.BodyText),
+		BodyHTML:          qMsg.BodyHTML,
+		Attachments:       attachments,
+		InboxState:        providerStateValue(qMsg.InboxState),
+		ReadState:         providerStateValue(qMsg.ReadState),
 	}
 }
 
@@ -603,27 +627,28 @@ func toMessageSummary(m APIMessage) MessageSummary {
 		labels = []string{}
 	}
 	return MessageSummary{
-		ID:              m.ID,
-		InboxState:      providerStateValue(m.InboxState),
-		ReadState:       providerStateValue(m.ReadState),
-		SourceID:        m.SourceID,
-		SourceMessageID: m.SourceMessageID,
-		ConversationID:  m.ConversationID,
-		Subject:         m.Subject,
-		MessageType:     m.MessageType,
-		From:            m.From,
-		FromEmail:       m.FromEmail,
-		FromName:        m.FromName,
-		FromPhone:       m.FromPhone,
-		To:              to,
-		Cc:              m.Cc,
-		Bcc:             m.Bcc,
-		SentAt:          m.SentAt.UTC().Format(time.RFC3339),
-		DeletedAt:       formatDeletedAt(m.DeletedAt),
-		Snippet:         m.Snippet,
-		Labels:          labels,
-		HasAttach:       m.HasAttachments,
-		SizeBytes:       m.SizeEstimate,
+		ID:                m.ID,
+		SourceID:          m.SourceID,
+		SourceMessageID:   m.SourceMessageID,
+		ConversationID:    m.ConversationID,
+		Subject:           m.Subject,
+		MessageType:       m.MessageType,
+		From:              m.From,
+		FromEmail:         m.FromEmail,
+		FromName:          m.FromName,
+		FromPhone:         m.FromPhone,
+		To:                to,
+		Cc:                m.Cc,
+		Bcc:               m.Bcc,
+		SentAt:            m.SentAt.UTC().Format(time.RFC3339),
+		DeletedAt:         formatDeletedAt(m.DeletedAt),
+		Snippet:           m.Snippet,
+		Labels:            labels,
+		HasAttach:         m.HasAttachments,
+		HiddenTextPresent: m.HiddenTextPresent,
+		SizeBytes:         m.SizeEstimate,
+		InboxState:        providerStateValue(m.InboxState),
+		ReadState:         providerStateValue(m.ReadState),
 	}
 }
 
@@ -638,10 +663,28 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Vector stats are best-effort and bounded: log errors but still
+	// include whatever partial stats came back. They live in a separate
+	// database, so they are collected while the archive stats load.
+	_, backend, _ := s.vectorComponents()
+	vectorCtx, cancelVector := context.WithTimeout(r.Context(), s.vectorStatsTimeout)
+	var (
+		vs             *vector.StatsView
+		vsErr          error
+		vectorTimedOut bool
+		vectorDone     sync.WaitGroup
+	)
+	vectorDone.Go(func() {
+		vs, vsErr = vector.CollectStats(vectorCtx, backend)
+		vectorTimedOut = errors.Is(vectorCtx.Err(), context.DeadlineExceeded)
+	})
+
 	stats, asOf, stale, err := s.statsSnapshots.get(
 		r.Context(), s.importContext, "", s.statsSnapshotWait, s.getStats,
 	)
 	if err != nil {
+		cancelVector()
+		vectorDone.Wait()
 		if s.writeIfContextError(w, err) {
 			return
 		}
@@ -649,13 +692,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve statistics")
 		return
 	}
-
-	// Vector stats are best-effort and bounded: log errors but still
-	// include whatever partial stats came back.
-	_, backend, _ := s.vectorComponents()
-	vectorCtx, cancelVector := context.WithTimeout(r.Context(), s.vectorStatsTimeout)
-	vs, vsErr := vector.CollectStats(vectorCtx, backend)
-	vectorTimedOut := errors.Is(vectorCtx.Err(), context.DeadlineExceeded)
+	vectorDone.Wait()
 	cancelVector()
 	if vsErr != nil {
 		s.logger.Warn("vector stats", "error", vsErr)
@@ -780,6 +817,7 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			detail := messageDetailFromQuery(qMsg)
+			detail.SenderAuth = s.senderAuth(r.Context(), id, qMsg.SourceID, qMsg.MessageType, detail.FromEmail)
 			detail.BodyHTML = s.archivedRemoteImageHTML(r.Context(), id, detail.BodyHTML)
 			writeJSON(w, http.StatusOK, detail)
 			return
@@ -822,14 +860,17 @@ func (s *Server) handleGetMessage(w http.ResponseWriter, r *http.Request) {
 		MessageSummary:    toMessageSummary(*msg),
 		ConversationTitle: msg.ConversationTitle,
 		Body:              msg.Body,
+		BodyText:          new(msg.BodyText),
 		BodyHTML:          msg.BodyHTML,
 		IsFromMe:          msg.IsFromMe,
+		Calendar:          msg.Calendar,
 	}
 
 	attachments := make([]AttachmentInfo, 0, len(msg.Attachments))
 	for _, att := range msg.Attachments {
 		attachments = append(attachments, attachmentInfoFromStore(att))
 	}
+	detail.SenderAuth = s.senderAuth(r.Context(), id, msg.SourceID, msg.MessageType, msg.FromEmail)
 	detail.Attachments = attachments
 	detail.BodyHTML = s.archivedRemoteImageHTML(r.Context(), id, detail.BodyHTML)
 
@@ -886,7 +927,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var err error
-		scope, err = resolveCLIStatsScope(cliStore, account, collection)
+		scope, err = resolveCLIStatsScope(bindCLIStoreContext(r.Context(), cliStore), account, collection)
 		if err != nil {
 			writeAPIHTTPError(w, s.cliScopeError(err))
 			return
@@ -1012,7 +1053,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		messages []store.APIMessage
 		total    int64
 	)
-	useQuery := parsedQuery.HasOperators() || len(parsedQuery.AccountIDs) > 0
+	useQuery := parsedQuery.HasOR() || parsedQuery.HasOperators() || len(parsedQuery.AccountIDs) > 0
 	if searcher, ok := s.store.(ctxMessageSearcher); ok {
 		if useQuery {
 			messages, total, err = searcher.SearchMessagesQueryContext(r.Context(), parsedQuery, offset, pageSize)
@@ -1039,6 +1080,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, SearchResult{
+		Warnings:   search.LiteralORWarnings(searchText),
 		IndexState: agentIndexState(r),
 		Query:      searchText,
 		Total:      total,
@@ -1049,7 +1091,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func parseSearchQueryRequest(r *http.Request, query string) *search.Query {
-	parsed := search.Parse(query)
+	mode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mode")))
+	parsed := search.ParseWithOR(query, mode != "vector" && mode != exploreSearchModeHybrid)
 	for _, raw := range r.URL.Query()["message_type"] {
 		for typ := range strings.SplitSeq(raw, ",") {
 			typ = strings.TrimSpace(strings.ToLower(typ))
@@ -1152,8 +1195,7 @@ func (s *Server) handleHybridSearch(
 			writeError(w, http.StatusServiceUnavailable, "vector_not_enabled",
 				"vector search is not configured")
 		case errors.Is(err, vector.ErrIndexStale):
-			writeError(w, http.StatusServiceUnavailable, "index_stale",
-				"the vector index does not match configured embedding settings; align [vector.embed.scope] accounts for an existing account-scoped index, or run `msgvault embeddings build --full-rebuild`")
+			s.writeIndexStale(ctx, w, err)
 		case errors.Is(err, vector.ErrIndexBuilding):
 			writeError(w, http.StatusServiceUnavailable, "index_building",
 				"the initial vector index is still being built")
@@ -1359,23 +1401,23 @@ func (s *Server) handleSimilarSearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	active, err := vector.ResolveActiveForFingerprint(ctx, backend, vectorCfg.GenerationFingerprint())
 	if err != nil {
-		s.writeVectorSearchError(w, err, "active generation")
+		s.writeVectorSearchError(ctx, w, err, "active generation")
 		return
 	}
 	if err := hybrid.ValidateBuildScope(vectorCfg.Embed.Scope.BuildScope(), filter); err != nil {
-		s.writeVectorSearchError(w, err, "scope validation")
+		s.writeVectorSearchError(ctx, w, err, "scope validation")
 		return
 	}
 
 	seed, err := backend.LoadVector(ctx, seedID)
 	if err != nil {
-		s.writeVectorSearchError(w, err, "load seed vector")
+		s.writeVectorSearchError(ctx, w, err, "load seed vector")
 		return
 	}
 
 	hits, err := backend.Search(ctx, active.ID, seed, limit+1, filter)
 	if err != nil {
-		s.writeVectorSearchError(w, err, "similar search")
+		s.writeVectorSearchError(ctx, w, err, "similar search")
 		return
 	}
 
@@ -1493,14 +1535,13 @@ func parseAPITime(value string) (time.Time, error) {
 	return t.UTC(), nil
 }
 
-func (s *Server) writeVectorSearchError(w http.ResponseWriter, err error, operation string) {
+func (s *Server) writeVectorSearchError(ctx context.Context, w http.ResponseWriter, err error, operation string) {
 	switch {
 	case errors.Is(err, vector.ErrNotEnabled):
 		writeError(w, http.StatusServiceUnavailable, "vector_not_enabled",
 			"vector search is not configured")
 	case errors.Is(err, vector.ErrIndexStale):
-		writeError(w, http.StatusServiceUnavailable, "index_stale",
-			"the vector index does not match configured embedding settings; align [vector.embed.scope] accounts for an existing account-scoped index, or run `msgvault embeddings build --full-rebuild`")
+		s.writeIndexStale(ctx, w, err)
 	case errors.Is(err, vector.ErrIndexBuilding):
 		writeError(w, http.StatusServiceUnavailable, "index_building",
 			"the initial vector index is still being built")
@@ -1663,7 +1704,7 @@ func (s *Server) sourceStatus(ctx context.Context, statusStore SourceStatusStore
 				if !scheduled.NextRun.IsZero() {
 					status.NextSyncAt = nullableTimePtr(scheduled.NextRun)
 				}
-				applySchedulerQueueState(&status, scheduled.Queued, scheduled.Pending, scheduled.StartedAt)
+				applySchedulerQueueState(&status, scheduled.Queued, scheduled.Pending, scheduled.StartedAt, scheduled.QueuedAt)
 				break
 			}
 		case sourceScheduleNonSchedulable:
@@ -1719,13 +1760,16 @@ func (s *Server) applyGenericJobStatus(status *SourceStatus, jobName string) boo
 		if !job.NextRun.IsZero() {
 			status.NextSyncAt = nullableTimePtr(job.NextRun)
 		}
-		applySchedulerQueueState(status, job.Queued, job.Pending, job.StartedAt)
+		applySchedulerQueueState(status, job.Queued, job.Pending, job.StartedAt, job.QueuedAt)
 		return job.Running
 	}
 	return false
 }
 
-func applySchedulerQueueState(status *SourceStatus, queued, pending bool, startedAt time.Time) {
+func applySchedulerQueueState(status *SourceStatus, queued, pending bool, startedAt, queuedAt time.Time) {
+	if queued && !queuedAt.IsZero() {
+		status.SchedulerQueuedAt = nullableTimePtr(queuedAt)
+	}
 	status.SchedulerQueued = queued
 	status.SchedulerPending = pending
 	if !startedAt.IsZero() {
@@ -1806,6 +1850,8 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sourceType := r.URL.Query().Get("source_type")
+	security, _ := securityFromRequest(r)
+	manual := security.auth.Mode == AuthModeSession || security.auth.Mode == AuthModeLoopback && requestOriginMatches(r, security.scheme, security.host)
 
 	scheduling := classifySourceScheduling(sourceType, account)
 	switch scheduling.kind {
@@ -1817,7 +1863,7 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Account is not scheduled: "+account)
 			return
 		}
-		disp, err := s.scheduler.StartJob(scheduling.jobName)
+		disp, err := s.scheduler.StartJob(scheduling.jobName, manual)
 		if err != nil {
 			s.logger.Error("failed to trigger generic sync job",
 				"job", scheduling.jobName, "identifier", account, "error", err)
@@ -1846,7 +1892,7 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "not_found", "Account is not scheduled: "+account)
 			return
 		}
-		if err := s.scheduler.TriggerSync(account); err != nil {
+		if err := s.scheduler.TriggerSync(account, manual); err != nil {
 			s.logger.Error("failed to trigger sync", "account", account, "error", err)
 			writeError(w, http.StatusConflict, "sync_error", err.Error())
 			return
@@ -2019,7 +2065,11 @@ func (s *Server) handleAddAccount(w http.ResponseWriter, r *http.Request) {
 		s.cfg.Accounts = s.cfg.Accounts[:len(s.cfg.Accounts)-1]
 		s.cfgMu.Unlock()
 		s.logger.Error("failed to save config", "error", err)
-		writeError(w, http.StatusInternalServerError, "save_error", "Failed to save configuration")
+		message := "Failed to save configuration"
+		if errors.Is(err, config.ErrSaveRefused) {
+			message = err.Error()
+		}
+		writeError(w, http.StatusInternalServerError, "save_error", message)
 		return
 	}
 
@@ -2233,6 +2283,7 @@ type TotalStatsResponse struct {
 
 // SearchFastResponse represents fast search results with stats.
 type SearchFastResponse struct {
+	Warnings         []string            `json:"warnings,omitempty"`
 	IndexState       string              `json:"index_state,omitempty"`
 	Query            string              `json:"query"`
 	Messages         []MessageSummary    `json:"messages"`
@@ -2499,6 +2550,9 @@ func parseAggregateOptions(r *http.Request) (query.AggregateOptions, error) {
 		opts.HideDeletedFromSource = true
 	}
 	if v := r.URL.Query().Get("search_query"); v != "" {
+		if parsed := search.ParseOR(v); parsed.HasOR() && parsed.Err() != nil {
+			return opts, newParamError("search_query", parsed.Err().Error())
+		}
 		opts.SearchQuery = v
 	}
 	if after, ok, err := queryDate(r, "after"); err != nil {
@@ -2866,27 +2920,28 @@ func toMessageSummaryFromQuery(m query.MessageSummary) MessageSummary {
 		from = m.FromName
 	}
 	return MessageSummary{
-		ID:              m.ID,
-		InboxState:      providerStateValue(m.InboxState),
-		ReadState:       providerStateValue(m.ReadState),
-		SourceID:        m.SourceID,
-		SourceMessageID: m.SourceMessageID,
-		ConversationID:  m.ConversationID,
-		Subject:         m.Subject,
-		MessageType:     m.MessageType,
-		From:            from,
-		FromEmail:       m.FromEmail,
-		FromName:        m.FromName,
-		FromPhone:       m.FromPhone,
-		To:              formatQueryAddresses(m.To),
-		Cc:              formatQueryAddresses(m.Cc),
-		Bcc:             formatQueryAddresses(m.Bcc),
-		SentAt:          m.SentAt.UTC().Format(time.RFC3339),
-		DeletedAt:       formatDeletedAt(m.DeletedAt),
-		Snippet:         m.Snippet,
-		Labels:          labels,
-		HasAttach:       m.HasAttachments,
-		SizeBytes:       m.SizeEstimate,
+		ID:                m.ID,
+		SourceID:          m.SourceID,
+		SourceMessageID:   m.SourceMessageID,
+		ConversationID:    m.ConversationID,
+		Subject:           m.Subject,
+		MessageType:       m.MessageType,
+		From:              from,
+		FromEmail:         m.FromEmail,
+		FromName:          m.FromName,
+		FromPhone:         m.FromPhone,
+		To:                formatQueryAddresses(m.To),
+		Cc:                formatQueryAddresses(m.Cc),
+		Bcc:               formatQueryAddresses(m.Bcc),
+		SentAt:            m.SentAt.UTC().Format(time.RFC3339),
+		DeletedAt:         formatDeletedAt(m.DeletedAt),
+		Snippet:           m.Snippet,
+		Labels:            labels,
+		HasAttach:         m.HasAttachments,
+		HiddenTextPresent: m.HiddenTextPresent,
+		SizeBytes:         m.SizeEstimate,
+		InboxState:        providerStateValue(m.InboxState),
+		ReadState:         providerStateValue(m.ReadState),
 	}
 }
 
@@ -3393,7 +3448,28 @@ func (s *Server) handleGmailIDsByFilter(w http.ResponseWriter, r *http.Request) 
 	}
 	searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
 	searchMode := strings.TrimSpace(r.URL.Query().Get("search_mode"))
+	var maxResults *int64
+	if r.URL.Query().Has("max_results") && r.URL.Query().Get("max_results") == "" {
+		writeError(w, http.StatusBadRequest, "invalid_max_results", "max_results must be an integer")
+		return
+	}
+	if value, provided, err := queryInt64(r, "max_results"); err != nil {
+		s.rejectBadParam(w, err)
+		return
+	} else if provided {
+		if value < 1 || value > query.MaxDeletionTargetSearchResults {
+			writeError(w, http.StatusBadRequest, "invalid_max_results",
+				fmt.Sprintf("max_results must be between 1 and %d", query.MaxDeletionTargetSearchResults))
+			return
+		}
+		maxResults = &value
+	}
+	if maxResults != nil && (searchQuery == "" || searchMode == string(query.DeletionSearchAggregate)) {
+		writeError(w, http.StatusBadRequest, "invalid_max_results", "max_results requires q and a fast or deep search mode")
+		return
+	}
 	var targets []query.DeletionTarget
+	var matched int
 	if searchQuery == "" {
 		if searchMode != "" {
 			writeError(w, http.StatusBadRequest, "invalid_search", "search_mode requires q")
@@ -3401,13 +3477,24 @@ func (s *Server) handleGmailIDsByFilter(w http.ResponseWriter, r *http.Request) 
 		}
 		targets, err = engine.GetDeletionTargetsByFilter(r.Context(), filter)
 	} else {
-		parsed := search.Parse(searchQuery)
+		parsed := search.ParseOR(searchQuery)
 		if parseErr := parsed.Err(); parseErr != nil {
 			writeError(w, http.StatusBadRequest, "invalid_search", parseErr.Error())
 			return
 		}
 		switch searchMode {
 		case string(query.DeletionSearchFast), string(query.DeletionSearchDeep):
+			if maxResults != nil {
+				resolver, ok := engine.(query.BoundedDeletionTargetSearchResolver)
+				if !ok {
+					writeError(w, http.StatusServiceUnavailable, "search_unavailable", "Bounded search-aware deletion resolution is not available")
+					return
+				}
+				targets, matched, err = resolver.GetDeletionTargetsBySearchBounded(
+					r.Context(), parsed, filter, query.DeletionSearchMode(searchMode), int(*maxResults),
+				)
+				break
+			}
 			resolver, ok := engine.(query.DeletionTargetSearchResolver)
 			if !ok {
 				writeError(w, http.StatusServiceUnavailable, "search_unavailable", "Search-aware deletion resolution is not available")
@@ -3450,7 +3537,12 @@ func (s *Server) handleGmailIDsByFilter(w http.ResponseWriter, r *http.Request) 
 	if targets == nil {
 		targets = []query.DeletionTarget{}
 	}
+	var matchedCount *int64
+	if maxResults != nil {
+		matchedCount = new(int64(matched))
+	}
 	writeJSON(w, http.StatusOK, GmailIDsResponse{
+		MatchedCount:     matchedCount,
 		GmailIDs:         deletion.SourceMessageIDs(targets),
 		Targets:          targets,
 		SearchQuery:      searchQuery,
@@ -3494,6 +3586,7 @@ func (s *Server) handleGetAttachment(w http.ResponseWriter, r *http.Request) {
 		MimeType:    att.MimeType,
 		Size:        att.Size,
 		ContentHash: att.ContentHash,
+		Docbank:     att.Docbank,
 		URL:         att.URL,
 	})
 }
@@ -3575,38 +3668,20 @@ func openLooseAttachmentCandidates(
 	contentHash string,
 	attachments []query.AttachmentInfo,
 ) (io.ReadCloser, int64, *query.AttachmentInfo, error) {
-	content, contentLength, err := openLooseAttachmentContent(attachmentsDir, contentHash, "")
-	if err == nil {
-		return content, contentLength, &attachments[0], nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	content, contentLength, index, _, err := attachmentstore.OpenLooseCandidates(attachmentsDir, contentHash, func() ([]string, error) {
+		paths := make([]string, len(attachments))
+		for i := range attachments {
+			paths[i] = attachments[i].StoragePath
+		}
+		return paths, nil
+	})
+	if err != nil {
 		return nil, 0, nil, err
 	}
-
-	seen := make(map[string]struct{}, len(attachments))
-	var firstPathError error
-	for i := range attachments {
-		storagePath := attachments[i].StoragePath
-		if storagePath == "" {
-			continue
-		}
-		if _, ok := seen[storagePath]; ok {
-			continue
-		}
-		seen[storagePath] = struct{}{}
-
-		content, contentLength, err = openLooseAttachmentContent(attachmentsDir, contentHash, storagePath)
-		if err == nil {
-			return content, contentLength, &attachments[i], nil
-		}
-		if !errors.Is(err, os.ErrNotExist) && firstPathError == nil {
-			firstPathError = err
-		}
+	if index == -1 {
+		index = 0
 	}
-	if firstPathError != nil {
-		return nil, 0, nil, firstPathError
-	}
-	return nil, 0, nil, os.ErrNotExist
+	return content, contentLength, &attachments[index], nil
 }
 
 func openLooseAttachmentContent(attachmentsDir, contentHash, storagePath string) (io.ReadCloser, int64, error) {
@@ -3620,48 +3695,11 @@ func openLooseAttachmentContent(attachmentsDir, contentHash, storagePath string)
 	if err != nil {
 		return nil, 0, err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, 0, err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, 0, err
-	}
-	if !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, 0, fmt.Errorf("attachment storage path %q is not a regular file", storagePath)
-	}
-	return f, info.Size(), nil
+	return attachmentstore.OpenLooseFile(path)
 }
 
 func resolveRecordedAttachmentPath(attachmentsDir, storagePath string) (string, error) {
-	lowerPath := strings.ToLower(storagePath)
-	if strings.HasPrefix(lowerPath, "http://") || strings.HasPrefix(lowerPath, "https://") {
-		return "", errors.New("attachment storage path must be local")
-	}
-	localPath := filepath.Clean(filepath.FromSlash(storagePath))
-	if !filepath.IsLocal(localPath) {
-		return "", fmt.Errorf("attachment storage path %q escapes attachments directory", storagePath)
-	}
-	basePath, err := filepath.Abs(attachmentsDir)
-	if err != nil {
-		return "", fmt.Errorf("resolve attachments directory: %w", err)
-	}
-	basePath, err = filepath.EvalSymlinks(basePath)
-	if err != nil {
-		return "", fmt.Errorf("resolve attachments directory: %w", err)
-	}
-	resolvedPath, err := filepath.EvalSymlinks(filepath.Join(basePath, localPath))
-	if err != nil {
-		return "", err
-	}
-	relativePath, err := filepath.Rel(basePath, resolvedPath)
-	if err != nil || !filepath.IsLocal(relativePath) {
-		return "", fmt.Errorf("attachment storage path %q escapes attachments directory", storagePath)
-	}
-	return resolvedPath, nil
+	return attachmentstore.ResolveRecordedPath(attachmentsDir, storagePath)
 }
 
 func contentDisposition(filename string) string {
@@ -3711,12 +3749,12 @@ func (s *Server) handleSearchByDomains(w http.ResponseWriter, r *http.Request) {
 		sourceIDs = []int64{*filter.SourceID}
 	}
 	requestLimit := filter.Pagination.Limit
-	messages, err := engine.SearchByDomains(
+	result, err := engine.SearchByDomains(
 		r.Context(),
 		domains,
 		filter.After,
 		filter.Before,
-		requestLimit+1,
+		requestLimit,
 		filter.Pagination.Offset,
 		sourceIDs,
 	)
@@ -3726,19 +3764,14 @@ func (s *Server) handleSearchByDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hasMore := len(messages) > requestLimit
-	if hasMore {
-		messages = messages[:requestLimit]
-	}
-
-	summaries := make([]MessageSummary, len(messages))
-	for i, m := range messages {
+	summaries := make([]MessageSummary, len(result.Messages))
+	for i, m := range result.Messages {
 		summaries[i] = toMessageSummaryFromQuery(m)
 	}
 
 	writeJSON(w, http.StatusOK, FilteredMessagesResponse{
 		Count:    len(summaries),
-		HasMore:  hasMore,
+		HasMore:  result.HasMore,
 		Offset:   filter.Pagination.Offset,
 		Limit:    requestLimit,
 		Messages: summaries,
@@ -3813,7 +3846,7 @@ func (s *Server) handleTotalStats(w http.ResponseWriter, r *http.Request) {
 		opts.HideDeletedFromSource = enabled
 	}
 	if v := r.URL.Query().Get("search_query"); v != "" {
-		q := search.Parse(v)
+		q := search.ParseOR(v)
 		if err := q.Err(); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 			return
@@ -3887,14 +3920,14 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 		s.rejectBadParam(w, err)
 		return
 	}
-	q := search.Parse(queryStr)
+	q := search.ParseOR(queryStr)
 	if err := q.Err(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 		return
 	}
 
-	// Get view type for stats grouping (optional, defaults to senders)
-	var statsGroupBy query.ViewType
+	// Aggregates are opt-in through an explicit grouping view.
+	statsGroupBy := query.ViewNoStats
 	if v := r.URL.Query().Get("view_type"); v != "" {
 		var ok bool
 		statsGroupBy, ok = parseViewType(v)
@@ -3926,7 +3959,7 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 				"The analytics cache contains invalid UTF-8. Run 'msgvault build-cache --full-rebuild' and retry.")
 			return
 		}
-		s.logger.Error("fast search failed", "query", queryStr, "error", err)
+		s.logger.Error("fast search failed", "query_shape", queryShapeForRequest(r), "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Search failed")
 		return
 	}
@@ -3937,6 +3970,7 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, SearchFastResponse{
+		Warnings:         search.LiteralORWarnings(queryStr),
 		IndexState:       indexState,
 		Query:            queryStr,
 		Messages:         summaries,
@@ -3961,8 +3995,9 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing_query", "Query parameter 'q' is required")
 		return
 	}
+	const bodyScope = "body"
 	scope := r.URL.Query().Get("scope")
-	if scope != "" && scope != "body" {
+	if scope != "" && scope != bodyScope {
 		writeError(w, http.StatusBadRequest, "invalid_scope", "Invalid search scope. Must be 'body' or omitted")
 		return
 	}
@@ -3972,12 +4007,12 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		s.rejectBadParam(w, err)
 		return
 	}
-	q := search.Parse(queryStr)
+	q := search.ParseWithOR(queryStr, scope != bodyScope)
 	if err := q.Err(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 		return
 	}
-	if scope == "body" && len(q.TextTerms) == 0 {
+	if scope == bodyScope && len(q.TextTerms) == 0 {
 		writeError(w, http.StatusBadRequest, "missing_free_text",
 			"Body-scoped search requires at least one free-text term")
 		return
@@ -3991,7 +4026,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	// Exact body-only search rejects view filters whose exact MessageFilter
 	// semantics cannot be preserved through search.Query. Generic Deep search
 	// below keeps the complete filter independent from user-entered operators.
-	if scope == "body" && (filter.Sender != "" || filter.SenderName != "" ||
+	if scope == bodyScope && (filter.Sender != "" || filter.SenderName != "" ||
 		filter.Recipient != "" || filter.RecipientName != "" ||
 		filter.Domain != "" || filter.Label != "" ||
 		filter.TimeRange.Period != "" || filter.HasEmptyTargets() ||
@@ -4018,7 +4053,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	var messages []query.MessageSummary
 	var totalCount int64
 	var stats *query.TotalStats
-	if scope == "body" {
+	if scope == bodyScope {
 		merged := query.MergeFilterIntoQuery(q, filter)
 		if filter.HideDeletedFromSource {
 			merged.DeletionScope = search.DeletionScopeActive
@@ -4059,11 +4094,11 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		if s.writeIfContextError(w, err) {
 			return
 		}
-		if scope == "body" && errors.Is(err, query.ErrMessageBodySearchInvalidQuery) {
+		if scope == bodyScope && errors.Is(err, query.ErrMessageBodySearchInvalidQuery) {
 			writeError(w, http.StatusBadRequest, "invalid_query", err.Error())
 			return
 		}
-		if scope == "body" && (errors.Is(err, query.ErrMessageBodySearchUnavailable) ||
+		if scope == bodyScope && (errors.Is(err, query.ErrMessageBodySearchUnavailable) ||
 			errors.Is(err, query.ErrMessageBodySearchIndexStale)) {
 			writeError(w, http.StatusServiceUnavailable, "body_search_index_unavailable", err.Error())
 			return
@@ -4077,7 +4112,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 	if hasMore {
 		messages = messages[:limit]
 	}
-	if scope == "body" {
+	if scope == bodyScope {
 		if hasMore || (offset > 0 && len(messages) == 0) {
 			totalCount = -1
 		} else {
@@ -4092,14 +4127,19 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 		summaries[i] = toMessageSummaryFromQuery(m)
 	}
 	var bodyContexts []BodySearchContext
-	if scope == "body" {
+	if scope == bodyScope {
 		bodyContexts = make([]BodySearchContext, len(messages))
 		for i, message := range messages {
 			bodyContexts[i] = toBodySearchContext(message)
 		}
 	}
 
+	var warnings []string
+	if scope != bodyScope {
+		warnings = search.LiteralORWarnings(queryStr)
+	}
 	writeJSON(w, http.StatusOK, DeepSearchResponse{
+		Warnings:     warnings,
 		IndexState:   agentIndexState(r),
 		Query:        queryStr,
 		Scope:        scope,

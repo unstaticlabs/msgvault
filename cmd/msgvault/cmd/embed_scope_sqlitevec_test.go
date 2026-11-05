@@ -20,13 +20,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/vector"
 )
 
 // fakeEmbeddingsServer answers OpenAI-compatible /embeddings requests with
 // one deterministic dim-4 vector per input, recording how many inputs it was
 // asked to embed.
-func fakeEmbeddingsServer(t *testing.T, embedded *int) *httptest.Server {
+func fakeEmbeddingsServer(t *testing.T, embedded *int, dimensions ...int) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -46,7 +47,12 @@ func fakeEmbeddingsServer(t *testing.T, embedded *int) *httptest.Server {
 			Model string `json:"model"`
 		}{Model: "test-model"}
 		for i := range req.Input {
-			payload.Data = append(payload.Data, item{Embedding: []float32{1, 0, 0, 0}, Index: i})
+			values := []float32{1, 0, 0, 0}
+			if len(dimensions) > 0 {
+				values = make([]float32, dimensions[0])
+				values[0] = 1
+			}
+			payload.Data = append(payload.Data, item{Embedding: values, Index: i})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(payload)
@@ -59,11 +65,8 @@ func fakeEmbeddingsServer(t *testing.T, embedded *int) *httptest.Server {
 // message+body in each of two accounts.
 func seedTwoAccountMainDB(t *testing.T, dataDir string) {
 	t.Helper()
-	s, err := store.Open(filepath.Join(dataDir, "msgvault.db"))
-	require.NoError(t, err, "open main db")
-	defer func() { require.NoError(t, s.Close()) }()
-	require.NoError(t, s.InitSchema(), "InitSchema")
-	_, err = s.DB().Exec(`
+	s := testutil.NewSQLiteTestStoreAt(t, filepath.Join(dataDir, "msgvault.db"))
+	_, err := s.DB().Exec(`
 INSERT INTO sources (id, source_type, identifier) VALUES (1, 'gmail', 'a@example.com'), (2, 'gmail', 'b@example.com');
 INSERT INTO conversations (id, source_id, conversation_type) VALUES (1, 1, 'email_thread'), (2, 2, 'email_thread');
 INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type, subject) VALUES

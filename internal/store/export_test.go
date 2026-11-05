@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"testing"
 	"time"
 
 	"go.kenn.io/msgvault/internal/personenrichment"
@@ -16,6 +17,14 @@ var ParseDBTime = parseDBTime
 // test can open a second independent handle to the same isolated database.
 func DBPathForTest(s *Store) string {
 	return s.dbPath
+}
+
+var pgTestStore func(*testing.T) *Store
+
+// SetPGTestStoreForTest lets package store_test provide testutil's clone fixture,
+// which internal tests can't import because testutil imports store.
+func SetPGTestStoreForTest(f func(*testing.T) *Store) {
+	pgTestStore = f
 }
 
 // MessagesTableColumns returns the live column names of the messages table on
@@ -239,6 +248,13 @@ func (s *Store) SetPersonOperationBeforeIdentityLockHookForTest(fn func()) func(
 	return func() { s.personOperationBeforeIdentityLockHook = nil }
 }
 
+// SetSourceMergeAfterJournalCheckHookForTest pauses a merge after its initial
+// idempotency lookup and before it acquires source execution locks.
+func (s *Store) SetSourceMergeAfterJournalCheckHookForTest(fn func()) func() {
+	s.sourceMergeAfterJournalCheckHook = fn
+	return func() { s.sourceMergeAfterJournalCheckHook = nil }
+}
+
 // SetPersonMatchBlockingBeforeLockHookForTest runs fn after scoring candidate
 // discovery has chosen its pairs and before each pair takes the identity lock.
 func (s *Store) SetPersonMatchBlockingBeforeLockHookForTest(fn func()) func() {
@@ -360,3 +376,16 @@ var (
 	OwnerIdentifierMatch = ownerIdentifierMatch
 	SenderOwnerFallback  = senderOwnerFallback
 )
+
+// TierOptionsAsOf reads person tier counts as of a fixed date, not today.
+func TierOptionsAsOf(options PersonTierOptions, asOf time.Time) PersonTierOptions {
+	options.asOf = asOf
+	return options
+}
+
+// SetPersonTierRowPage sets the tier read page size and returns the restore func.
+func SetPersonTierRowPage(n int) func() {
+	old := personTierRowPage
+	personTierRowPage = n
+	return func() { personTierRowPage = old }
+}

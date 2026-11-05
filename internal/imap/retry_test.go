@@ -682,7 +682,7 @@ func TestConnectRetry_CancellationAtBlockingStages(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond) //nolint:kennlint // the deadline is the expected result; each server never completes the connection, so only the deadline ends the retries
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond) //nolint:kennlint // deadlinetest: the deadline is the expected result; each server never completes the connection, so only the deadline ends the retries
 			defer cancel()
 			err := tt.run(t, ctx)
 			assert.ErrorIs(t, err, context.DeadlineExceeded)
@@ -725,7 +725,7 @@ func TestReconnectPreservesMailboxCursorState(t *testing.T) {
 
 	client.mu.Lock()
 	require.NoError(client.connect(t.Context()))
-	require.NoError(client.selectMailbox("INBOX"))
+	require.NoError(client.selectMailbox(t.Context(), "INBOX"))
 	uidValidity := client.selectedUIDValidity
 	client.messageListCache = []gmailapi.MessageID{{ID: "INBOX|1"}}
 	client.msgIDToLabels = map[string][]string{"message": {"INBOX"}}
@@ -737,7 +737,7 @@ func TestReconnectPreservesMailboxCursorState(t *testing.T) {
 	assert.Equal([]gmailapi.MessageID{{ID: "INBOX|1"}}, client.messageListCache)
 	assert.Equal(map[string][]string{"message": {"INBOX"}}, client.msgIDToLabels)
 	client.mu.Lock()
-	require.NoError(client.selectMailbox("INBOX"))
+	require.NoError(client.selectMailbox(t.Context(), "INBOX"))
 	client.mu.Unlock()
 	assert.Equal(uidValidity, client.selectedUIDValidity)
 }

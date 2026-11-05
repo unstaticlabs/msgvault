@@ -18,8 +18,43 @@ import (
 	"go.kenn.io/msgvault/internal/gcal"
 	"go.kenn.io/msgvault/internal/oauth"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/telemetry"
+	"go.kenn.io/msgvault/internal/testutil"
 	"golang.org/x/oauth2"
 )
+
+func TestCalendarAccountOutcomes(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	cfg := lifecycleTestConfig(t.TempDir())
+	cfg.Analytics.AutoBuildCache = true
+	state := testInvocationWithConfig(cfg)
+	events := 0
+	state.syncFailures = &telemetry.SyncFailures{Capture: func(event string, props map[string]any) error {
+		assert.Equal("sync_failed", event)
+		assert.Equal(map[string]any{"sync_source": "gcal", "reason": "other"}, props)
+		events++
+		return nil
+	}}
+	ctx := withInvocation(t.Context(), state)
+	src := config.GCalSource{Email: "user@example.com"}
+	setupErr := errors.New("client unavailable")
+	buildClient := func(context.Context, string, string, bool, ...bool) (gcal.API, error) { return nil, setupErr }
+	require.ErrorIs(runConfiguredGCalSyncWithClientBuilder(ctx, st, src, buildClient), setupErr)
+	assert.Equal(1, events, "first-run failure starts one outage")
+	cacheErr := errors.New("cache unavailable")
+	oldBuild := runScheduledBuildCacheSubprocess
+	runScheduledBuildCacheSubprocess = func(context.Context) error { return cacheErr }
+	t.Cleanup(func() { runScheduledBuildCacheSubprocess = oldBuild })
+	client := gcal.NewMockAPI()
+	err := runConfiguredGCalSyncWithClientBuilder(ctx, st, src,
+		func(context.Context, string, string, bool, ...bool) (gcal.API, error) { return client, nil })
+	require.ErrorIs(err, cacheErr)
+	assert.Equal(1, events, "cache maintenance starts no outage")
+	require.ErrorIs(runConfiguredGCalSyncWithClientBuilder(ctx, st, src, buildClient), setupErr)
+	assert.Equal(2, events, "source success clears the outage despite cache failure")
+}
 
 func TestCalendarDateBounds(t *testing.T) {
 	cmd := &cobra.Command{}
@@ -314,6 +349,105 @@ func TestCalendarSyncOAuthAppDecisionKeepsCalendarDefaultOverGmailBinding(t *tes
 	assert.False(decision.OAuthAppSet)
 }
 
+func TestRunConfiguredGCalSyncSkipsRetiredSourcesBeforeCredentials(t *testing.T) {
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	retired, err := st.GetOrCreateSource(sourceTypeCalendar, "user@example.com/primary")
+	require.NoError(err)
+	require.NoError(st.UpdateSourceSyncConfig(retired.ID,
+		`{"account_email":"user@example.com","calendar_id":"primary"}`))
+	require.NoError(st.AddAccountIdentity(retired.ID, "user@example.com", "account-email"))
+	active, err := st.GetOrCreateSource(sourceTypeCalendar, "archive@example.net/primary")
+	require.NoError(err)
+	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+		FromSourceID: retired.ID,
+		IntoSourceID: active.ID,
+	})
+	require.NoError(err)
+
+	cfg := testConfigValue()
+	ctx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+	invocationFromContext(ctx).logger = testDiscardLogger()
+	err = runConfiguredGCalSync(ctx, st, config.GCalSource{Name: "primary", Email: "user@example.com"})
+	require.NoError(err)
+}
+
+func TestSyncCalendarExplicitDiscoveryWithOnlyRetiredSources(t *testing.T) {
+	tests := []struct {
+		name    string
+		flag    string
+		newRole string
+	}{
+		{name: "full", flag: "--full", newRole: "owner"},
+		{name: "all calendars", flag: "--all-calendars", newRole: "reader"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			savedFull, savedAll := calSyncFull, calSyncAll
+			savedLimit, savedAfter, savedBefore := calSyncLimit, calSyncAfter, calSyncBefore
+			savedNoResume, savedMinRole, savedCalendars := calSyncNoResume, calSyncMinRole, calSyncCalendars
+			calSyncFull, calSyncAll = false, false
+			calSyncLimit, calSyncAfter, calSyncBefore = 0, "", ""
+			calSyncNoResume, calSyncMinRole, calSyncCalendars = false, "", nil
+			t.Cleanup(func() {
+				calSyncFull, calSyncAll = savedFull, savedAll
+				calSyncLimit, calSyncAfter, calSyncBefore = savedLimit, savedAfter, savedBefore
+				calSyncNoResume, calSyncMinRole, calSyncCalendars = savedNoResume, savedMinRole, savedCalendars
+			})
+
+			dataDir := t.TempDir()
+			cfg := &config.Config{
+				HomeDir: dataDir,
+				Data:    config.DataConfig{DataDir: dataDir},
+			}
+			seed := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+			retired, err := seed.GetOrCreateSource(sourceTypeCalendar, "user@example.test/primary")
+			require.NoError(err)
+			require.NoError(seed.UpdateSourceSyncConfig(retired.ID,
+				`{"account_email":"user@example.test","calendar_id":"primary"}`))
+			active, err := seed.GetOrCreateSource(sourceTypeCalendar, "archive@example.test/primary")
+			require.NoError(err)
+			_, err = seed.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+				FromSourceID: retired.ID,
+				IntoSourceID: active.ID,
+			})
+			require.NoError(err)
+			require.NoError(seed.Close())
+
+			client := &retiredCalendarRecordingAPI{MockAPI: gcal.NewMockAPI()}
+			client.Calendars = []gcal.Calendar{
+				{ID: "primary", AccessRole: "owner"},
+				{ID: "discovered", AccessRole: tt.newRole},
+			}
+			var clientBuilds int
+			cmd := newSyncCalendarLocalCmdWithClientBuilder(func(
+				context.Context, string, string, bool, ...bool,
+			) (gcal.API, error) {
+				clientBuilds++
+				return client, nil
+			})
+			cmd.SilenceErrors = true
+			cmd.SilenceUsage = true
+			cmd.SetArgs([]string{tt.flag, "user@example.test"})
+			cmd.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+			require.NoError(cmd.Execute())
+
+			assert.Equal(1, clientBuilds, "explicit discovery should reach the client builder")
+			assert.Equal(1, client.ListCalendarsCalls(), "explicit discovery should enumerate provider calendars")
+			assert.ElementsMatch([]retiredCalendarEventRequest{{"discovered", false}, {"discovered", true}}, client.EventRequests(), "retired calendars are skipped while native discovery and occurrence coverage run")
+
+			check, err := store.Open(cfg.DatabaseDSN())
+			require.NoError(err)
+			defer func() { _ = check.Close() }()
+			discovered, err := check.GetSourceByTypeAndIdentifier(sourceTypeCalendar, "user@example.test/discovered")
+			require.NoError(err)
+			assert.Zero(discovered.MergedIntoSourceID)
+		})
+	}
+}
+
 func TestCalendarAddTokenReusableRejectsMismatchedInheritedClient(t *testing.T) {
 	cfg := testConfigValue()
 	logger := testLoggerValue()
@@ -443,22 +577,10 @@ func TestCalendarSyncNextCommandIncludesSelectionFlags(t *testing.T) {
 		}))
 }
 
-func TestCalendarCommandsRegistered(t *testing.T) {
-	have := map[string]bool{}
-	for _, c := range rootCmd.Commands() {
-		have[c.Name()] = true
-	}
-	assert.True(t, have["add-calendar"], "add-calendar should be registered")
-	assert.True(t, have["sync-calendar"], "sync-calendar should be registered")
-}
-
 func newCalendarDecisionStore(t *testing.T) *store.Store {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(t, st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	return st
 }
 

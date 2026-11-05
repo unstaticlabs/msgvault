@@ -61,8 +61,8 @@ func exportEmailWorkDatasets(snapshot *cacheSourceSnapshot, runExport func(strin
 			sentIMAP := `EXISTS (SELECT 1 FROM sqlite_db.imap_message_memberships mm JOIN sqlite_db.labels l ON l.source_id=mm.source_id AND l.source_label_id=mm.mailbox WHERE mm.source_id=m.source_id AND mm.message_id=m.id AND l.system_role='sent')`
 			draftIMAP := carries("l.system_role IN ('draft','drafts')")
 			flagItems := `json_extract(TRY_CAST(mm.flags AS JSON),'$[*]')`
-			valid := `json_type(TRY_CAST(mm.flags AS JSON))='ARRAY' AND list_has_all(['VARCHAR'],list_transform(` + flagItems + `,flag->COALESCE(json_type(flag),'NULL')))`
-			hasDraft := `list_contains(list_transform(` + flagItems + `,flag->LOWER(json_extract_string(flag,'$'))),'\draft')`
+			valid := `json_type(TRY_CAST(mm.flags AS JSON))='ARRAY' AND list_has_all(['VARCHAR'],list_transform(` + flagItems + `,lambda flag: COALESCE(json_type(flag),'NULL')))`
+			hasDraft := `list_contains(list_transform(` + flagItems + `,lambda flag: LOWER(json_extract_string(flag,'$'))),'\draft')`
 			flagsDraft := `EXISTS (SELECT 1 FROM sqlite_db.imap_message_memberships mm WHERE mm.source_id=m.source_id AND mm.message_id=m.id AND (` + valid + `) AND (` + hasDraft + `))`
 			known := `EXISTS (SELECT 1 FROM sqlite_db.imap_message_memberships mm WHERE mm.source_id=m.source_id AND mm.message_id=m.id) AND NOT EXISTS (SELECT 1 FROM sqlite_db.imap_message_memberships mm WHERE mm.source_id=m.source_id AND mm.message_id=m.id AND NOT COALESCE((` + valid + `),FALSE))`
 			sent = "(" + sent + " OR (lower(s.source_type)='imap' AND " + sentIMAP + "))"

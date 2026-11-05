@@ -7,11 +7,13 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/beeperidentity"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
 func TestResolveUserPhoneRungDedupesAcrossSources(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -31,6 +33,7 @@ func TestResolveUserPhoneRungDedupesAcrossSources(t *testing.T) {
 }
 
 func TestResolveUserEmailRung(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -49,6 +52,7 @@ func TestResolveUserEmailRung(t *testing.T) {
 }
 
 func TestResolveUserIdentifierFallback(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -67,6 +71,7 @@ func TestResolveUserIdentifierFallback(t *testing.T) {
 }
 
 func TestResolveIDAdoptsLegacyUnscopedIdentifier(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -83,7 +88,7 @@ func TestResolveIDAdoptsLegacyUnscopedIdentifier(t *testing.T) {
 	assert.Equal(legacy, resolved,
 		"the first scoped import must retain the legacy participant and its history")
 
-	scopedID := providerFallbackUserID("account-a", rawID)
+	scopedID := beeperidentity.Fallback("account-a", rawID)
 	owner, _, err := st.ParticipantByIdentifier(participantIdentifierType, scopedID)
 	require.NoError(err)
 	assert.Equal(legacy, owner, "the scoped key must be attached to the legacy participant")
@@ -97,7 +102,7 @@ func TestResolveIDAdoptsLegacyUnscopedIdentifier(t *testing.T) {
 	assert.NotEqual(legacy, second,
 		"a second account with the same raw ID must not reuse the first account's participant")
 	secondOwner, _, err := st.ParticipantByIdentifier(
-		participantIdentifierType, providerFallbackUserID("account-b", rawID),
+		participantIdentifierType, beeperidentity.Fallback("account-b", rawID),
 	)
 	require.NoError(err)
 	assert.Equal(second, secondOwner)
@@ -108,6 +113,7 @@ func TestResolveIDAdoptsLegacyUnscopedIdentifier(t *testing.T) {
 }
 
 func TestResolveIDRejectsAmbiguousLegacyIdentifier(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -118,7 +124,7 @@ func TestResolveIDRejectsAmbiguousLegacyIdentifier(t *testing.T) {
 	)
 	require.NoError(err)
 	require.NoError(st.SetParticipantIdentifier(
-		legacy, participantIdentifierType, providerFallbackUserID("account-a", rawID),
+		legacy, participantIdentifierType, beeperidentity.Fallback("account-a", rawID),
 	))
 
 	resolver := newParticipantResolver(st, "account-b")
@@ -132,6 +138,7 @@ func TestResolveIDRejectsAmbiguousLegacyIdentifier(t *testing.T) {
 }
 
 func TestResolveUserLadderIsExclusive(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -170,6 +177,7 @@ func TestResolveUserLadderIsExclusive(t *testing.T) {
 }
 
 func TestResolveUserCache(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -184,6 +192,7 @@ func TestResolveUserCache(t *testing.T) {
 }
 
 func TestResolveIDHitsSeededCache(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -204,6 +213,7 @@ func TestResolveIDHitsSeededCache(t *testing.T) {
 }
 
 func TestResolveUserUpgradesBareIDFallback(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -236,6 +246,7 @@ func TestResolveUserUpgradesBareIDFallback(t *testing.T) {
 }
 
 func TestRichResolutionPersistsAcrossRuns(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -279,6 +290,7 @@ func TestRichResolutionPersistsAcrossRuns(t *testing.T) {
 }
 
 func TestRichUpgradeMergesWeakHistory(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -341,6 +353,7 @@ func TestRichUpgradeMergesWeakHistory(t *testing.T) {
 }
 
 func TestPhoneUpgradesEmailResolution(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -388,6 +401,7 @@ func TestPhoneUpgradesEmailResolution(t *testing.T) {
 }
 
 func TestPhoneUpgradeSkipsMergeAcrossDurablePersons(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -424,6 +438,7 @@ func TestPhoneUpgradeSkipsMergeAcrossDurablePersons(t *testing.T) {
 }
 
 func TestResolveIDEmpty(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -434,6 +449,7 @@ func TestResolveIDEmpty(t *testing.T) {
 }
 
 func TestPhoneUpgradesEmailResolutionAcrossRuns(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -482,6 +498,7 @@ func TestPhoneUpgradesEmailResolutionAcrossRuns(t *testing.T) {
 }
 
 func TestRichUpgradeDoesNotAbsorbContactOwner(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)

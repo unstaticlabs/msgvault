@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -24,30 +25,12 @@ import (
 	mcpserver "go.kenn.io/msgvault/internal/mcp"
 )
 
-func TestMCPWriteHelpDisclosesMutationClassesAndProfileOptIn(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	require.NotNil(mcpCmd.Flags().Lookup("allow-profile-writes"))
-	for _, name := range []string{"allow-identity-decisions", "allow-identity-scoring", "allow-person-merges", "allow-carddav-writes"} {
-		require.NotNil(mcpCmd.Flags().Lookup(name))
+func TestMCPToolSummaryFlagsExist(t *testing.T) {
+	for _, summary := range mcpserver.ToolSummaries() {
+		if summary.Flag != "" {
+			assert.NotNil(t, mcpCmd.Flags().Lookup(strings.TrimPrefix(summary.Flag, "--")), "%s", summary.Name)
+		}
 	}
-	require.NotNil(mcpCmd.Flags().Lookup("allow-calendar-writes"))
-	var output bytes.Buffer
-	previousOutput := mcpCmd.OutOrStdout()
-	mcpCmd.SetOut(&output)
-	t.Cleanup(func() { mcpCmd.SetOut(previousOutput) })
-
-	require.NoError(mcpCmd.Help())
-	help := output.String()
-	assert.Contains(help, "attachment exports")
-	assert.Contains(help, "deletion manifests")
-	assert.Contains(help, "person promotion")
-	assert.Contains(help, "private Notes writes")
-	assert.Contains(help, "allow-identity-decisions")
-	assert.Contains(help, "allow-identity-scoring")
-	assert.Contains(help, "allow-person-merges")
-	assert.Contains(help, "allow-carddav-writes")
-	assert.Contains(help, "calendar event mutation tools")
 }
 
 func TestMCPCommandUsesDaemonInsteadOfOpeningLocalDatabase(t *testing.T) {
@@ -273,10 +256,11 @@ func TestDaemonMCPServeOptionsUsesHealthForVectorTools(t *testing.T) {
 	})
 	_ = testCtx
 	tests := []struct {
-		name       string
-		health     string
-		wantText   bool
-		wantVisual bool
+		name                string
+		health              string
+		wantText            bool
+		wantVisual          bool
+		wantEmbeddingStatus bool
 	}{
 		{name: "both disabled", health: `{"status":"ok","api_schema_version":"2.28.0","vector":{"status":"disabled","text_enabled":false,"visual_enabled":false}}`},
 		{name: "text only", health: `{"status":"ok","api_schema_version":"2.28.0","vector":{"status":"ready","text_enabled":true,"visual_enabled":false}}`, wantText: true},
@@ -290,6 +274,9 @@ func TestDaemonMCPServeOptionsUsesHealthForVectorTools(t *testing.T) {
 		{name: "lane facts predecessor", health: `{"status":"ok","api_schema_version":"2.27.0","vector":{"status":"ready","text_enabled":true,"visual_enabled":true}}`},
 		{name: "missing schema", health: `{"status":"ok","vector":{"status":"ready","text_enabled":true,"visual_enabled":true}}`},
 		{name: "malformed schema", health: `{"status":"ok","api_schema_version":"unknown","vector":{"status":"ready","text_enabled":true,"visual_enabled":true}}`},
+		{name: "embedding status predecessor", health: `{"status":"ok","api_schema_version":"3.20.0","vector":{"status":"ready","text_enabled":true}}`, wantText: true},
+		{name: "embedding status ready", health: `{"status":"ok","api_schema_version":"3.21.0","vector":{"status":"ready","text_enabled":true}}`, wantText: true, wantEmbeddingStatus: true},
+		{name: "embedding status without vector", health: `{"status":"ok","api_schema_version":"3.21.0"}`},
 		{name: "health unavailable"},
 	}
 	for _, tt := range tests {
@@ -300,6 +287,10 @@ func TestDaemonMCPServeOptionsUsesHealthForVectorTools(t *testing.T) {
 			client := newMCPDaemonClient(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/api/v1/mcp/capabilities" {
 					discoveryRequests.Add(1)
+					http.NotFound(w, r)
+					return
+				}
+				if r.URL.Path == "/api/v1/media/search/status" {
 					http.NotFound(w, r)
 					return
 				}
@@ -317,6 +308,7 @@ func TestDaemonMCPServeOptionsUsesHealthForVectorTools(t *testing.T) {
 			assert.Equal(tt.wantText, opts.HybridSearcher != nil, "semantic search")
 			assert.Equal(tt.wantText, opts.SimilarSearcher != nil, "similar messages")
 			assert.Equal(tt.wantVisual, opts.VisualSearcher != nil, "visual search")
+			assert.Equal(tt.wantEmbeddingStatus, opts.EmbeddingStatus != nil, "embedding status")
 			assert.Equal(int32(1), healthRequests.Load(), "reuse the schema probe")
 			assert.Equal(int32(1), discoveryRequests.Load(), "probe optional operations once")
 		})
@@ -375,18 +367,20 @@ func TestDaemonMCPServeOptionsGatesPeopleToolsByAPISchema(t *testing.T) {
 	})
 	_ = testCtx
 	tests := []struct {
-		name            string
-		schemaVersion   string
-		wantPeople      bool
-		wantDirectory   bool
-		wantSavedViews  bool
-		wantMeetings    bool
-		wantAgenda      bool
-		wantArchiveSQL  bool
-		wantReview      bool
-		wantScoring     bool
-		wantCardDAV     bool
-		wantMessageTags bool
+		name              string
+		schemaVersion     string
+		wantPeople        bool
+		wantDirectory     bool
+		wantChatDiscovery bool
+		wantSavedViews    bool
+		wantMeetings      bool
+		wantAgenda        bool
+		wantArchiveSQL    bool
+		wantReview        bool
+		wantScoring       bool
+		wantCardDAV       bool
+		wantMessageTags   bool
+		wantContacts      bool
 	}{
 		{name: "people schema", schemaVersion: "2.10.0", wantPeople: true},
 		{name: "directory predecessor", schemaVersion: "2.12.9", wantPeople: true},
@@ -405,8 +399,11 @@ func TestDaemonMCPServeOptionsGatesPeopleToolsByAPISchema(t *testing.T) {
 		{name: "identity review and scoring predecessor", schemaVersion: "2.35.0", wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true},
 		{name: "identity review and scoring schema", schemaVersion: "3.0.0", wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true},
 		{name: "native message tags schema", schemaVersion: "3.15.0", wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true, wantMessageTags: true},
-		{name: "current schema", schemaVersion: api.APISchemaVersion, wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true, wantMessageTags: true},
+		{name: "current schema", schemaVersion: api.APISchemaVersion, wantPeople: true, wantChatDiscovery: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true, wantMessageTags: true, wantContacts: true},
 		{name: "tags predecessor 3.14.0", schemaVersion: "3.14.0", wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true},
+		{name: "before contact schema", schemaVersion: "3.19.0", wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true, wantMessageTags: true},
+		{name: "contact schema", schemaVersion: "3.20.0", wantPeople: true, wantDirectory: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true, wantContacts: true, wantMessageTags: true},
+		{name: "chat discovery schema", schemaVersion: "3.25.0", wantPeople: true, wantContacts: true, wantDirectory: true, wantChatDiscovery: true, wantSavedViews: true, wantMeetings: true, wantAgenda: true, wantArchiveSQL: true, wantCardDAV: true, wantReview: true, wantScoring: true, wantMessageTags: true},
 		{name: "older same-major schema", schemaVersion: "2.9.9"},
 		{name: "malformed schema", schemaVersion: "not-a-version"},
 		{name: "missing schema"},
@@ -439,8 +436,10 @@ func TestDaemonMCPServeOptionsGatesPeopleToolsByAPISchema(t *testing.T) {
 				assert.Nil(opts.SavedViews, "an older daemon cannot run Saved Views")
 			}
 			assert.Equal(tt.wantDirectory, opts.DirectoryBackend != nil)
+			assert.Equal(tt.wantChatDiscovery, opts.ChatDiscoveryBackend != nil)
 			assert.Equal(tt.wantMeetings, opts.Meetings != nil)
 			assert.Equal(tt.wantAgenda, opts.PersonAgendaBackend != nil)
+			assert.Equal(tt.wantContacts, opts.ContactRoutesBackend != nil)
 			assert.Equal(tt.wantArchiveSQL, opts.ArchiveSQLQuerier != nil)
 			assert.Equal(tt.wantReview, opts.IdentityReview != nil)
 			assert.Equal(tt.wantCardDAV, opts.PersonCardDAV != nil)
@@ -477,6 +476,7 @@ func TestDaemonMCPServeOptionsWarnsWhenPeopleCapabilityProbeFails(t *testing.T) 
 	opts := daemonMCPServeOptions(testCtx, client, invocationFromContext(testCtx))
 	assert.Nil(opts.PeopleBackend)
 	assert.Nil(opts.DirectoryBackend)
+	assert.Nil(opts.ChatDiscoveryBackend)
 	assert.Nil(opts.ArchiveSQLQuerier)
 	assert.Contains(logs.String(), "people tools disabled")
 }

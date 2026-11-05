@@ -176,7 +176,9 @@ var KnownMessageTypes = []string{
 	"beeper",
 	"chatwoot",
 	"slack",
+	"inline",
 	"matrix",
+	"telegram",
 }
 
 // IsKnownMessageType reports whether mt is a message_type value that msgvault

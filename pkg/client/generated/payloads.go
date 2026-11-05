@@ -2,6 +2,10 @@
 
 package generated
 
+import (
+	"github.com/doordash-oss/oapi-codegen-dd/v3/pkg/runtime"
+)
+
 type LoginSessionBody = SessionLoginRequest
 
 type AddAccountBody = AddAccountRequest
@@ -35,6 +39,8 @@ type ApproveCardDAVPublicationBody = CardDAVPublicationApprovalRequest
 type SyncCardDAVBody = CardDAVSyncRequest
 
 type UpdateCLIAccountBody = UpdateRequest
+
+type MergeCLIAccountsBody = MergeRequest
 
 type PlanCLIAddCalendarBody = CLIAddCalendarPlanRequest
 
@@ -133,6 +139,8 @@ type UnlinkIdentityParticipantsBody = IdentityLinkRequest
 type ImportMeetingBody = MeetingImportRequest
 
 type ImportMuesliBody = MuesliRemoteRequest
+
+type ImportMuesliRecordingBody = runtime.File
 
 type CreateImportJobBody = ImportJobRequest
 

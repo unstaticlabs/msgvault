@@ -235,6 +235,7 @@
   width="min(960px, 94vw)"
   maxWidth="min(960px, 94vw)"
   closeLabel="Close file viewer"
+  closable
   onclose={() => {
     void close();
   }}
@@ -267,16 +268,16 @@
   </div>
   {#snippet footer()}
     <div class="viewer-footer">
-      {#if metadata}<KataFileIssueAction {client} attachmentID={metadata.id} messageID={metadata.message_id} filename={metadata.filename || 'File'} />{/if}
       <div class="metadata">
         <span>{metadata?.mime_type || file.mime_type || 'Unknown type'}</span>
         <span>{formatBytes(metadata?.size_bytes ?? file.size_bytes ?? 0)}</span>
       </div>
       <div class="actions">
-        <Button size="sm" label="Open containing item" disabled={!metadata && !file.entry_key} onclick={openItem} />
+        {#if metadata}<KataFileIssueAction {client} attachmentID={metadata.id} messageID={metadata.message_id} filename={metadata.filename || 'File'} />{/if}
+        <Button size="sm" label="Open message" disabled={!metadata && !file.entry_key} onclick={openItem} />
         <Button
           size="sm"
-          label="Open containing conversation"
+          label="Open conversation"
           disabled={!metadata && !file.entry_key}
           onclick={openConversation}
         />
@@ -311,7 +312,10 @@
     min-height: 0;
     flex: 1;
     overflow: auto;
-    padding: var(--space-5);
+    /* Reserve the scrollbar's width up front so centered PDF pages do not
+       shift left when a later page makes the preview scroll. */
+    scrollbar-gutter: stable;
+    padding: var(--pane-pad-y) var(--pane-pad-x);
     background: var(--bg-inset);
   }
   .preview img {
@@ -346,7 +350,7 @@
   }
   .state-message,
   .error {
-    padding: var(--space-5);
+    padding: var(--pane-pad-y) var(--pane-pad-x);
     border: 1px solid var(--border-muted);
     border-radius: var(--radius-md);
     color: var(--text-secondary);
