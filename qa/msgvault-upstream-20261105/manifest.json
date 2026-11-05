@@ -1,0 +1,66 @@
+{
+  "capture_date": "2026-11-05",
+  "context": "Synthetic mixed archive fixtures; final integration browser API3.44; desktop1280x900/mobile390x900. Static images illustrate layout only. Six browser journeys separately verify filter removal, revision-guarded legacy repair, preserved schema/query and native Person Files/Details navigation.",
+  "images": [
+    {
+      "file": "mailbox-toolbar-390.png",
+      "sha256": "9b0f8fd6e658a59fc0a95d99d123b8c807ba8b301b510a63781486c01c78a291",
+      "bytes": 95666,
+      "metadata_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    },
+    {
+      "file": "mailbox-toolbar-1280.png",
+      "sha256": "5e8abfc2152ba3a30afb357070e6db43508e22634b56753095caa0f07776a0d6",
+      "bytes": 248593,
+      "metadata_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    },
+    {
+      "file": "saved-view-repair-1280.png",
+      "sha256": "e64203d097d856bd63d2614a1ba5a2cd6d7eb85fc28dd0e64a0d25a8dc08aadd",
+      "bytes": 60783,
+      "metadata_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    },
+    {
+      "file": "saved-view-repair-390.png",
+      "sha256": "f87ebab2541d16848f726e51c5dfa6b9ba35311ba5299456a2fd9851e34f37d5",
+      "bytes": 36702,
+      "metadata_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    },
+    {
+      "file": "person-files-390.png",
+      "sha256": "481b7ce75e9608b9adcc03b03d2875730897d3c6a47d465caf9dcda3fe408c9c",
+      "bytes": 36708,
+      "metadata_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    },
+    {
+      "file": "person-files-1280.png",
+      "sha256": "c1eff3deeb147657b26b0d1fd761deb23ebc6bd6cfe2820632318accfd8cf4da",
+      "bytes": 66882,
+      "metadata_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    }
+  ]
+}
