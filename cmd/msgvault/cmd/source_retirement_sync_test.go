@@ -243,6 +243,7 @@ type retiredCalendarEventRequest struct {
 }
 type retiredCalendarRecordingAPI struct {
 	*gcal.MockAPI
+
 	eventMu  sync.Mutex
 	requests []retiredCalendarEventRequest
 }

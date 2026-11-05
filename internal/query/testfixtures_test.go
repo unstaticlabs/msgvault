@@ -1109,14 +1109,17 @@ func writeTableParquet(tb testing.TB, db *sql.DB, path, columns, values string, 
 	tb.Helper()
 	_, err := db.Exec("CREATE TABLE fixture_values AS SELECT * FROM (VALUES " + values + ")")
 	require.NoError(tb, err, "parse fixture values for %s", path)
-	valueRows, err := db.Query("SELECT * FROM fixture_values LIMIT 0")
-	require.NoError(tb, err, "read fixture values for %s", path)
-	valueColumns, err := valueRows.Columns()
-	require.NoError(tb, err, "read fixture value arity for %s", path)
-	require.NoError(tb, valueRows.Err(), "inspect fixture values for %s", path)
-	// BuilderPolicy owns one connection. Release the schema-only result before
-	// COPY requests that same connection, including on benchmark fixtures.
-	require.NoError(tb, valueRows.Close(), "close fixture values for %s", path)
+	// Finish the schema-only read before COPY requests the builder's sole connection.
+	valueColumns := func() []string {
+		valueRows, err := db.Query("SELECT * FROM fixture_values LIMIT 0")
+		require.NoError(tb, err, "read fixture values for %s", path)
+		defer func() { require.NoError(tb, valueRows.Close(), "close fixture values for %s", path) }()
+		columns, err := valueRows.Columns()
+		require.NoError(tb, err, "read fixture value arity for %s", path)
+		require.NoError(tb, valueRows.Err(), "inspect fixture values for %s", path)
+		return columns
+	}()
+
 	expectedColumns := strings.Split(columns, ", ")
 	require.Lenf(tb, valueColumns, len(expectedColumns),
 		"fixture values for %s have %d columns but %d are declared; update its messages row",
