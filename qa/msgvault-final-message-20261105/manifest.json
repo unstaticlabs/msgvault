@@ -1,0 +1,26 @@
+{
+  "capture_date": "2026-11-05",
+  "source_commit": "9017797071ab4405d25c3d74ef53feae409eb25d",
+  "qa_context": "Disposable synthetic meeting archive; final message app-shell navigation; desktop and phone. Screenshots establish layout, not functional proof.",
+  "review": "Driving human: Valentin Viennot. Coding Agent personally inspected both images and metadata; independent design and evidence reviewers found no release blockers.",
+  "images": [
+    {
+      "filename": "message-shell-1280.png",
+      "sha256": "26b0e2e9f6749ac2c3622bc940a7870e49bee50bbf75ac35fa35e69f74ca18ea",
+      "png_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    },
+    {
+      "filename": "message-shell-390.png",
+      "sha256": "d7182ee59175bf0dcbc79972f902732ed5b7193af901edca3f97ec61922453eb",
+      "png_chunks": [
+        "IDAT",
+        "IEND",
+        "IHDR"
+      ]
+    }
+  ]
+}
