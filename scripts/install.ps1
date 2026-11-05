@@ -1,9 +1,9 @@
 # msgvault installer for Windows
-# Usage: powershell -ExecutionPolicy ByPass -c "irm https://msgvault.io/install.ps1 | iex"
+# Usage: powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.ps1 | iex"
 
 $ErrorActionPreference = 'Stop'
 
-$repo = 'kenn-io/msgvault'
+$repo = 'unstaticlabs/msgvault'
 $binaryName = 'msgvault.exe'
 
 function Write-Info($msg) { Write-Host $msg -ForegroundColor Green }

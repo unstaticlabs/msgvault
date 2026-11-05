@@ -92,7 +92,7 @@ func (s bubblewrapCodexStarter) start(
 			if err != nil {
 				return nil, errors.New("locate codex proxy bridge")
 			}
-			path = filepath.Join(filepath.Dir(self), "msgvault-codex-bridge")
+			path = adjacentCodexBridgePath(self, s.bridgeDigest)
 		}
 		info, err = os.Lstat(path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -175,6 +175,18 @@ func (s bubblewrapCodexStarter) start(
 		return &codexBridgeOwnedProcess{RPCProcess: process, bridge: bridge}, nil
 	}
 	return process, nil
+}
+
+// Versioned helpers let an updater publish a new helper before replacing the
+// main binary without changing the helper used by an already-running daemon.
+// Only a missing digest-named file falls back to the original archive layout;
+// an existing candidate still passes every ownership, mode and digest check.
+func adjacentCodexBridgePath(executable, digest string) string {
+	versioned := filepath.Join(filepath.Dir(executable), "msgvault-codex-bridge."+digest)
+	if _, err := os.Lstat(versioned); !errors.Is(err, os.ErrNotExist) {
+		return versioned
+	}
+	return filepath.Join(filepath.Dir(executable), "msgvault-codex-bridge")
 }
 
 type codexBridgeOwnedProcess struct {

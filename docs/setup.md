@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-23"
+last_edited: "2026-11-05"
 title: Setup Guide
 description: Install msgvault, choose a source, and explore your first archived messages.
 ---
@@ -12,17 +12,21 @@ mail providers, chats, meetings, contacts, or local exports, use
 
 ## Install Release
 
+These installers install the maintained `unstaticlabs/msgvault` fork. The
+`msgvault.io` installers and public package-manager builds install upstream
+MsgVault instead; use the fork installers to retain this distribution’s features.
+
 **macOS / Linux:**
 ```bash
-curl -fsSL https://msgvault.io/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://msgvault.io/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.ps1 | iex"
 ```
 
-The installer detects your OS and architecture, downloads the latest release from [GitHub Releases](https://github.com/kenn-io/msgvault/releases), verifies the SHA-256 checksum, and installs the binary.
+The installer detects your OS and architecture, downloads the latest release from [GitHub Releases](https://github.com/unstaticlabs/msgvault/releases), verifies the SHA-256 checksum, and installs the binary.
 
 Windows releases include native AMD64 and ARM64 packages. On Windows ARM64,
 the PowerShell installer selects the native package when the release provides
@@ -40,7 +44,7 @@ msgvault --help
 ## Vendor a pinned binary
 
 Applications can download a release archive directly from
-[GitHub Releases](https://github.com/kenn-io/msgvault/releases). Pin the tag,
+[GitHub Releases](https://github.com/unstaticlabs/msgvault/releases). Pin the tag,
 pick the archive for your platform from that release's asset list, and check it
 against the release's `SHA256SUMS` before extracting it. Fail the download if
 the archive or its checksum entry is missing.
@@ -49,6 +53,12 @@ Archives use `msgvault_<version>_<os>_<arch>`, with the version's leading `v`
 removed. Use `darwin` for macOS, `linux` for Linux, and `windows` for Windows;
 architectures are `amd64` and `arm64`. macOS and Linux archives end in `.tar.gz`;
 Windows archives end in `.zip`, such as `msgvault_0.23.0_windows_arm64.zip`.
+
+Linux archives also contain `msgvault-codex-bridge`. Keep it beside the main
+executable when installing an archive manually. The installer and `msgvault
+update` install this helper under its SHA-256 filename before replacing the main
+executable. Existing helpers remain available to running older daemons. Each
+executable is replaced separately; this is not a two-file atomic transaction.
 
 ### Migrate before replacing the executable
 
@@ -117,7 +127,7 @@ sudo apt install -y libsqlite3-dev
 ```
 
 ```bash
-git clone https://github.com/kenn-io/msgvault.git
+git clone https://github.com/unstaticlabs/msgvault.git
 cd msgvault
 make install
 ```

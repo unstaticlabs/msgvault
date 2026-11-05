@@ -77,16 +77,18 @@ jobs:
       image: ubuntu:22.04
 
     steps:
+      - uses: kenn-io/kit/.github/actions/kit-retry@v0.47.5
+
       - name: Install build tools
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          apt-get update
+          kit-retry 3 5 apt-get -o APT::Update::Error-Mode=any update
           # libsqlite3-dev provides sqlite3.h, which sqlite-vec's CGo
           # binding includes unconditionally with -DSQLITE_CORE. mattn's
           # sqlite3 driver still links its own bundled amalgamation at
           # runtime; the header is only needed at compile time.
-          apt-get install -y gcc g++ make git curl tar gzip unzip file binutils libsqlite3-dev
+          kit-retry 3 5 apt-get install -y gcc g++ make git curl tar gzip unzip file binutils libsqlite3-dev
 
       - uses: actions/checkout@v7.0.0
         with:
@@ -98,7 +100,8 @@ jobs:
       - name: Install Go
         run: |
           GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}')
-          curl -fsSL --retry 5 --retry-all-errors --retry-max-time 120 \
+          # workflowretry: allow Cap download attempts so a slow transfer leaves time to retry.
+          kit-retry 6 1 curl -fsSL --connect-timeout 30 --max-time 120 \
             "https://go.dev/dl/go${GO_VERSION}.linux-${{ matrix.go_arch_name }}.tar.gz" -o go.tar.gz
           tar -C /usr/local -xzf go.tar.gz
           rm go.tar.gz
@@ -136,11 +139,13 @@ jobs:
           VERSION=${RELEASE_TAG#v}
 
           mkdir -p dist
-          LDFLAGS="-s -w -X go.kenn.io/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -X go.kenn.io/msgvault/cmd/msgvault/cmd.Commit=$(git rev-parse --short=8 HEAD) -X go.kenn.io/msgvault/cmd/msgvault/cmd.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ) -extldflags '-lstdc++ -lm'"
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false -o dist/msgvault-codex-bridge ./cmd/msgvault-codex-bridge
+          BRIDGE_SHA256=$(sha256sum dist/msgvault-codex-bridge | cut -d' ' -f1)
+          LDFLAGS="-s -w -X go.kenn.io/msgvault/cmd/msgvault/cmd.Version=v${VERSION} -X go.kenn.io/msgvault/cmd/msgvault/cmd.Commit=$(git rev-parse --short=8 HEAD) -X go.kenn.io/msgvault/cmd/msgvault/cmd.BuildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X go.kenn.io/msgvault/internal/peoplesweep.codexBridgeSHA256=${BRIDGE_SHA256} -extldflags '-lstdc++ -lm'"
           go build -tags "fts5 sqlite_vec" -trimpath -buildvcs=false -ldflags="$LDFLAGS" -o dist/msgvault ./cmd/msgvault
 
           echo "--- Binary info ---"
-          file dist/msgvault
+          file dist/msgvault dist/msgvault-codex-bridge
           ldd dist/msgvault || true
 
           # Verify runtime version requirements are reasonable. DuckDB's
@@ -160,8 +165,8 @@ jobs:
 
           cd dist
           ARCHIVE="msgvault_${VERSION}_linux_${{ matrix.goarch }}.tar.gz"
-          tar czf "$ARCHIVE" msgvault
-          rm msgvault
+          tar czf "$ARCHIVE" msgvault msgvault-codex-bridge
+          rm msgvault msgvault-codex-bridge
 
       - uses: actions/upload-artifact@v7.0.1
         with:
@@ -376,6 +381,8 @@ jobs:
     needs: [build-web, build-linux, build-darwin, build-windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: kenn-io/kit/.github/actions/kit-retry@v0.47.5
+
       - uses: actions/checkout@v7.0.0
         with:
           ref: ${{ env.RELEASE_REF }}
@@ -413,6 +420,9 @@ jobs:
             tar -xzf "$archive" -C "$tmpdir"
             test -f "$tmpdir/msgvault" || { echo "FATAL: msgvault binary missing from $archive"; exit 1; }
             test -x "$tmpdir/msgvault" || { echo "FATAL: msgvault binary not executable in $archive"; exit 1; }
+            if echo "$archive" | grep -q "linux_"; then
+              test -x "$tmpdir/msgvault-codex-bridge" || { echo "FATAL: native Linux companion missing from $archive"; exit 1; }
+            fi
 
             # Smoke test linux amd64 artifact (runs natively on ubuntu runner)
             if echo "$archive" | grep -q "linux_amd64"; then
@@ -439,6 +449,7 @@ jobs:
               while [ "$attempt" -lt 60 ]; do
                 attempt=$((attempt + 1))
                 smoke_url=$(sed -n 's/^  API server: //p' "$smoke_home/serve.log" | tail -1)
+                # workflowretry: allow Poll the local daemon for readiness.
                 if [ -n "$smoke_url" ] && curl -fsS "$smoke_url/" > "$smoke_home/index.html"; then
                   break
                 fi
@@ -447,7 +458,8 @@ jobs:
               test -s "$smoke_home/index.html" || { cat "$smoke_home/serve.log"; echo "FATAL: embedded shell was not served"; exit 1; }
               asset=$(grep -oE '/assets/[^" ]+\.(js|css)' "$smoke_home/index.html" | head -1)
               test -n "$asset" || { cat "$smoke_home/index.html"; echo "FATAL: shell did not reference a hashed asset"; exit 1; }
-              curl -fsS "$smoke_url$asset" > "$smoke_home/asset"
+              # workflowretry: allow Read an asset from the local smoke daemon with bounded retries.
+              kit-retry 3 1 curl -fsS "$smoke_url$asset" > "$smoke_home/asset"
               test -s "$smoke_home/asset" || { echo "FATAL: embedded asset was empty"; exit 1; }
               cleanup_smoke
               trap - EXIT

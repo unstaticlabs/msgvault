@@ -60,9 +60,13 @@ turn it off.
 
 ## Installation
 
+These installers install the maintained `unstaticlabs/msgvault` fork. The
+`msgvault.io` installers and public package-manager builds install upstream
+MsgVault instead; use the fork installers to retain this distribution’s features.
+
 **macOS / Linux:**
 ```bash
-curl -fsSL https://msgvault.io/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.sh | bash
 ```
 
 **macOS via Homebrew**
@@ -72,19 +76,19 @@ brew install msgvault
 
 **Windows (PowerShell):**
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://msgvault.io/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.ps1 | iex"
 ```
 
-The installer detects your OS and architecture, downloads the latest release from [GitHub Releases](https://github.com/kenn-io/msgvault/releases), verifies the SHA-256 checksum, and installs the binary. You can review the script ([bash](https://msgvault.io/install.sh), [PowerShell](https://msgvault.io/install.ps1)) before running, or download a release binary directly from GitHub.
+The installer detects your OS and architecture, downloads the latest release from [GitHub Releases](https://github.com/unstaticlabs/msgvault/releases), verifies the SHA-256 checksum, and installs the binary. You can review the script ([bash](https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.sh), [PowerShell](https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.ps1)) before running, or download a release binary directly from GitHub.
 
 To build from source on macOS or Linux instead (requires **Go 1.27+**, **Bun
-1.3.14+**, **Node.js 20.19+ on 20.x, 22.13+ on 22.x, or 24+**, and a C/C++
+1.4.4+**, **Node.js 20.19+ on 20.x, 22.13+ on 22.x, or 24+**, and a C/C++
 compiler for CGO and to statically link DuckDB; on Debian/Ubuntu also install
 `libsqlite3-dev` for the `sqlite3.h` header used by the default `sqlite_vec`
 build):
 
 ```bash
-git clone https://github.com/kenn-io/msgvault.git
+git clone https://github.com/unstaticlabs/msgvault.git
 cd msgvault
 make install
 ```

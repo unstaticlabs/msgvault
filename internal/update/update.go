@@ -19,6 +19,7 @@ const (
 	releaseOwner         = "unstaticlabs"
 	releaseRepo          = "msgvault"
 	binaryName           = "msgvault"
+	codexBridgeName      = "msgvault-codex-bridge"
 	cacheFileName        = "update_check.json"
 	cacheDuration        = time.Hour
 	devCacheDuration     = 15 * time.Minute
@@ -145,7 +146,6 @@ func (u *Updater) PerformUpdate(info *UpdateInfo, reporter Reporter) error {
 	targetBinary := executableName(u.deps.GOOS)
 	dstPath := filepath.Join(installDir, targetBinary)
 
-	reporter.Stepf("Downloading %s...\n", info.AssetName)
 	installingNotified := false
 	progress := func(downloaded, total int64) {
 		reporter.Progress(downloaded, total)
@@ -156,17 +156,59 @@ func (u *Updater) PerformUpdate(info *UpdateInfo, reporter Reporter) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), downloadTimeout)
 	defer cancel()
-	if err := u.client().Install(ctx, info, selfupdate.InstallOptions{
-		DestinationPath:   dstPath,
-		ArchiveBinaryName: targetBinary,
-		Progress:          progress,
-	}); err != nil {
-		return fmt.Errorf("install update: %w", err)
+	if u.deps.GOOS == "linux" {
+		if err := u.installLinuxRelease(ctx, info, dstPath, reporter); err != nil {
+			return fmt.Errorf("install update: %w", err)
+		}
+		installingNotified = true
+	} else {
+		reporter.Stepf("Downloading %s...\n", info.AssetName)
+		if err := u.client().Install(ctx, info, selfupdate.InstallOptions{
+			DestinationPath:   dstPath,
+			ArchiveBinaryName: targetBinary,
+			Progress:          progress,
+		}); err != nil {
+			return fmt.Errorf("install update: %w", err)
+		}
 	}
 	if !installingNotified {
 		reporter.Stepf("Verifying and installing...\n")
 	}
 	reporter.Stepf("Update complete.\n")
+	return nil
+}
+
+// Both release members are verified before publishing either one. The helper's
+// digest names its immutable installation, so the running predecessor continues
+// using its own helper until the main executable is replaced last.
+func (u *Updater) installLinuxRelease(ctx context.Context, info *UpdateInfo, dstPath string, reporter Reporter) error {
+	staging, err := os.MkdirTemp("", "msgvault-release-*")
+	if err != nil {
+		return fmt.Errorf("stage release: %w", err)
+	}
+	defer os.RemoveAll(staging)
+	client := u.client()
+	for _, name := range []string{binaryName, codexBridgeName} {
+		reporter.Stepf("Downloading and verifying %s...\n", name)
+		if err := client.Install(ctx, info, selfupdate.InstallOptions{
+			DestinationPath: filepath.Join(staging, name), ArchiveBinaryName: name,
+			TempDir: staging, Progress: reporter.Progress,
+		}); err != nil {
+			return fmt.Errorf("stage %s: %w", name, err)
+		}
+	}
+	bridge := filepath.Join(staging, codexBridgeName)
+	digest, err := selfupdate.HashFile(bridge)
+	if err != nil {
+		return fmt.Errorf("hash release helper: %w", err)
+	}
+	reporter.Stepf("Installing verified helper, then main executable...\n")
+	if err := selfupdate.InstallBinary(bridge, filepath.Join(filepath.Dir(dstPath), codexBridgeName+"."+digest)); err != nil {
+		return fmt.Errorf("install release helper: %w", err)
+	}
+	if err := selfupdate.InstallBinary(filepath.Join(staging, binaryName), dstPath); err != nil {
+		return fmt.Errorf("install main executable: %w", err)
+	}
 	return nil
 }
 

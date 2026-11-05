@@ -1,10 +1,11 @@
 #!/bin/bash
 # msgvault installer
-# Usage: curl -fsSL https://msgvault.io/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.sh | bash
 
 set -e
 
-REPO="kenn-io/msgvault"
+REPO="unstaticlabs/msgvault"
+GITHUB_BASE_URL="https://github.com"
 BINARY_NAME="msgvault"
 
 # Colors
@@ -63,7 +64,7 @@ get_latest_version() {
     # Use the HTML /releases/latest endpoint, which 302-redirects to
     # /releases/tag/<version>. Unlike api.github.com it is not rate-limited
     # at 60 req/hr per IP, so users behind shared NAT / VPN don't get 403.
-    local url="https://github.com/${REPO}/releases/latest"
+    local url="${GITHUB_BASE_URL}/${REPO}/releases/latest"
     local final_url=""
     if command -v curl &>/dev/null; then
         final_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$url") || return 1
@@ -86,14 +87,17 @@ verify_checksum() {
     local file="$1"
     local checksums_file="$2"
     local filename="$3"
+    local required="${4:-false}"
 
     if [ ! -f "$checksums_file" ]; then
+        [ "$required" != true ] || error "Checksum file is required for the Linux release"
         warn "Checksum file not available, skipping verification"
         return 0
     fi
 
     local expected=$(awk -v f="$filename" '{gsub(/^\*/, "", $2); if ($2==f) {print $1; exit}}' "$checksums_file")
     if [ -z "$expected" ]; then
+        [ "$required" != true ] || error "No checksum found for $filename"
         warn "No checksum found for $filename, skipping verification"
         return 0
     fi
@@ -104,6 +108,7 @@ verify_checksum() {
     elif command -v shasum &>/dev/null; then
         actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
     else
+        [ "$required" != true ] || error "A sha256 tool is required for the Linux release"
         warn "No sha256 tool available, skipping verification"
         return 0
     fi
@@ -115,6 +120,27 @@ verify_checksum() {
     info "Checksum verified"
 }
 
+# Stage on the destination filesystem, then publish one complete executable.
+# The Linux pair is ordered helper-first/main-last, not a two-file transaction.
+install_binary() {
+    local source="$1"
+    local destination="$2"
+    local install_dir="${destination%/*}"
+    local stage
+    local command_prefix=()
+    if [ ! -w "$install_dir" ]; then
+        command_prefix=(sudo)
+    fi
+    [ ! -d "$destination" ] || return 1
+    stage=$("${command_prefix[@]}" mktemp "$install_dir/.msgvault-install.XXXXXX") || return 1
+    if ! "${command_prefix[@]}" cp "$source" "$stage" ||
+       ! "${command_prefix[@]}" chmod 755 "$stage" ||
+       ! "${command_prefix[@]}" mv -f "$stage" "$destination"; then
+        "${command_prefix[@]}" rm -f "$stage"
+        return 1
+    fi
+}
+
 # Install from GitHub releases
 install_from_release() {
     local os="$1"
@@ -122,7 +148,8 @@ install_from_release() {
     local install_dir="$3"
 
     info "Fetching latest release..."
-    local version=$(get_latest_version)
+    local version
+    version=$(get_latest_version) || return 1
 
     if [ -z "$version" ]; then
         return 1
@@ -132,10 +159,11 @@ install_from_release() {
 
     local platform="${os}_${arch}"
     local filename="${BINARY_NAME}_${version#v}_${platform}.tar.gz"
-    local base_url="https://github.com/${REPO}/releases/download/${version}"
+    local base_url="${GITHUB_BASE_URL}/${REPO}/releases/download/${version}"
 
-    local tmpdir=$(mktemp -d)
-    trap "rm -rf $tmpdir" EXIT
+    local tmpdir
+    tmpdir=$(mktemp -d) || return 1
+    trap "rm -rf -- $(printf '%q' "$tmpdir")" EXIT
 
     info "Downloading ${filename}..."
     if ! download "${base_url}/${filename}" "$tmpdir/release.tar.gz"; then
@@ -144,22 +172,34 @@ install_from_release() {
 
     # Download and verify checksum
     if download "${base_url}/SHA256SUMS" "$tmpdir/SHA256SUMS" 2>/dev/null; then
-        verify_checksum "$tmpdir/release.tar.gz" "$tmpdir/SHA256SUMS" "$filename"
+        verify_checksum "$tmpdir/release.tar.gz" "$tmpdir/SHA256SUMS" "$filename" "$([ "$os" = linux ] && echo true || echo false)"
     else
+        [ "$os" != linux ] || error "Could not download SHA256SUMS for the Linux release"
         warn "WARNING: Could not download SHA256SUMS — integrity not verified"
     fi
 
     info "Extracting..."
-    tar -xzf "$tmpdir/release.tar.gz" -C "$tmpdir"
+    tar -xzf "$tmpdir/release.tar.gz" -C "$tmpdir" || return 1
 
-    # Install binary
-    if [ -f "$tmpdir/${BINARY_NAME}" ]; then
-        if [ -w "$install_dir" ]; then
-            mv "$tmpdir/${BINARY_NAME}" "$install_dir/"
+    # Linux releases contain a main executable and its linked Codex helper.
+    # Keep older helpers and publish the main executable last: a running
+    # predecessor continues using its own helper through the update.
+    if [ "$os" = linux ]; then
+        local helper="$tmpdir/msgvault-codex-bridge"
+        [ -f "$helper" ] && [ ! -L "$helper" ] || error "Codex helper not found in Linux archive"
+        local helper_digest helper_hash
+        if command -v sha256sum &>/dev/null; then
+            helper_hash=$(sha256sum "$helper") || return 1
         else
-            sudo mv "$tmpdir/${BINARY_NAME}" "$install_dir/"
+            helper_hash=$(shasum -a 256 "$helper") || return 1
         fi
-        chmod +x "$install_dir/${BINARY_NAME}"
+        helper_digest="${helper_hash%% *}"
+        [ -f "$tmpdir/${BINARY_NAME}" ] && [ ! -L "$tmpdir/${BINARY_NAME}" ] || error "Binary not found in archive"
+        install_binary "$helper" "$install_dir/msgvault-codex-bridge.$helper_digest" || return 1
+    fi
+
+    if [ -f "$tmpdir/${BINARY_NAME}" ]; then
+        install_binary "$tmpdir/${BINARY_NAME}" "$install_dir/${BINARY_NAME}" || return 1
     else
         error "Binary not found in archive"
     fi
@@ -209,4 +249,6 @@ main() {
     echo "  msgvault tui"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then
+    main "$@"
+fi
