@@ -19,6 +19,39 @@ import (
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 )
 
+func TestSchemaVersion31TimelineIndexUpgradePreservesArchive(t *testing.T) {
+	assertions, requirements := assert.New(t), require.New(t)
+	f := storetest.New(t)
+	id := f.NewMessage().WithSubject("Synthetic preserved history").Create(t, f.Store)
+	uid, err := f.Store.ArchiveUIDContext(t.Context())
+	requirements.NoError(err)
+	_, err = f.Store.DB().Exec("DROP INDEX idx_messages_source_sent_at")
+	requirements.NoError(err)
+	_, err = f.Store.DB().Exec("UPDATE archive_metadata SET value='31' WHERE key='schema_version'")
+	requirements.NoError(err)
+	requirements.ErrorContains(f.Store.ValidateSchemaContext(t.Context()), "run setup")
+	for range 2 {
+		requirements.NoError(f.Store.InitSchemaContext(t.Context()))
+		requirements.NoError(f.Store.ValidateSchemaContext(t.Context()))
+		version, err := f.Store.SchemaVersionContext(t.Context())
+		requirements.NoError(err)
+		assertions.Equal(32, version)
+		currentUID, err := f.Store.ArchiveUIDContext(t.Context())
+		requirements.NoError(err)
+		assertions.Equal(uid, currentUID)
+		var subject string
+		requirements.NoError(f.Store.DB().QueryRow(f.Store.Rebind("SELECT subject FROM messages WHERE id=?"), id).Scan(&subject))
+		assertions.Equal("Synthetic preserved history", subject)
+		var count int
+		indexSQL := "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_source_sent_at'"
+		if f.Store.IsPostgreSQL() {
+			indexSQL = "SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname='idx_messages_source_sent_at'"
+		}
+		requirements.NoError(f.Store.DB().QueryRow(indexSQL).Scan(&count))
+		assertions.Equal(1, count)
+	}
+}
+
 func TestSchemaVersionCandidateRightIndexUpgrade(t *testing.T) {
 	require := require.New(t)
 	f := storetest.New(t)
@@ -281,6 +314,7 @@ var (
 		29: "d99ea22b46701498162c909cb7a0f2404f6487e42e0ba0bcf8769c58d0814194",
 		30: "41d1794a318cda45f41e498843ee7f7bff6d96ab206b4ed9dfc4d52dc52ea270",
 		31: "a1777730b47b15c9e3944c118e9a32a42db7c4c33464eed26de11b2fef0fa11d",
+		32: "13b43d3cceb2c975b0922567159f6e978a78d9a8b36349f0d3f3386168ff29f8",
 	}
 	schemaContractPostgresDigests = []string{
 		1:  "7c554ff06468af9bf30950e6e4f2954b52f84d7dd0e6708f4fdd932fda007ed3",
@@ -309,6 +343,7 @@ var (
 		29: "9b5dde3f88bebb178ad918e86607113f312fdda56bd859b72450286e1a1f6182",
 		30: "9b5dde3f88bebb178ad918e86607113f312fdda56bd859b72450286e1a1f6182",
 		31: "e8967ebb2536efe6ceea1250a62630c38280161ce2f9d3c36eaa4ae6f283b0af",
+		32: "f07f9248d8b134f220832272218b53d797c5b14d4284276155b6782a329f6b1b",
 	}
 )
 

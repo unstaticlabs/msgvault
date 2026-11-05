@@ -1,8 +1,8 @@
 # November upstream integration
 
-The distribution integrates upstream `c3afaa35db8fb3ca1f07cee000dc82468d376b33`
+The distribution integrates upstream `d4dafaea88039b522e6ab116345060e466231636`
 into USL `96879bb993edc9f122fcb7978c0403215282fcfc`, preserving both histories.
-This adds 288 upstream commits, including 0.23.0 and subsequent search, sync and
+This adds 293 upstream commits, including 0.23.0 and subsequent search, sync and
 MCP improvements. The [downstream build guide](downstream-build.md) owns the
 repository roles and release procedure.
 
@@ -10,7 +10,7 @@ repository roles and release procedure.
 
 | Contract | Previous distribution | Upstream snapshot | Combined build |
 |---|---|---|---|
-| Completed archive schema | 7 | 30 | 31 |
+| Completed archive schema | 7 | 31 | 32 |
 | Rebuildable analytics cache | 32 | 34 | 35 |
 | HTTP API | 3.19 | 3.43 | 3.44 |
 
@@ -74,6 +74,10 @@ semantics and existing opt-ins.
   companion, then replace the main executable last. Prior companions remain.
   This provides safe ordering for process interruption and ordinary failures;
   it is not a claim of a power-loss durable two-file transaction.
+- Native page-first search keeps source filters before ranking, counts and
+  pagination. MCP message reads can include authored/quoted text ranges while
+  retaining calendar, Inbox, read state and source context. Message links open
+  inside the native application shell.
 - Native JSONv2 migration preserves the distinct all-source and empty-source
   memo scopes, historical linkage serialization and newline-delimited exports.
 - Windows token-directory repair keeps current-user inheritance for shared

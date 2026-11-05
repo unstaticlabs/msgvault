@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -50,7 +51,10 @@ func TestNativeMCPKeepsNamedKeyRoleAndSources(t *testing.T) {
 		keys = append(keys, config.APIKeyConfig{Name: role, Key: "synthetic-" + role, Role: role, User: email})
 	}
 	cfg := &config.Config{Server: config.ServerConfig{APIKey: "synthetic-owner"}, Auth: config.AuthConfig{APIKeys: keys}}
-	engine := &querytest.MockEngine{Messages: map[int64]*query.MessageDetail{11: {ID: 11, SourceID: first.ID, Subject: "First fixture"}, 22: {ID: 22, SourceID: second.ID, Subject: "Second fixture"}}}
+	engine := &querytest.MockEngine{Messages: map[int64]*query.MessageDetail{
+		11: {ID: 11, SourceID: first.ID, Subject: "First fixture", MessageType: "email", BodyText: "New\n> Old\n", InboxState: "inbox", ReadState: "unread", CalendarState: &store.CalendarEventState{Status: "confirmed"}},
+		22: {ID: 22, SourceID: second.ID, Subject: "Second fixture", MessageType: "email", BodyText: "Private\n> History\n", InboxState: "outside", ReadState: "read"},
+	}}
 	server := api.NewServerWithOptions(api.ServerOptions{Config: cfg, Engine: engine, Store: st, SavedViewStore: st, UserStore: st, Logger: slog.New(slog.DiscardHandler)})
 	t.Cleanup(func() {
 		requirements := require.New(t)
@@ -91,11 +95,26 @@ func TestNativeMCPKeepsNamedKeyRoleAndSources(t *testing.T) {
 				assertions.NotContains(names, ToolStageDeletion)
 			}
 			for _, id := range []int{11, 22} {
-				response, status = rawAuthorizedCall(t, server.Router(), "Bearer synthetic-"+role, "tools/call", map[string]any{"name": ToolGetMessage, "arguments": map[string]any{"id": id}})
+				response, status = rawAuthorizedCall(t, server.Router(), "Bearer synthetic-"+role, "tools/call", map[string]any{"name": ToolGetMessage, "arguments": map[string]any{"id": id, "include_segments": true}})
 				requirements.Equal(http.StatusOK, status)
 				requirements.Empty(response.Error)
 				isError, text := toolResultText(t, response.Result)
 				assertions.Equal(id == 22 && role != "admin", isError, text)
+				if !isError {
+					var message getMessageResponse
+					requirements.NoError(json.Unmarshal([]byte(text), &message))
+					assertions.Equal(engine.Messages[int64(id)].SourceID, message.SourceID)
+					assertions.Equal(engine.Messages[int64(id)].InboxState, message.InboxState)
+					assertions.Equal(engine.Messages[int64(id)].ReadState, message.ReadState)
+					assertions.Equal(engine.Messages[int64(id)].CalendarState, message.CalendarState)
+					assertions.Equal(engine.Messages[int64(id)].BodyText, message.BodyText)
+					assertions.Equal("seg-v1", message.SegmentsVersion)
+					requirements.Len(message.Segments, 2)
+					assertions.Equal("authored", string(message.Segments[0].Kind))
+					assertions.Equal("quoted", string(message.Segments[1].Kind))
+				} else {
+					assertions.NotContains(text, "History", "denied sources never reach body segmentation")
+				}
 			}
 			if role != "viewer" {
 				response, status = rawAuthorizedCall(t, server.Router(), "Bearer synthetic-"+role, "tools/call", map[string]any{"name": ToolCreateSavedView, "arguments": map[string]any{"name": "Native " + role, "schema_version": 2, "canonical_state": map[string]any{"presentation": "table"}}})
