@@ -88,10 +88,6 @@ Add to Claude Desktop config:
 				// it after discovering or starting the daemon that owns the archive.
 				inboundKey = cfg.Server.AuthenticationKey()
 			}
-			httpAddr, err = normalizeMCPHTTPAddr(httpAddr, mcpHTTPAllowInsecure, inboundKey != "")
-			if err != nil {
-				return usageErr(cmd, err)
-			}
 		}
 
 		// Derive from cmd.Context() so signal handling installed by
@@ -116,6 +112,13 @@ Add to Claude Desktop config:
 			provider, _, err := newOIDCProvider(cfg)
 			if err != nil {
 				return err
+			}
+			// Recheck after a local daemon may have created its key, retaining
+			// the named-key and OIDC authentication accepted before connecting.
+			bearerEnabled := provider != nil && provider.Config().BearerEnabled()
+			httpAddr, err = normalizeMCPHTTPAddr(httpAddr, mcpHTTPAllowInsecure, inboundKey != "" || len(keys) > 0 || bearerEnabled)
+			if err != nil {
+				return usageErr(cmd, err)
 			}
 			return serveMCPHTTPWithOptions(ctx, opts, mcpserver.HTTPOptions{
 				Addr:               httpAddr,
