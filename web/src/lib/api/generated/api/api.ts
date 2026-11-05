@@ -62,6 +62,7 @@ import type {
   CardDAVSyncRequest,
   Catalog,
   ChangesResponse,
+  ChatDiscoveryPage,
   CheckSettingsPeopleInferenceProviderPathParameters,
   ClearOrganizationAttributeParams,
   ClearOrganizationAttributePathParameters,
@@ -79,6 +80,7 @@ import type {
   CommunicationService,
   CommunicationServicesResponse,
   ConsentSettingsPeopleInferenceProviderPathParameters,
+  ContactCandidatePage,
   ContactState,
   ConversationResponse,
   CreateAttributeDefinitionRequest,
@@ -114,6 +116,8 @@ import type {
   DirectoryPeopleResponse,
   DiscoverEvent,
   DiscoverRequest,
+  DocbankAttachmentBackfillResponse,
+  DocbankAttachmentStatus,
   DocumentIndexStatusResponse,
   DocumentSearchResponse,
   DocumentVectorOperationsResponse,
@@ -123,15 +127,18 @@ import type {
   EmailWorkPrepareRequest,
   EmailWorkPrepareResponse,
   EmailWorkUndoRequest,
+  EmbeddingStatus,
   Employment,
   EmploymentBody,
   EmploymentsResponse,
   EndEmploymentBody,
   EndEmploymentPathParameters,
+  ExplainPersonTierPathParameters,
   FastSearchParams,
   FileMetadataResponse,
   FilterMessagesParams,
   FilteredMessagesResponse,
+  FindContactCandidatesParams,
   FindKataIssuesParams,
   FindSimilarMessagesParams,
   GeneratePersonBriefPathParameters,
@@ -158,6 +165,7 @@ import type {
   GetDocumentIndexStatusParams,
   GetDocumentVectorStatusParams,
   GetDomainPathParameters,
+  GetEmbeddingStatusParams,
   GetEmploymentPathParameters,
   GetFileContentPathParameters,
   GetFilePathParameters,
@@ -185,6 +193,7 @@ import type {
   GetPersonContactStatePathParameters,
   GetPersonMergePathParameters,
   GetPersonMergeSnapshotPathParameters,
+  GetPersonMessagingRoutesParams,
   GetPersonNetworkParams,
   GetPersonNetworkPathParameters,
   GetPersonProfileHistoryPathParameters,
@@ -212,6 +221,7 @@ import type {
   IdentityMatchRejectResponse,
   ImportJobRequest,
   ImportJobResponse,
+  ImportMuesliRecordingParams,
   InboxArchiveAuthorizeRequest,
   InboxArchiveAuthorizeResponse,
   InboxArchiveExecuteRequest,
@@ -367,6 +377,7 @@ import type {
   PersonMergeReviewCandidate,
   PersonMergeSnapshotResponse,
   PersonMergesResponse,
+  PersonMessagingRoutesPage,
   PersonNetwork,
   PersonProfileHistory,
   PersonProfilePatchRequest,
@@ -376,6 +387,8 @@ import type {
   PersonSearchResponse,
   PersonSplitResult,
   PersonSummary,
+  PersonTierExplanation,
+  PersonTierPreview,
   PersonTracking,
   PreviewCardDAVPublicationPathParameters,
   PrincipalInfo,
@@ -412,6 +425,7 @@ import type {
   SavedViewsResponse,
   SchedulerStatusResponse,
   SearchCLIParams,
+  SearchChatsParams,
   SearchDocumentsParams,
   SearchFastResponse,
   SearchIntegrationTasksParams,
@@ -1249,7 +1263,7 @@ export const getCLIMessageRaw = (
   );
 };
 /**
- * @summary List one conversation in chronological order for export
+ * @summary List one conversation in chronological order for export. SQLite compares instants to the millisecond, with ties in message-ID order.
  */
 export const getCLIMessageThread = (
   params?: GetCLIMessageThreadParams,
@@ -1422,6 +1436,18 @@ export const getRemoteImage = (
       data: remoteImageRequest,
       responseType: "blob",
     },
+    options,
+  );
+};
+/**
+ * @summary Find archived chats by ranked name tokens
+ */
+export const searchChats = (
+  params: SearchChatsParams,
+  options?: SecondParameter<typeof orvalFetch<ChatDiscoveryPage>>,
+) => {
+  return orvalFetch<ChatDiscoveryPage>(
+    { url: `/api/v1/conversations/search`, method: "GET", params },
     options,
   );
 };
@@ -1629,6 +1655,18 @@ export const getDomain = (
       url: `/api/v1/domains/${encodeURIComponent(String(domain))}`,
       method: "GET",
     },
+    options,
+  );
+};
+/**
+ * @summary Get message embedding coverage and live batch diagnostics
+ */
+export const getEmbeddingStatus = (
+  params?: GetEmbeddingStatusParams,
+  options?: SecondParameter<typeof orvalFetch<EmbeddingStatus>>,
+) => {
+  return orvalFetch<EmbeddingStatus>(
+    { url: `/api/v1/embeddings/status`, method: "GET", params },
     options,
   );
 };
@@ -2035,6 +2073,25 @@ export const importMuesli = (
   );
 };
 /**
+ * @summary Stream retained audio for an archived Muesli meeting
+ */
+export const importMuesliRecording = (
+  importMuesliRecordingBody: Blob,
+  params: ImportMuesliRecordingParams,
+  options?: SecondParameter<typeof orvalFetch<MuesliRemoteResult>>,
+) => {
+  return orvalFetch<MuesliRemoteResult>(
+    {
+      url: `/api/v1/import/muesli/recording`,
+      method: "POST",
+      headers: { "Content-Type": "audio/mp4" },
+      data: importMuesliRecordingBody,
+      params,
+    },
+    options,
+  );
+};
+/**
  * @summary Start a bounded historical import
  */
 export const createImportJob = (
@@ -2096,6 +2153,33 @@ export const executeInboxArchive = (
       method: "POST",
       headers: { "Content-Type": "application/json" },
       data: inboxArchiveExecuteRequest,
+    },
+    options,
+  );
+};
+/**
+ * @summary Read attachment mirror status
+ */
+export const getDocbankAttachmentStatus = (
+  options?: SecondParameter<typeof orvalFetch<DocbankAttachmentStatus>>,
+) => {
+  return orvalFetch<DocbankAttachmentStatus>(
+    { url: `/api/v1/integrations/docbank/attachments`, method: "GET" },
+    options,
+  );
+};
+/**
+ * @summary Retry failures and restart attachment mirror discovery
+ */
+export const backfillDocbankAttachments = (
+  options?: SecondParameter<
+    typeof orvalFetch<DocbankAttachmentBackfillResponse>
+  >,
+) => {
+  return orvalFetch<DocbankAttachmentBackfillResponse>(
+    {
+      url: `/api/v1/integrations/docbank/attachments/backfill`,
+      method: "POST",
     },
     options,
   );
@@ -2250,7 +2334,7 @@ export const getMe = (
   );
 };
 /**
- * @summary Search source-selected transcripts as visible messages
+ * @summary Search recordings and attachments as visible messages
  */
 export const searchMedia = (
   params: SearchMediaParams,
@@ -2856,6 +2940,18 @@ export const getPersonByUID = (
   );
 };
 /**
+ * @summary Find durable people by saved or observed names without selecting a duplicate
+ */
+export const findContactCandidates = (
+  params: FindContactCandidatesParams,
+  options?: SecondParameter<typeof orvalFetch<ContactCandidatePage>>,
+) => {
+  return orvalFetch<ContactCandidatePage>(
+    { url: `/api/v1/people/contact-candidates`, method: "GET", params },
+    options,
+  );
+};
+/**
  * Returns one stable, non-sensitive page of promoted durable people.
  * @summary Query durable people for the Directory
  */
@@ -2865,6 +2961,18 @@ export const listDirectoryPeople = (
 ) => {
   return orvalFetch<DirectoryPeopleResponse>(
     { url: `/api/v1/people/directory`, method: "GET", params },
+    options,
+  );
+};
+/**
+ * @summary Read one person's archived messaging routes and contact evidence by stable UID
+ */
+export const getPersonMessagingRoutes = (
+  params: GetPersonMessagingRoutesParams,
+  options?: SecondParameter<typeof orvalFetch<PersonMessagingRoutesPage>>,
+) => {
+  return orvalFetch<PersonMessagingRoutesPage>(
+    { url: `/api/v1/people/messaging-routes`, method: "GET", params },
     options,
   );
 };
@@ -2883,6 +2991,17 @@ export const searchPeople = (
       headers: { "Content-Type": "application/json" },
       data: personSearchRequest,
     },
+    options,
+  );
+};
+/**
+ * @summary List saved people in tier 1 or 2
+ */
+export const previewPersonTiers = (
+  options?: SecondParameter<typeof orvalFetch<PersonTierPreview>>,
+) => {
+  return orvalFetch<PersonTierPreview>(
+    { url: `/api/v1/people/tiers`, method: "GET" },
     options,
   );
 };
@@ -3530,6 +3649,21 @@ export const splitPersonMerge = (
   );
 };
 /**
+ * @summary Show every count behind one person's tier
+ */
+export const explainPersonTier = (
+  { id }: ExplainPersonTierPathParameters,
+  options?: SecondParameter<typeof orvalFetch<PersonTierExplanation>>,
+) => {
+  return orvalFetch<PersonTierExplanation>(
+    {
+      url: `/api/v1/people/${encodeURIComponent(String(id))}/tier`,
+      method: "GET",
+    },
+    options,
+  );
+};
+/**
  * @summary Get a person's tracking state
  */
 export const getPersonTracking = (
@@ -3876,6 +4010,7 @@ export const getSavedView = (
   );
 };
 /**
+ * Sending canonical_state without schema_version keeps the stored schema version, so schema 1 keeps pipes as literal text. Send schema_version 2 to adopt pipe OR.
  * @summary Update a shared analytical Saved View
  */
 export const patchSavedView = (
@@ -4364,7 +4499,7 @@ export const triggerSync = (
   );
 };
 /**
- * @summary Report a web or terminal UI usage event
+ * @summary Report a web, terminal UI, or interactive CLI usage event
  */
 export const captureTelemetryEvent = (
   telemetryEventRequest: TelemetryEventRequest,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/senderauth"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -26,10 +27,11 @@ type AggregateRow struct {
 // MessageSummary represents a message in list views.
 // Contains enough information for display without fetching the full body.
 type MessageSummary struct {
-	InboxState      string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
-	ReadState       string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
-	AttachmentNames []string `json:"attachment_names,omitzero"`
-	MatchSnippet    string   `json:"match_snippet,omitempty"`
+	InboxState        string   `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
+	ReadState         string   `json:"read_state,omitempty" enum:"read,unread,unknown"`
+	AttachmentNames   []string `json:"attachment_names,omitzero"`
+	MatchSnippet      string   `json:"match_snippet,omitempty"`
+	HiddenTextPresent bool     `json:"hidden_text_present"`
 	// WebURL is derived by the daemon client for browser navigation.
 	WebURL                       string     `json:"web_url,omitempty"`
 	ID                           int64      `json:"id"`
@@ -70,11 +72,13 @@ type DeletionTarget struct {
 
 // MessageDetail represents a full message with body and attachments.
 type MessageDetail struct {
-	RelatedMessageID  *int64                    `json:"related_message_id,omitempty"`
 	CalendarState     *store.CalendarEventState `json:"calendar_state,omitempty"`
 	InboxState        string                    `json:"inbox_state,omitempty" enum:"inbox,outside,unknown"`
 	ReadState         string                    `json:"read_state,omitempty" enum:"read,unread,unknown"`
+	SenderAuth        *senderauth.Verdict       `json:"sender_auth,omitempty"`
+	RelatedMessageID  *int64                    `json:"related_message_id,omitempty"`
 	ConversationTitle string                    `json:"conversation_title,omitempty"`
+	Calendar          *store.CalendarProjection `json:"calendar,omitempty"`
 	// WebURL is derived by the daemon client for browser navigation.
 	WebURL               string     `json:"web_url,omitempty"`
 	ID                   int64      `json:"id"`
@@ -92,6 +96,7 @@ type MessageDetail struct {
 	SizeEstimate         int64      `json:"size_estimate"`
 	HasAttachments       bool       `json:"has_attachments"`
 	IsFromMe             bool       `json:"is_from_me"`
+	HiddenTextPresent    bool       `json:"hidden_text_present"`
 
 	// Participants
 	From []Address `json:"from"`
@@ -116,6 +121,7 @@ type Address struct {
 
 // AttachmentInfo represents attachment metadata.
 type AttachmentInfo struct {
+	Docbank     []store.DocbankAttachmentRef `json:"docbank,omitempty"`
 	ID          int64
 	SourceID    int64 `json:"-"`
 	Filename    string
@@ -128,6 +134,10 @@ type AttachmentInfo struct {
 
 // ViewType represents the type of aggregate view.
 type ViewType int
+
+// ViewNoStats suppresses optional aggregates in SearchFastWithStats. It is not
+// an aggregate view and does not change the numeric values of existing views.
+const ViewNoStats ViewType = -1
 
 const (
 	ViewSenders ViewType = iota

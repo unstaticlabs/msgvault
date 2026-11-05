@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/beeperidentity"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/internal/testutil"
 )
@@ -79,6 +80,7 @@ func observationChat(
 }
 
 func TestImportCapturesEveryObservedAddressForOneParticipant(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -147,6 +149,7 @@ func observationOriginal(
 }
 
 func TestImportRecordsAUsernameThePhoneServiceRejectsWithoutAService(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -191,6 +194,7 @@ func TestImportRecordsAUsernameThePhoneServiceRejectsWithoutAService(t *testing.
 }
 
 func TestProviderIdentityEvidencePreservesExactValueForPhoneService(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -238,6 +242,7 @@ func TestProviderIdentityEvidencePreservesExactValueForPhoneService(t *testing.T
 }
 
 func TestObservationDedupKeepsChangedProviderIdentity(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -274,6 +279,7 @@ func TestObservationDedupKeepsChangedProviderIdentity(t *testing.T) {
 }
 
 func TestImportUsesRequestedAccountForObservationIdentityScope(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	f := newFakeBeeper(t)
@@ -319,6 +325,7 @@ func TestImportUsesRequestedAccountForObservationIdentityScope(t *testing.T) {
 }
 
 func TestImportRegistersUnknownBridgeAndPreservesObservedValues(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -354,6 +361,7 @@ func TestImportRegistersUnknownBridgeAndPreservesObservedValues(t *testing.T) {
 }
 
 func TestImportClassifiesTheBeeperIdentifierAnchor(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -380,7 +388,7 @@ func TestImportClassifiesTheBeeperIdentifierAnchor(t *testing.T) {
 		`SELECT service_id, scope_kind, scope_value FROM participant_identifiers
 		 WHERE identifier_type = ? AND identifier_value = ?`),
 		participantIdentifierType,
-		providerFallbackUserID("slack", "@slack_alice:beeper.local"),
+		beeperidentity.Fallback("slack", "@slack_alice:beeper.local"),
 	).Scan(&serviceID, &scopeKind, &scopeValue), "read the anchor classification")
 	assert.Equal(slack.ID, serviceID,
 		"PR 3 leaves identifier_type 'beeper' unclassified; the bridge type is only knowable here")
@@ -391,6 +399,7 @@ func TestImportClassifiesTheBeeperIdentifierAnchor(t *testing.T) {
 }
 
 func TestAnchorClassificationRetriesAfterStoreFailureInTheSameRecorder(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -477,6 +486,7 @@ func installAnchorClassificationFailure(t *testing.T, st *store.Store) func() {
 }
 
 func TestImportCaptureIsIdempotentAcrossRuns(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -508,6 +518,7 @@ func TestImportCaptureIsIdempotentAcrossRuns(t *testing.T) {
 }
 
 func TestImportResetsRunLocalObservationDedupe(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -537,6 +548,7 @@ func TestImportResetsRunLocalObservationDedupe(t *testing.T) {
 }
 
 func TestImportResetsRunLocalAnchorClassification(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	f := newFakeBeeper(t)
@@ -560,7 +572,7 @@ func TestImportResetsRunLocalAnchorClassification(t *testing.T) {
 		require.NoError(st.DB().QueryRow(st.Rebind(
 			`SELECT service_id FROM participant_identifiers
 			 WHERE identifier_type = ? AND identifier_value = ?`),
-			participantIdentifierType, providerFallbackUserID(accountID, userID),
+			participantIdentifierType, beeperidentity.Fallback(accountID, userID),
 		).Scan(&serviceID), "read anchor service")
 		return serviceID
 	}
@@ -573,6 +585,7 @@ func TestImportResetsRunLocalAnchorClassification(t *testing.T) {
 }
 
 func TestImportUsesParticipantBridgePrefixBeforeOpaqueAccountFallback(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	f := newFakeBeeper(t)
@@ -610,6 +623,7 @@ func TestImportUsesParticipantBridgePrefixBeforeOpaqueAccountFallback(t *testing
 }
 
 func TestImportUsesEachParticipantsOwnBridgePrefix(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	f := newFakeBeeper(t)
@@ -644,6 +658,7 @@ func TestImportUsesEachParticipantsOwnBridgePrefix(t *testing.T) {
 }
 
 func TestImportDoesNotGuessChatPrefixWhenParticipantsDisagree(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	f := newFakeBeeper(t)
@@ -684,6 +699,7 @@ func TestImportDoesNotGuessChatPrefixWhenParticipantsDisagree(t *testing.T) {
 }
 
 func TestImportDoesNotUsePrefixConsensusFromIncompleteParticipants(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	f := newFakeBeeper(t)
@@ -720,6 +736,7 @@ func TestImportDoesNotUsePrefixConsensusFromIncompleteParticipants(t *testing.T)
 }
 
 func TestObservationDedupeKeyIncludesParticipantAndSource(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name            string
 		differentSource bool
@@ -766,6 +783,7 @@ func TestObservationDedupeKeyIncludesParticipantAndSource(t *testing.T) {
 }
 
 func TestImportCapturesTheSelfParticipant(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -790,6 +808,7 @@ func TestImportCapturesTheSelfParticipant(t *testing.T) {
 }
 
 func TestSkippedInvalidObservationIsDeduplicatedWithinRecorderRun(t *testing.T) {
+	t.Parallel()
 	requirements := require.New(t)
 	assertions := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -822,6 +841,7 @@ func TestSkippedInvalidObservationIsDeduplicatedWithinRecorderRun(t *testing.T) 
 }
 
 func TestRenamedUsernameSupersedesTheOldValueOnTheSameAnchor(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -858,6 +878,7 @@ func TestRenamedUsernameSupersedesTheOldValueOnTheSameAnchor(t *testing.T) {
 }
 
 func TestRenamedUsernameDoesNotSupersedeAnotherSource(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -900,6 +921,7 @@ func TestRenamedUsernameDoesNotSupersedeAnotherSource(t *testing.T) {
 }
 
 func TestRenamedUsernameSupersessionRetriesAfterPartialWrite(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name          string
 		freshRecorder bool
@@ -1004,6 +1026,7 @@ func installRenameSupersedeFailure(t *testing.T, st *store.Store) func() {
 }
 
 func TestMultipleUsernamesAndPhonesCoexistOnOneParticipant(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -1060,6 +1083,7 @@ func TestMultipleUsernamesAndPhonesCoexistOnOneParticipant(t *testing.T) {
 }
 
 func TestRecycledUsernameDoesNotMergePeopleOrEraseHistory(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)
@@ -1106,6 +1130,7 @@ func TestRecycledUsernameDoesNotMergePeopleOrEraseHistory(t *testing.T) {
 }
 
 func TestSameUsernameUnderDifferentStableIDsStaysAConflict(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 	st := testutil.NewTestStore(t)

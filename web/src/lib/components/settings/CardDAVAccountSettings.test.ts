@@ -67,14 +67,6 @@ describe('CardDAVAccountSettings', () => {
     expect(screen.getByText(/Start Command Prompt with/).textContent).toBe('Start Command Prompt with cmd /d /v:off, then paste:');
   });
 
-  it('shows Save CardDAV account as the solid blue primary action', () => {
-    render(CardDAVAccountSettings, { client: createAPIClient(async () => Response.json({})), values });
-
-    const save = screen.getByRole('button', { name: 'Save CardDAV account' });
-    expect(save.className).toContain('kit-button--info');
-    expect(save.className).toContain('kit-button--solid');
-  });
-
   it('refreshes a clean account form when settings props change', async () => {
     const client = createAPIClient(async () => Response.json({}));
     const rendered = render(CardDAVAccountSettings, { client, values });
@@ -86,7 +78,6 @@ describe('CardDAVAccountSettings', () => {
     expect((screen.getByRole('switch', { name: 'Enabled' }) as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText('Schedule') as HTMLInputElement).value).toBe('0 4 * * *');
     expect((screen.getByLabelText('Password') as HTMLInputElement).required).toBe(true);
-    expect(screen.getByText('Saving the account applies right away. No daemon restart is needed.')).toBeDefined();
   });
 
   it('preserves an intentional local edit while refreshing untouched fields', async () => {

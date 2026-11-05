@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,9 @@ import (
 	_ "github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/identityindex"
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/testutil/dbtest"
 )
 
 // TestDuckDBEngine_CacheRebuiltUnderneath reproduces the production crash where
@@ -27,6 +30,7 @@ import (
 // The engine must detect out-of-band drift and refuse the cache instead of
 // reading an uncommitted file set or falling back to SQLite.
 func TestDuckDBEngine_CacheRebuiltUnderneath(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -37,7 +41,7 @@ func TestDuckDBEngine_CacheRebuiltUnderneath(t *testing.T) {
 
 	pb := newParquetBuilder(t).
 		addTable("messages", "messages/year=2024", "data.parquet", newMessagesCols, `
-			(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
+			(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
 		`).
 		addTable("sources", "sources", "sources.parquet", sourcesCols, `(1::BIGINT, 'test@gmail.com', 'gmail')`).
 		addTable("participants", "participants", "participants.parquet", participantsCols, `(1::BIGINT, 'alice@test.com', 'test.com', 'Alice', '')`).
@@ -78,6 +82,7 @@ func TestDuckDBEngine_CacheRebuiltUnderneath(t *testing.T) {
 }
 
 func TestDuckDBEngineRejectsInterruptedCache(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	analyticsDir, cleanup := buildStandardTestData(t).Build()
 	t.Cleanup(cleanup)
@@ -97,13 +102,216 @@ func TestDuckDBEngineRejectsInterruptedCache(t *testing.T) {
 	require.ErrorIs(err, ErrCacheUnavailable)
 }
 
+func TestDuckDBEngine_LiveSQLWhenCacheUnavailable(t *testing.T) {
+	t.Parallel()
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	b := NewTestDataBuilder(t)
+	b.AddSource("archive@example.com")
+	sender := b.AddParticipant("old@example.com", "example.com", "Old")
+	message := b.AddMessage(MessageOpt{Subject: "old message"})
+	b.AddFrom(message, sender, "Old")
+	analyticsDir, cleanup := b.Build()
+	t.Cleanup(cleanup)
+	db := dbtest.NewTestDB(t, "../store/schema.sql")
+	_, err := db.DB.Exec(`
+		INSERT INTO sources (id, source_type, identifier) VALUES (7, 'gmail', 'live@example.com');
+		INSERT INTO participants (id, email_address, domain, display_name) VALUES (11, 'live@example.com', 'example.com', 'Live');
+		INSERT INTO conversations (id, source_id, source_conversation_id, conversation_type, title) VALUES (701, 7, 'live-thread', 'email', 'Live');
+		INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type, sent_at, subject, snippet, sender_id)
+		VALUES (801, 701, 7, 'live-message', 'email', '2024-01-15 10:00:00', 'live subject', 'live snippet', 11);
+		INSERT INTO message_recipients (message_id, participant_id, recipient_type) VALUES (801, 11, 'from');
+		INSERT INTO sources (id, source_type, identifier) VALUES (8, 'whatsapp', 'chat-a'), (9, 'whatsapp', 'chat-b');
+		INSERT INTO conversations (id, source_id, source_conversation_id, conversation_type, title)
+		VALUES (702, 8, 'live-chat', 'direct_chat', 'Live chat'), (703, 9, 'other-chat', 'direct_chat', 'Other chat');
+		INSERT INTO messages (id, conversation_id, source_id, source_message_id, message_type, sent_at, snippet, sender_id)
+		VALUES (802, 702, 8, 'live-text', 'whatsapp', '2024-01-15 10:00:00', 'live text', 11),
+		       (803, 703, 9, 'other-text', 'whatsapp', '2024-01-15 10:00:00', 'other text', 11);
+	`)
+	requirements.NoError(err)
+	engines := make(map[bool]*DuckDBEngine)
+	for _, enabled := range []bool{false, true} {
+		engine, err := NewDuckDBEngine(analyticsDir, "", db.DB, DuckDBOptions{
+			DisableSQLiteScanner: true, LiveSQLWhenCacheUnavailable: enabled,
+		})
+		requirements.NoError(err)
+		t.Cleanup(func() { requirements.NoError(engine.Close()) })
+		engines[enabled] = engine
+		// Opting into fallback must still prefer a ready cache over live SQL.
+		rows, err := engine.Aggregate(t.Context(), ViewSenders, DefaultAggregateOptions())
+		requirements.NoError(err)
+		requirements.Len(rows, 1)
+		assertions.Equal("old@example.com", rows[0].Key)
+	}
+	requirements.NoError(os.Remove(CacheStatePath(analyticsDir)))
+	// Each disabled call catches its own method bypassing the fallback option.
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fallback=%t", enabled), func(t *testing.T) {
+			engine := engines[enabled]
+			sourceID := int64(7)
+			filter := MessageFilter{SourceID: &sourceID}
+			textSourceID := int64(8)
+			textFilter := TextFilter{SourceID: &textSourceID, Pagination: Pagination{Limit: 1}}
+			for _, tc := range []struct {
+				name string
+				call func(t *testing.T, ctx context.Context)
+			}{
+				{
+					name: "Aggregate",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						rows, err := engine.Aggregate(ctx, ViewSenders, DefaultAggregateOptions())
+						if !enabled {
+							// Keep the opt-out check with SQLite available. The interrupted-cache
+							// test has no SQLite connection, so it cannot catch an ignored option.
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						require.Len(rows, 1)
+						assert.Equal("live@example.com", rows[0].Key)
+					},
+				},
+				{
+					name: "SubAggregate",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						rows, err := engine.SubAggregate(ctx, filter, ViewSenders, DefaultAggregateOptions())
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						require.Len(rows, 1)
+						assert.Equal("live@example.com", rows[0].Key)
+					},
+				},
+				{
+					name: "GetTotalStats",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						stats, err := engine.GetTotalStats(ctx, StatsOptions{})
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						assert.Equal(int64(1), stats.MessageCount)
+					},
+				},
+				{
+					name: "ListMessages",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						messages, err := engine.ListMessages(ctx, filter)
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						require.Len(messages, 1)
+						assert.Equal("live-message", messages[0].SourceMessageID)
+					},
+				},
+				{
+					name: "SearchFastWithStats",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						result, err := engine.SearchFastWithStats(ctx, search.Parse("live"), "live", filter, ViewSenders, 10, 0)
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						require.Len(result.Messages, 1)
+						assert.Equal("live-message", result.Messages[0].SourceMessageID)
+						assert.Equal(int64(1), result.TotalCount)
+						require.NotNil(result.Stats)
+						assert.Equal(int64(1), result.Stats.MessageCount)
+					},
+				},
+				{
+					name: "ListConversationsSnapshot",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						rows, revision, err := engine.ListConversationsSnapshot(ctx, textFilter)
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						require.Len(rows, 1)
+						assert.Equal(int64(702), rows[0].ConversationID)
+						assert.Equal("Live chat", rows[0].Title)
+						want, err := engine.sqliteEngine.TextSnapshotRevision(ctx, TextSnapshotScope{Filter: textFilter})
+						require.NoError(err)
+						assert.NotEmpty(revision)
+						assert.Equal(want, revision)
+					},
+				},
+				{
+					name: "TextAggregate",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						rows, err := engine.TextAggregate(ctx, TextViewContactNames, TextAggregateOptions{SourceID: &textSourceID})
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						require.Len(rows, 1)
+						assert.Equal("Live", rows[0].Key)
+						assert.Equal(int64(1), rows[0].Count)
+					},
+				},
+				{
+					name: "GetTextStats",
+					call: func(t *testing.T, ctx context.Context) {
+						t.Helper()
+						require := require.New(t)
+						assert := assert.New(t)
+						stats, err := engine.GetTextStats(ctx, TextStatsOptions{SourceID: &textSourceID})
+						if !enabled {
+							require.ErrorIs(err, ErrCacheUnavailable)
+							return
+						}
+						require.NoError(err)
+						assert.Equal(int64(1), stats.MessageCount)
+					},
+				},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+					defer cancel()
+					tc.call(t, ctx)
+				})
+			}
+		})
+	}
+}
+
 func TestDuckDBEngine_SearchFastWithStatsRejectsMessageParquetDrift(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
 	pb := newParquetBuilder(t).
 		addTable("messages", "messages/year=2024", "data.parquet", messagesCols, `
-			(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
+			(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
 		`).
 		addTable("sources", "sources", "sources.parquet", sourcesCols, `(1::BIGINT, 'test@gmail.com', 'gmail')`).
 		addTable("participants", "participants", "participants.parquet", participantsCols, `(1::BIGINT, 'alice@test.com', 'test.com', 'Alice', '')`).
@@ -132,8 +340,8 @@ func TestDuckDBEngine_SearchFastWithStatsRejectsMessageParquetDrift(t *testing.T
 
 	msgPath := filepath.Join(analyticsDir, "messages", "year=2024", "data.parquet")
 	rewriteParquetForTest(t, msgPath, messagesCols, `
-		(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1),
-		(2::BIGINT, 1::BIGINT, 'm2', 101::BIGINT, 'Another SOFRA', 'snip', TIMESTAMP '2024-01-16 10:00:00', 2000::BIGINT, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
+		(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1),
+		(2::BIGINT, 1::BIGINT, 'm2', 101::BIGINT, 'Another SOFRA', 'snip', TIMESTAMP '2024-01-16 10:00:00', 2000::BIGINT, false, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
 	`)
 
 	_, err = engine.SearchFastWithStats(ctx, q, "SOFRA", MessageFilter{}, ViewSenders, 10, 0)
@@ -144,12 +352,13 @@ func TestDuckDBEngine_SearchFastWithStatsRejectsMessageParquetDrift(t *testing.T
 }
 
 func TestDuckDBEngine_SearchFastWithStatsRejectsAttachmentParquetDrift(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
 	pb := newParquetBuilder(t).
 		addTable("messages", "messages/year=2024", "data.parquet", messagesCols, `
-			(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
+			(1::BIGINT, 1::BIGINT, 'm1', 100::BIGINT, 'Hello SOFRA', 'snip', TIMESTAMP '2024-01-15 10:00:00', 1000::BIGINT, false, false, 0::INTEGER, NULL::TIMESTAMP, NULL::BIGINT, NULL::BIGINT, 'email', NULL::VARCHAR, false, 2024, 1)
 		`).
 		addTable("sources", "sources", "sources.parquet", sourcesCols, `(1::BIGINT, 'test@gmail.com', 'gmail')`).
 		addTable("participants", "participants", "participants.parquet", participantsCols, `(1::BIGINT, 'alice@test.com', 'test.com', 'Alice', '')`).
@@ -187,6 +396,7 @@ func TestDuckDBEngine_SearchFastWithStatsRejectsAttachmentParquetDrift(t *testin
 }
 
 func TestDuckDBEngine_CacheFingerprintCoversRequiredParquetDirs(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -208,6 +418,7 @@ func TestDuckDBEngine_CacheFingerprintCoversRequiredParquetDirs(t *testing.T) {
 }
 
 func TestStableOptionalColumnsRetriesWhenFingerprintChanges(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -235,6 +446,23 @@ func TestStableOptionalColumnsRetriesWhenFingerprintChanges(t *testing.T) {
 	assert.Equal("after", fp)
 }
 
+func bobExchangeFixture(t *testing.T) (*TestDataBuilder, int64) {
+	t.Helper()
+	b := NewTestDataBuilder(t)
+	sourceID := b.AddSource("me@example.test")
+	me := b.AddParticipant("me@example.test", "example.test", "Me")
+	bob := b.AddParticipant("bob@example.com", "example.com", "Bob")
+	received := b.AddMessage(MessageOpt{Subject: "Hello from Bob", SentAt: time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)})
+	b.AddFrom(received, bob, "Bob")
+	b.AddTo(received, me, "Me")
+	sent := b.AddMessage(MessageOpt{Subject: "Reply to Bob", SentAt: time.Date(2024, 1, 16, 10, 0, 0, 0, time.UTC), IsFromMe: true})
+	b.AddFrom(sent, me, "Me")
+	b.AddTo(sent, bob, "Bob")
+	b.AddOwnerParticipant(sourceID, me)
+
+	return b, sent
+}
+
 // TestDuckDBEngine_AnalyticalEndpointsFollowCommittedCacheSchemaSwap is the
 // regression test for view-based analytical endpoints (Explore, Relationships,
 // People, timelines) retaining stale view definitions after a live cache
@@ -244,20 +472,11 @@ func TestStableOptionalColumnsRetriesWhenFingerprintChanges(t *testing.T) {
 // Parquet views against the new schema instead of failing with
 // "Column ... in REPLACE list not found in FROM clause".
 func TestDuckDBEngine_AnalyticalEndpointsFollowCommittedCacheSchemaSwap(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
-	b := NewTestDataBuilder(t)
-	sourceID := b.AddSource("me@test.com")
-	me := b.AddParticipant("me@test.com", "test.com", "Me")
-	bob := b.AddParticipant("bob@example.com", "example.com", "Bob")
-	received := b.AddMessage(MessageOpt{Subject: "Hello from Bob", SentAt: time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)})
-	b.AddFrom(received, bob, "Bob")
-	b.AddTo(received, me, "Me")
-	sent := b.AddMessage(MessageOpt{Subject: "Reply to Bob", SentAt: time.Date(2024, 1, 16, 10, 0, 0, 0, time.UTC), IsFromMe: true})
-	b.AddFrom(sent, me, "Me")
-	b.AddTo(sent, bob, "Bob")
-	b.AddOwnerParticipant(sourceID, me)
+	b, _ := bobExchangeFixture(t)
 
 	analyticsDir, cleanup := b.Build()
 	t.Cleanup(cleanup)
@@ -310,6 +529,78 @@ func TestDuckDBEngine_AnalyticalEndpointsFollowCommittedCacheSchemaSwap(t *testi
 		"relationship reads must report the newly committed revision")
 }
 
+func TestDuckDBEngine_ReloadsUnsentIDsAfterPublicationAndRetriesFailedRefresh(t *testing.T) {
+	t.Parallel()
+	for _, outcome := range []string{"reloads after sent publication", "retries after unreadable activity is restored"} {
+		t.Run(outcome, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			b, sent := bobExchangeFixture(t)
+			b.unsentMessages = fmt.Sprintf("(SELECT %d::BIGINT AS message_id)", sent)
+			root, cleanup := b.Build()
+			t.Cleanup(cleanup)
+			engine, err := NewDuckDBEngine(root, "", nil)
+			require.NoError(err)
+			t.Cleanup(func() { require.NoError(engine.Close()) })
+			_, err = engine.db.Exec("SET enable_external_file_cache = false")
+			require.NoError(err)
+			after := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+			request := PersonSearchRequest{Explore: ExploreRequest{Context: Context{After: &after}}, Query: "Bob"}
+			people, err := engine.SearchPeople(t.Context(), request)
+			require.NoError(err)
+			require.Len(people.Rows, 1)
+			assert.Equal(int64(1), people.Rows[0].ActivityCount)
+			assert.Equal(time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC), people.Rows[0].LastAt)
+
+			wantCount := int64(2)
+			wantLast := time.Date(2024, 1, 16, 10, 0, 0, 0, time.UTC)
+			if outcome == "reloads after sent publication" {
+				_, err = identityindex.Build(t.Context(), engine.db, identityindex.BuildOptions{
+					Mode: identityindex.ModeFull, StagedBaseRoot: root, OutputRoot: root,
+				})
+				require.NoError(err)
+				republishCacheStateForTest(t, root)
+			} else {
+				activity := firstRequiredParquetForTest(t, root, identityindex.DatasetActivity)
+				original, err := os.ReadFile(activity)
+				require.NoError(err)
+				unreadable := append([]byte(nil), original...)
+				copy(unreadable[len(unreadable)-4:], "FAIL")
+				require.NoError(os.WriteFile(activity, unreadable, 0o600))
+				info, err := os.Stat(activity)
+				require.NoError(err)
+				republishCacheStateForTest(t, root)
+				messages, err := engine.ListMessages(t.Context(), MessageFilter{})
+				require.NoError(err, "base messages remain available when contact refresh fails")
+				assert.Len(messages, 2)
+				_, err = engine.SearchPeople(t.Context(), request)
+				require.Error(err, "contact reads must reject stale exclusions")
+				require.ErrorContains(err, "load unsent message IDs", "surface the refresh failure instead of querying a missing exclusion table")
+				_, err = engine.ExploreSelectionStats(t.Context(), ExploreSelectionRequest{Explore: ExploreRequest{SentOnly: true}})
+				require.ErrorContains(err, "load unsent message IDs", "SentOnly analysis must reject the prior exclusion set")
+				_, err = engine.RelationshipCalendar(t.Context(), RelationshipCalendarRequest{CanonicalID: 2, Year: 2024})
+				require.ErrorContains(err, "load unsent message IDs", "calendar must reject stale owners")
+				_, err = engine.RelationshipTimeline(t.Context(), RelationshipTimelineRequest{CanonicalID: 2})
+				require.ErrorContains(err, "load unsent message IDs", "timeline must reject stale owners")
+				require.NoError(os.WriteFile(activity, original, 0o600))
+				// Restore the bytes without a new marker or shard-stat change. A failed
+				// contact refresh must retry even when the committed signature is unchanged.
+				require.NoError(os.Chtimes(activity, info.ModTime(), info.ModTime()))
+				wantCount = 1
+				wantLast = time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+			}
+			people, err = engine.SearchPeople(t.Context(), request)
+			require.NoError(err, "contact reads recover on retry")
+			require.Len(people.Rows, 1)
+			assert.Equal(wantCount, people.Rows[0].ActivityCount)
+			assert.Equal(wantLast, people.Rows[0].LastAt)
+			messages, err := engine.ListMessages(t.Context(), MessageFilter{})
+			require.NoError(err)
+			assert.Len(messages, 2)
+		})
+	}
+}
+
 // TestDuckDBEngine_QueryPathMemoizesFullFingerprintWalks is the performance
 // contract for per-query readiness validation: repeated queries against an
 // unchanged committed cache perform exactly one full dataset fingerprint walk
@@ -317,6 +608,7 @@ func TestDuckDBEngine_AnalyticalEndpointsFollowCommittedCacheSchemaSwap(t *testi
 // revalidation; and an out-of-band shard mutation without a marker change
 // still forces a full inspection on the next query and is rejected as drift.
 func TestDuckDBEngine_QueryPathMemoizesFullFingerprintWalks(t *testing.T) {
+	// serial: swaps the package global inspectDatasetFingerprint.
 	require := require.New(t)
 	assert := assert.New(t)
 

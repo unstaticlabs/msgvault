@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/testutil/email"
 )
 
@@ -41,13 +42,11 @@ func mkMailboxDir(t *testing.T, base string, emlxFiles map[string][]byte) {
 
 func openTestStore(t *testing.T) (*store.Store, string) {
 	t.Helper()
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err, "canonical fixture root")
 	dbPath := filepath.Join(tmp, "msgvault.db")
-	st, err := store.Open(dbPath)
-	require.NoError(t, err, "open store")
-	t.Cleanup(func() { _ = st.Close() })
-	require.NoError(t, st.InitSchema(), "init schema")
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
 	return st, tmp
 }
 

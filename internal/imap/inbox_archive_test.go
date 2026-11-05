@@ -123,7 +123,7 @@ func mailboxUIDs(t *testing.T, addr, mailbox string) []imapv2.UID {
 
 	var uids []imapv2.UID
 	require.NoError(t, client.withConn(ctx, func(conn *imapclient.Client) error {
-		if err := client.selectMailbox(mailbox); err != nil {
+		if err := client.selectMailbox(t.Context(), mailbox); err != nil {
 			return err
 		}
 		criteria := &imapv2.SearchCriteria{UID: []imapv2.UIDSet{{{Start: 1, Stop: 0}}}}

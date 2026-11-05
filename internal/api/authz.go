@@ -15,6 +15,18 @@ import (
 // TestEveryAPIV1OperationIsClassified keeps this table complete: a new route
 // without an entry fails closed at runtime and fails that test.
 var operationMinimumRole = map[string]authz.Role{
+	"listCalendarEvents":         authz.RoleViewer,
+	"mergeCLIAccounts":           authz.RoleAdmin,
+	"searchChats":                authz.RoleViewer,
+	"getEmbeddingStatus":         authz.RoleViewer,
+	"importMuesliRecording":      authz.RoleAdmin,
+	"getDocbankAttachmentStatus": authz.RoleAdmin,
+	"backfillDocbankAttachments": authz.RoleAdmin,
+	"findContactCandidates":      authz.RoleViewer,
+	"getPersonMessagingRoutes":   authz.RoleViewer,
+	"previewPersonTiers":         authz.RoleViewer,
+	"explainPersonTier":          authz.RoleViewer,
+
 	// Native upstream routes retain provider and source authority boundaries.
 	"approveCardDAVPublication":              authz.RoleAdmin,
 	"beginGoogleCardDAVAuthorization":        authz.RoleAdmin,

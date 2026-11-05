@@ -220,13 +220,27 @@ func CopySubsetWithOptions(
 		return nil, err
 	}
 
-	// The empty destination's schema initialization already recorded this
-	// migration. Rebuild derived meetings from copied raw, including old sources
-	// with no projection tables, through the normal resumable upgrade below.
-	if _, err := tx.Exec(`DELETE FROM applied_migrations WHERE name = ?`, migrationMeetingProjectionV1); err != nil {
+	// The empty destination's schema initialization already recorded these
+	// migrations. Rebuild derived meetings and hidden text flags from copied
+	// data, including old sources without them, through the upgrade below.
+	if _, err := tx.Exec(`DELETE FROM applied_migrations WHERE name IN (?, ?)`, migrationMeetingProjectionV1, migrationMessagesHiddenTextBackfill); err != nil {
 		_ = tx.Rollback()
 		closeAndCleanup()
-		return nil, fmt.Errorf("reset copied meeting projection migration: %w", err)
+		return nil, fmt.Errorf("reset copied derived data migrations: %w", err)
+	}
+
+	if _, err := tx.Exec(`DELETE FROM applied_migrations WHERE name = ?`, migrationCalendarEventProjectionV1); err != nil {
+		_ = tx.Rollback()
+		closeAndCleanup()
+		return nil, fmt.Errorf("reset copied calendar projection migration: %w", err)
+	}
+
+	// A source that predates matrix_encrypted_events copies placeholders the
+	// empty destination never registered.
+	if _, err := tx.Exec(`DELETE FROM applied_migrations WHERE name = ?`, migrationMatrixEncryptedEventsV1); err != nil {
+		_ = tx.Rollback()
+		closeAndCleanup()
+		return nil, fmt.Errorf("reset copied Matrix placeholder migration: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -279,6 +293,13 @@ func CopySubsetWithOptions(
 		_ = normalized.Close()
 		cleanup()
 		return nil, fmt.Errorf("reconcile copied subset derived data: %w", err)
+	}
+	// The copy bypassed UpsertMessage, which queues chats for the member
+	// projection, and schema creation ledgered the rebuild while empty.
+	if err := normalized.rebuildChatMembersContext(context.Background()); err != nil {
+		_ = normalized.Close()
+		cleanup()
+		return nil, fmt.Errorf("rebuild copied subset chat members: %w", err)
 	}
 	// Initial schema creation ledgered the inference migration before any
 	// people existed. Recheck the transferred projection for legacy source
@@ -388,6 +409,29 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 	if result.Sources, err = res.RowsAffected(); err != nil {
 		return nil, fmt.Errorf("sources rows affected: %w", err)
 	}
+	hasRouteFailures, err := sourceTableExists(tx, "source_messaging_route_failures")
+	if err != nil {
+		return nil, fmt.Errorf("check source messaging route failure schema: %w", err)
+	}
+	if hasRouteFailures {
+		if _, err := copyByName(tx, "source_messaging_route_failures",
+			"source_id IN (SELECT source_id FROM selected_message_sources)"); err != nil {
+			return nil, fmt.Errorf("copy source messaging route failures: %w", err)
+		}
+	}
+	// Route lookup reports a Beeper source awaiting re-anchor from this marker.
+	hasArchiveMetadata, err := sourceTableExists(tx, "archive_metadata")
+	if err != nil {
+		return nil, fmt.Errorf("check archive metadata schema: %w", err)
+	}
+	if hasArchiveMetadata {
+		if _, err := tx.Exec(`INSERT INTO archive_metadata (key, value)
+			SELECT key, value FROM src.archive_metadata
+			WHERE key IN (SELECT ? || CAST(source_id AS TEXT) FROM selected_message_sources)
+			ON CONFLICT (key) DO UPDATE SET value = excluded.value`, beeperReanchorMarkerPrefix); err != nil {
+			return nil, fmt.Errorf("copy Beeper re-anchor markers: %w", err)
+		}
+	}
 
 	if err := tx.QueryRow(
 		"SELECT COUNT(*) FROM selected_messages",
@@ -404,6 +448,14 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 	}
 	if result.Conversations, err = res.RowsAffected(); err != nil {
 		return nil, fmt.Errorf("conversations rows affected: %w", err)
+	}
+
+	if exists, err := sourceTableExists(tx, "conversation_policy"); err != nil {
+		return nil, fmt.Errorf("check conversation policy schema: %w", err)
+	} else if exists {
+		if _, err := copyByName(tx, "conversation_policy", `conversation_id IN (SELECT id FROM conversations)`); err != nil {
+			return nil, fmt.Errorf("copy conversation policy: %w", err)
+		}
 	}
 
 	res, err = copyByName(tx, "participants", `id IN (
@@ -756,6 +808,21 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 	if err := copyMessages(tx); err != nil {
 		return nil, err
 	}
+	// Merge-protection markers are portable owning-row state. Copy them from
+	// the selected messages directly so they remain useful even when a subset
+	// omits the detailed merge provenance that originally justified them.
+	hasArchiveOnlyMarkers, err := sourceTableExists(
+		tx, "source_merge_archive_only_messages",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("inspect source archive-only markers: %w", err)
+	}
+	if hasArchiveOnlyMarkers {
+		if _, err := copyByName(tx, "source_merge_archive_only_messages",
+			`message_id IN (SELECT id FROM selected_messages)`); err != nil {
+			return nil, fmt.Errorf("copy source archive-only markers: %w", err)
+		}
+	}
 
 	// The copy names content_changed_at whenever the source has it, which
 	// supplies the value explicitly and so bypasses the column's DEFAULT, and on
@@ -847,10 +914,6 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 	if err := copySubsetAccountIdentities(tx, options.IncludeIdentity, hasDeliveryAddresses); err != nil {
 		return nil, err
 	}
-	if err := markSubsetDraftsAuthored(tx); err != nil {
-		return nil, err
-	}
-
 	if _, err := tx.Exec(`
 		INSERT INTO reactions SELECT * FROM src.reactions
 		WHERE message_id IN (SELECT id FROM selected_messages)`); err != nil {
@@ -864,10 +927,42 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 			return nil, fmt.Errorf("copy reaction_source_events: %w", err)
 		}
 	}
+	// Matrix recovery state, so the subset can still decrypt its placeholders.
+	for _, matrix := range []struct{ table, where string }{
+		{"matrix_encrypted_events", `message_id IN (SELECT id FROM selected_messages)`},
+		{"matrix_pending_edits", `target_message_id IN (SELECT id FROM selected_messages)`},
+		{"matrix_megolm_claims", `conversation_id IN (SELECT id FROM conversations)`},
+	} {
+		if present, err := sourceTableExists(tx, matrix.table); err != nil {
+			return nil, fmt.Errorf("check %s: %w", matrix.table, err)
+		} else if present {
+			if _, err := copyByName(tx, matrix.table, matrix.where); err != nil {
+				return nil, fmt.Errorf("copy %s: %w", matrix.table, err)
+			}
+		}
+	}
 
 	if _, err := copyByName(tx, "attachments",
 		`message_id IN (SELECT id FROM selected_messages)`); err != nil {
 		return nil, fmt.Errorf("copy attachments: %w", err)
+	}
+	hasPreservedAttachmentMarkers, err := sourceTableExists(
+		tx, "source_merge_preserved_attachments",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("inspect source preserved-attachment markers: %w", err)
+	}
+	if hasPreservedAttachmentMarkers {
+		if _, err := copyByName(tx, "source_merge_preserved_attachments",
+			`attachment_id IN (
+				SELECT id FROM src.attachments
+				WHERE message_id IN (SELECT id FROM selected_messages)
+			)`); err != nil {
+			return nil, fmt.Errorf("copy source preserved-attachment markers: %w", err)
+		}
+	}
+	if err := copySourceMergeLifecycle(tx); err != nil {
+		return nil, err
 	}
 
 	res, err = copyByName(tx, "labels", `source_id IN (SELECT source_id FROM selected_message_sources)
@@ -881,12 +976,41 @@ func copyData(tx *sql.Tx, rowCount int, options CopySubsetOptions) (*CopyResult,
 	if result.Labels, err = res.RowsAffected(); err != nil {
 		return nil, fmt.Errorf("labels rows affected: %w", err)
 	}
+	if present, err := sourceTableExists(tx, "source_merge_preserved_labels"); err != nil {
+		return nil, fmt.Errorf("inspect archived label markers: %w", err)
+	} else if present {
+		if _, err := copyByName(tx, "source_merge_preserved_labels",
+			`label_id IN (SELECT id FROM labels)`); err != nil {
+			return nil, fmt.Errorf("copy archived label markers: %w", err)
+		}
+	}
 
 	if _, err := tx.Exec(`
 		INSERT INTO message_labels SELECT * FROM src.message_labels
 		WHERE message_id IN (SELECT id FROM selected_messages)
 		  AND label_id IN (SELECT id FROM labels)`); err != nil {
 		return nil, fmt.Errorf("copy message_labels: %w", err)
+	}
+	if present, err := sourceTableExists(tx, "imap_message_memberships"); err != nil {
+		return nil, fmt.Errorf("inspect IMAP memberships: %w", err)
+	} else if present {
+		if _, err := copyByName(tx, "imap_message_memberships",
+			`message_id IN (SELECT id FROM selected_messages) AND source_id IN (SELECT id FROM sources)`); err != nil {
+			return nil, fmt.Errorf("copy IMAP memberships: %w", err)
+		}
+	}
+
+	preservedLabels, err := preserveSubsetDraftEvidence(tx)
+	if err != nil {
+		return nil, fmt.Errorf("preserve subset draft evidence: %w", err)
+	}
+	result.Labels += preservedLabels
+	if present, err := sourceTableExists(tx, "loop_decisions"); err != nil {
+		return nil, err
+	} else if present {
+		if _, err := copyByName(tx, "loop_decisions", `message_id IN (SELECT id FROM selected_messages)`); err != nil {
+			return nil, fmt.Errorf("copy loop decisions: %w", err)
+		}
 	}
 
 	// A Matrix cursor can carry pending relation events from rooms outside
@@ -2488,6 +2612,77 @@ func copyByName(tx *sql.Tx, table, where string, args ...any) (sql.Result, error
 	return res, nil
 }
 
+// copySourceMergeLifecycle preserves source settings and detailed merge audit
+// rows only when every foreign-key endpoint remains inside the subset. The
+// portable message and attachment markers are copied earlier by their owning
+// rows, so incomplete audit packets do not weaken merge protection.
+func copySourceMergeLifecycle(tx *sql.Tx) error {
+	hasSettings, err := sourceTableExists(tx, "source_settings")
+	if err != nil {
+		return fmt.Errorf("inspect source settings schema: %w", err)
+	}
+	if hasSettings {
+		where := `source_id IN (SELECT id FROM sources)`
+		hasMergeTarget, err := sourceColumnExists(
+			tx, "source_settings", "merged_into_source_id",
+		)
+		if err != nil {
+			return fmt.Errorf("inspect source lifecycle reference: %w", err)
+		}
+		if hasMergeTarget {
+			where += ` AND (merged_into_source_id IS NULL OR merged_into_source_id IN (
+				SELECT id FROM sources
+			))`
+		}
+		if _, err := copyByName(tx, "source_settings", where); err != nil {
+			return fmt.Errorf("copy source settings: %w", err)
+		}
+	}
+
+	for _, record := range []struct {
+		table string
+		where string
+	}{
+		{
+			table: "source_merge_messages",
+			where: `message_id IN (SELECT id FROM selected_messages)
+				AND original_source_id IN (SELECT id FROM sources)
+				AND (survivor_message_id IS NULL OR survivor_message_id IN (
+					SELECT id FROM messages
+				))`,
+		},
+		{
+			table: "source_merge_conversations",
+			where: `conversation_id IN (SELECT id FROM conversations)
+				AND original_source_id IN (SELECT id FROM sources)
+				AND destination_conversation_id IN (SELECT id FROM conversations)`,
+		},
+		{
+			table: "source_merge_attachments",
+			where: `attachment_id IN (SELECT id FROM attachments)
+				AND original_attachment_id IN (SELECT id FROM attachments)
+				AND original_source_id IN (SELECT id FROM sources)`,
+		},
+		{
+			table: "source_merges",
+			where: `from_source_id IN (SELECT id FROM sources)
+				AND into_source_id IN (SELECT id FROM sources)`,
+		},
+	} {
+		exists, err := sourceTableExists(tx, record.table)
+		if err != nil {
+			return fmt.Errorf("inspect %s schema: %w", record.table, err)
+		}
+		if !exists {
+			continue
+		}
+		if _, err := copyByName(tx, record.table, record.where); err != nil {
+			return fmt.Errorf("copy %s: %w", record.table, err)
+		}
+	}
+	return nil
+}
+
 func copyByNameWithCommunicationServiceMap(
 	tx *sql.Tx, table, where string,
 ) error {
@@ -2863,17 +3058,58 @@ func subsetPendingDeliveryAddresses(tx *sql.Tx) ([]subsetIdentityKey, error) {
 	return out, rows.Err()
 }
 
-// markSubsetDraftsAuthored records draft authorship on included messages
-// whose draft evidence the subset does not copy: IMAP \Draft flags and draft
-// records. A message the source has not yet derived would otherwise lose it,
-// and deriving it in the subset could count the draft as received mail.
-func markSubsetDraftsAuthored(tx *sql.Tx) error {
+// Managed draft records stay behind. Keep their authorship and any draft
+// evidence that copied labels and IMAP memberships do not already preserve.
+func preserveSubsetDraftEvidence(tx *sql.Tx) (int64, error) {
+	drafts := `SELECT m.id FROM src.messages m JOIN src.sources s ON s.id = m.source_id
+		WHERE m.id IN (SELECT id FROM selected_messages)
+		  AND ` + draftEvidenceInSchemaSQL("src.", "m", "s")
 	if _, err := tx.Exec(`UPDATE messages SET draft_authored = TRUE
-		WHERE draft_authored = FALSE AND id IN (
-			SELECT m.id FROM src.messages m JOIN src.sources s ON s.id = m.source_id
-			WHERE m.id IN (SELECT id FROM selected_messages)
-			  AND ` + draftEvidenceInSchemaSQL("src.", "m", "s") + `)`); err != nil {
-		return fmt.Errorf("record subset draft authorship: %w", err)
+		WHERE draft_authored = FALSE AND id IN (` + drafts + `)`); err != nil {
+		return 0, err
 	}
-	return nil
+	missing := `SELECT m.id, m.source_id FROM messages m JOIN sources s ON s.id = m.source_id
+		WHERE m.id IN (` + drafts + `) AND NOT ` + draftEvidenceSQL("m", "s")
+	rows, err := tx.Query(`SELECT source_id FROM (` + missing + `) GROUP BY source_id`)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+	var sourceIDs []int64
+	for rows.Next() {
+		var sourceID int64
+		if err := rows.Scan(&sourceID); err != nil {
+			return 0, err
+		}
+		sourceIDs = append(sourceIDs, sourceID)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, sourceID := range sourceIDs {
+		name := fmt.Sprintf("msgvault-archive:%d:draft", sourceID)
+		for {
+			var used bool
+			if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM labels WHERE source_id = ? AND name = ?)`, sourceID, name).Scan(&used); err != nil {
+				return 0, err
+			}
+			if !used {
+				break
+			}
+			name += ":archive"
+		}
+		var labelID int64
+		if err := tx.QueryRow(`INSERT INTO labels(source_id, name, system_role)
+			VALUES (?, ?, 'drafts') RETURNING id`, sourceID, name).Scan(&labelID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO source_merge_preserved_labels(label_id) VALUES (?)`, labelID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO message_labels(message_id, label_id)
+			SELECT id, ? FROM (`+missing+`) WHERE source_id = ?`, labelID, sourceID); err != nil {
+			return 0, err
+		}
+	}
+	return int64(len(sourceIDs)), nil
 }

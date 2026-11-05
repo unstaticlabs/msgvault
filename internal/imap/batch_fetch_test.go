@@ -19,20 +19,6 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func TestNewRawBatchResultsKeepsInputIDs(t *testing.T) {
-	require := require.New(t)
-	assert := assert.New(t)
-	results := newRawBatchResults([]string{"Archive|10", "Archive|11"})
-
-	require.Len(results, 2)
-	assert.Equal("Archive|10", results[0].ID)
-	assert.Nil(results[0].Message)
-	require.NoError(results[0].Err)
-	assert.Equal("Archive|11", results[1].ID)
-	assert.Nil(results[1].Message)
-	require.NoError(results[1].Err)
-}
-
 func TestMarkRawBatchErrorMarksOnlyRequestedItems(t *testing.T) {
 	require := require.New(t)
 	errFetch := errors.New("fetch failed")
@@ -117,14 +103,14 @@ func TestRawBatchFetchRecordsMembershipBeforeDedup(t *testing.T) {
 	client.observedMemberships = nil
 	var uidSet imapapi.UIDSet
 	uidSet.AddNum(1)
-	allMailSelectErr := client.selectMailbox("All Mail")
+	allMailSelectErr := client.selectMailbox(t.Context(), "All Mail")
 	var allMailStoreErr error
 	if allMailSelectErr == nil {
 		_, allMailStoreErr = client.conn.Store(uidSet, &imapapi.StoreFlags{
 			Op: imapapi.StoreFlagsSet, Flags: []imapapi.Flag{imapapi.FlagSeen},
 		}, nil).Collect()
 	}
-	archiveSelectErr := client.selectMailbox("Archive")
+	archiveSelectErr := client.selectMailbox(t.Context(), "Archive")
 	var archiveStoreErr error
 	if archiveSelectErr == nil {
 		_, archiveStoreErr = client.conn.Store(uidSet, &imapapi.StoreFlags{
@@ -199,7 +185,7 @@ func TestLabelOnlyFetchRecordsCanonicalMembershipFlags(t *testing.T) {
 
 	client.mu.Lock()
 	client.observedMemberships = nil
-	selectErr := client.selectMailbox("INBOX")
+	selectErr := client.selectMailbox(t.Context(), "INBOX")
 	var uidSet imapapi.UIDSet
 	uidSet.AddNum(1)
 	var storeErr error

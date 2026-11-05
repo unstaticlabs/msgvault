@@ -1,209 +1,353 @@
 ---
-last_edited: "2026-10-14"
+last_edited: "2026-11-04"
 title: Changelog
 description: Release history for msgvault
 ---
 
 All notable changes to msgvault, grouped by release.
 
-## Unreleased
+## Unreleased downstream build
 
-- [Chatwoot](guides/chatwoot.md) archives shared inboxes, files, source transcripts, and linked call meetings. API schema 3.18.0 adds optional `related_message_id`, which links a Chatwoot call message and its meeting.
-- Remote edits update source-owned values on published CardDAV imports while preserving unrelated local values. Edits that would overwrite another owner create a conflict.
-- [Everything search](web-ui.md#recording-matches) shows recording transcript matches for plain-word Full text queries and supports one Person filter. API schema 3.11.0 adds `participant_id` to media search, `GET /media/search/status`, source filename, title and date to media search results and optional `conversation_title` to message detail.
+This build combines upstream 0.23.0 and subsequent fixes through `c3afaa35`
+with the existing downstream Inbox, calendar and multi-user workflows.
 
-- Root help groups commands by task and includes start-here commands. Subcommand
-  help lists global flags compactly and explains common ID and output paths.
-- Unknown subcommands under help-only groups now exit 1 with suggestions;
-  `person find` previously printed help and exited 0.
-- `export-messages` reports missing `--start` and `--end` before contacting the
-  daemon.
+- Browse the redesigned Messages, People, Files and Sources workspaces while
+  retaining cross-account Inbox/read filters and related-email grouping.
+- Keep exact-message Inbox archiving, saved-filter recovery and calendar coverage.
+- Retain Pocket ID sign-in, named API keys and each user's permitted sources
+  across the browser, sidecar and native MCP endpoints.
+- Search and sync large archives with upstream query, indexing and IMAP
+  improvements. New upstream importers and MCP discovery are included.
+- Install downstream binaries and images from `unstaticlabs/msgvault`.
+  The personal fork is used for contributions and does not publish this build.
 
-- The HTTP API separates observed participant analytics from durable curated
-  people, crossing the API schema 2.0 compatibility boundary at 2.1.0. The
-  current unreleased API schema is 2.21.0. Version 2.14.0 also replaces the CardDAV
-  publication and conflict response shapes with bounded projections that
-  omit raw vCards and resource hrefs. The
-  analytical routes formerly under `/api/v1/people/*` (search, detail,
-  summary, timeline, files) now live under `/api/v1/participants/*`, and the
-  durable person routes formerly under `/api/v1/persons/*` now live under
-  `/api/v1/people/*`. The old paths are removed, not aliased: `/api/v1/people`
-  changed meaning, so an alias would silently serve differently shaped data.
-  The CLI and daemon refuse to interoperate across the 1.x/2.x schema
-  boundary with a clear error — upgrade both together. This covers configured
-  remotes too: the daemon reports `api_schema_version` on authenticated
-  `/api/v1/health`, and a CLI in remote mode verifies it on connect,
-  rejecting daemons that predate schema 2.0.
-- SQLite [metadata searches](usage/searching.md#search-metadata) use substring
-  indexes. Archive initialization backfills metadata once; large archives need
-  additional startup time and disk space.
+## 0.23.0
+<small>2026-11-04</small>
 
-- Go programs can use msgvault as a library through `go.kenn.io/msgvault/pkg/archive`.
-  It sets up and opens SQLite or PostgreSQL archives, runs the Slack and Discord
-  importers with caller-supplied credentials, purges channels and sources, and
-  mounts the HTTP API in the program's own server. PostgreSQL-only programs can
-  build without CGO. See the [Go library guide](guides/embedding.md).
+Find your way through a redesigned Web UI built around Messages, People, Files,
+and Sources. Bring Telegram, Inline, and Pocket into your archive, recover
+encrypted Matrix history, and connect AI assistants straight to the daemon.
+Large archives open, search, and refresh faster.
 
-- [Read-only remote clients](guides/remote-deployment.md#read-only-remote-clients) get separate reader credentials with response limits and optional collection writes.
-- Single-message [export-eml](cli-reference.md#export-eml) refuses ambiguous provider IDs for owner and reader keys.
-- Consume streamed [export-attachment](cli-reference.md#export-attachment) stdout only after the command succeeds.
-- [Omi](usage/meetings.md#omi) conversations can sync into the local archive with summaries, action items, and speaker transcripts. Hosted and self-hosted sources share resumable sync and per-key request pacing.
+[GitHub release](https://github.com/kenn-io/msgvault/releases/tag/v0.23.0) ·
+[All changes since 0.22.0](https://github.com/kenn-io/msgvault/compare/v0.22.0...v0.23.0)
 
-- Agent tokens grant scoped archive reads through the remote CLI and MCP, with optional `--expires`. Search responses report index uncertainty; owner searches retain automatic index repair.
+### New features
 
-- Applications can compare a candidate binary's expected archive version with
-  the stored version using `schema-version`, then run `migrate` before replacing
-  the executable. See [the upgrade procedure](setup.md#migrate-before-replacing-the-executable).
+- Import Telegram Desktop JSON exports with
+  [`msgvault import-telegram <export-dir>`](usage/text-messages.md#import-telegram).
+  Re-imports add new messages and missing media while preserving previously
+  archived text. Single-chat exports require `--me`.
+- Archive [Inline](usage/inline.md) chats and threads with scheduled, resumable
+  sync and attachment capture. Browser OAuth is the default connection; an
+  authenticated Inline CLI connection is also available.
+- Add personal [Pocket](usage/meetings.md#pocket) meeting sources with
+  `add-pocket` and `sync-pocket` to archive transcripts and recorded actions.
+  Audio downloads and organization API keys are not included.
+- Recover encrypted [Matrix](usage/matrix.md) history from your account's
+  server-side key backup, including edits, reactions, and replies. Setup
+  requires a recovery secret, or `--skip-key-backup` to retain placeholders.
+  Keys absent from the backup remain unavailable.
+- Keep locally available iMessage photos, videos, and voice notes with
+  [`import-imessage`](usage/text-messages.md#import-imessage). Configure
+  `[imessage].media_max_participants` and `max_media_mb`, or pass
+  `--max-media-mb` for one import. Defaults remain 20 participants and 250 MiB
+  per file.
+- List archived calendar events with
+  [`msgvault calendar events --from <date> --to <date>`](usage/calendar.md#list-archived-events).
+  Results expand repeats, show moved meetings at their new times, and mark
+  cancellations. Existing Google Calendar archives need no re-sync.
+- Browse [people and domains](web-ui.md#people-and-domains) in one People
+  workspace, with messages, files, calendars, and editable profile details
+  together. Saved profiles remain available even without archived messages.
+- Review possible duplicates through **People → Filter → Possible duplicates**.
+  Merge profiles, keep them separate, undo a decision, or split a merged profile
+  through History. See [saved profiles and possible duplicates](web-ui.md#saved-profiles-and-possible-duplicates).
+- Preview contact tiers with `person tiers preview` and inspect the reasons with
+  `person tiers explain <person-id>`. Tiers reflect message exchanges, shared
+  meetings, and qualifying answered calls. Previewing does not track anyone.
+  See [choose people to maintain](usage/people-automation.md#choose-people-to-maintain).
+- Track or untrack several people in one command by passing multiple IDs to
+  `person track` or `person untrack`.
+- Find archived chats across networks with [`find-chat`](cli-reference.md#find-chat)
+  and MCP `find_chat`. Results include network labels and a message reference
+  for opening the chat.
+- Search text inside mirrored PDFs and documents through
+  [media search](usage/searching.md#search-mirrored-attachment-text), the HTTP
+  API, and MCP. Attachment results open their messages and require attachment
+  mirroring.
+- Enable [local semantic search](usage/vector-search.md#enable) without setting
+  up an embedding server. Switching from Ollama's `nomic-embed-text` preserves
+  the existing index; switching from another model asks before rebuilding it.
+- Connect an authenticated Streamable HTTP MCP client directly to
+  `msgvault serve` at [`/mcp`](usage/chat.md#native-daemon-endpoints). Reads
+  require the owner bearer key. `--mcp-allow-writes` enables a separate
+  `/mcp/writes` catalog, with additional write families requiring their own flags.
+- Read the MCP connection and safety guide offline with
+  [`msgvault quickstart --mcp`](cli-reference.md#quickstart), without a
+  configured archive or running daemon.
+- Read archive totals with [`msgvault stats --json`](cli-reference.md#stats),
+  including active and source-deleted message counts and the scope they cover.
+- Find saved people with `person directory --query` or literal,
+  case-insensitive `--address` filtering. Address filtering is also available
+  through the Directory API and MCP. See [People](usage/people.md).
+- Inspect and save room policy overrides with
+  [`msgvault policy list`, `set`, and `reset`](cli-reference.md#policy). This
+  release does not enforce those tiers or hide rooms.
 
-- Roles and named API keys. `[[auth.api_keys]]` entries carry a `viewer`,
-  `member`, or `admin` role while `[server].api_key` stays the administrator.
-  The daemon answers `403 forbidden` for operations a role does not cover,
-  reports the caller on `GET /api/v1/me` and in the session bootstrap, and the
-  Web UI shows who is signed in with a sign-out control. `msgvault mcp --http`
-  accepts named keys and exposes each caller only the tools its role permits.
-  `[auth] api_key_login = false` hides the API-key login form. API schema
-  2.21.0 (published in this repository as 2.17.0 before the fork caught up with
-  upstream, which had used that number for source scoping).
+### Improvements
 
-- Single sign-on. `[auth.oidc]` signs people in through an OpenID Connect
-  provider (authorization code with PKCE) and maps the provider's groups to
-  roles; the Web UI offers "Sign in with <provider>". The same provider's
-  access tokens authenticate API requests and `msgvault mcp --http`, which now
-  publishes RFC 9728 protected-resource metadata so Claude Code and claude.ai
-  connectors sign in through the provider; tokens need the `msgvault:read`
-  scope and `msgvault:write` for mutations, and clients are asked for both
-  alongside the identity scopes. Sign-ins are recorded in new
-  `users` and `user_identities` tables. `[auth.oidc]`, `[auth] api_key_login`,
-  and `[server] trusted_proxies` accept environment overrides
-  (`MSGVAULT_AUTH_OIDC_*`, `MSGVAULT_AUTH_API_KEY_LOGIN`,
-  `MSGVAULT_SERVER_TRUSTED_PROXIES`) for container deployments, which can
-  also declare named keys with `MSGVAULT_AUTH_API_KEYS` (a JSON array of the
-  same entries) and `[remote]` with `MSGVAULT_REMOTE_URL`,
-  `MSGVAULT_REMOTE_API_KEY`, and `MSGVAULT_REMOTE_ALLOW_INSECURE`.
+- Navigate the Web UI through Messages, People, Files, and Sources. Saved
+  searches live in the sidebar, and the footer status dot opens queued jobs,
+  running jobs, failures, and past runs. See the [Web UI guide](web-ui.md).
+- Save ordinary settings through one **Save changes** bar. Settings opens on
+  Overview, warns before leaving with unsaved edits, and identifies changes
+  that require a restart.
+- Find attachments, recordings, linked tasks, and actions under each message.
+  Message menus offer original downloads, meeting export, text or HTML
+  switching, and **Add to task** where available.
+- Manage mail and Contacts sync independently in Sources. Staged deletion
+  batches show their date, message count, and account, and staging opens a
+  review dialog before `msgvault delete-staged` performs deletion.
+- Load message lists, searches, statistics, person files, and large conversation
+  windows faster. In a SQLite benchmark, opening a message in a million-message
+  conversation drops from about two seconds to 98 ms.
+- Refresh analytics faster after sync on Linux, macOS, and Windows. Measured
+  incremental updates after one added message take 23% less time on Linux and
+  29% less on macOS and Windows.
+- Build analytics with a memory budget based on available resources unless
+  explicitly configured. Large chat archives and linked participant sets use
+  less memory, and exhaustion errors identify the limits and retry command.
+- Import SQLite mailboxes and growing group chats faster. Participant merges,
+  attachment verification, and message deletion or re-embedding also avoid
+  repeated work across unrelated archive data.
+- Select verification samples faster with `msgvault verify`. Selecting 1,000
+  samples from a million-message SQLite archive takes about 233 ms instead of
+  95 seconds in benchmarks.
+- Let queued mail and contact syncs run during large indexing jobs. Automatic
+  indexing yields in bounded passes, and `embeddings optimize` allows archive
+  writes between preparation batches.
+- Choose activity day boundaries during `msgvault setup`. Restart the daemon
+  after changing the time zone; later activity updates re-date existing rows.
+- See which Beeper chats failed and which command retries their messages or
+  media. Slack sync and media backfill summaries also include an example
+  download error.
 
-- Per-user visible sources. Administrators bind sources to users
-  (`msgvault user`, Settings → Users, `GET/PUT/PATCH /api/v1/users…`), and
-  every non-administrator — a signed-in person, a key bound to a `user`, or a
-  token — sees only those sources across search, Explore, aggregates, message
-  detail, text views, documents, visual search, source status, and the MCP
-  tools. The people graph, attachment blobs, and Saved View definitions stay
-  shared by design; `POST /api/v1/query` stays administrator-only. The MCP
-  listener forwards the caller in `X-Msgvault-On-Behalf-Of`, which the daemon
-  honours from admin keys marked `on_behalf_of`. New `user_sources` table.
+### Bug fixes
 
-- MCP users are created on first use. `msgvault mcp --http` forwards the
-  identity it verified through the provider (`X-Msgvault-On-Behalf-Of-Identity`:
-  provider account, display name, and the role derived from the groups) beside
-  `X-Msgvault-On-Behalf-Of`, and the daemon records it as a sign-in from admin
-  keys marked `on_behalf_of`, so a person connecting from Claude no longer has
-  to open the Web UI first. When the daemon still refuses the person — an
-  older daemon, a key without `on_behalf_of`, or a disabled user — tool calls
-  answer an `acting_user_refused` error that asks for one web sign-in instead
-  of a generic internal error. A disabled user acting through the sidecar is
-  now refused whatever their role.
-- The Email TUI scope selector now exposes named collections. Collection
-  member source IDs flow through aggregate, message, fast-search, statistics,
-  and deletion-target reads, with API schema 2.17.0 gating and fail-closed
-  response echoes. Empty collections match nothing. Email, Texts, and Meetings
-  have independent selectors. Changing the Email scope returns to the top-level
-  view. Multi-source collections offer Fast search only, and deletion staging
-  requires the selected messages to belong to one source.
-- Owned-address changes recheck only matching messages. SQLite upgrades may
-  take several minutes to build a one-time From-address index. See
-  [startup progress](guides/daemon-migration.md#what-you-will-see).
+- Keep previously indexed messages searchable across daemon restarts while
+  keyword backfill fills remaining gaps.
+- Find newly imported or edited iMessage, SMS, and Google Voice messages by
+  keyword immediately. Re-run imports or the normal search backfill to fill
+  existing omissions.
+- Remove archived iMessage text when a re-import finds that the source body is
+  empty, including after an unsend. The message record remains in the archive.
+- Include Spam and Trash in Gmail full sync. To recover historical omissions,
+  run one unfiltered, unlimited `sync-full` without query, date, or limit filters.
+- Retry failed Gmail downloads and saves during later incremental syncs, even
+  without new mail. Sync stops before advancing its checkpoint if it cannot save
+  the failure record. Older failures outside the retained retry history still
+  require a full sync.
+- Respect saved IMAP folder exclusions during scheduled and manual syncs.
+  Configure [`sync.imap_skip_folders`](configuration.md#sync) by account;
+  explicit folder flags replace those exclusions for one run. Filtered syncs
+  pause deletion tracking.
+- Wait and retry when an IMAP server rejects reads because of command limits.
+  Set `[sync].imap_max_commands_per_minute` and restart the daemon to enable
+  pacing. The default `0` leaves pacing off.
+- Keep drafts and unsent messages out of relationship activity and person file
+  listings while retaining them in general search. Re-import Synctech backups to
+  correct older draft, queued, and failed text classifications.
+- Load person calendars, timelines, and domain details without the previous
+  memory exhaustion on large chat archives. The TUI relationship calendar also
+  loads with default system time zones; Windows groups its days in UTC and
+  labels that choice.
+- Show readable text for HTML-only email in the TUI and `show-message` through
+  the daemon. JSON output keeps HTML in `body_html` instead of mislabeling it as
+  plain text.
+- Flag messages whose HTML appears to hide readable text in MCP and CLI output.
+  Detection checks inline styles and legacy attributes, so an unset flag does
+  not guarantee that all text was visible.
+- Stage every source-deletable match through MCP `stage_deletion`, up to
+  100,000, or refuse without saving a batch. Larger queries receive guidance to
+  narrow the search.
+- Reconnect local MCP proxies after a daemon restart without restarting the proxy.
+- Leave supervised daemons for systemd or launchd to restart after
+  `msgvault update`. Use `--no-restart` to leave a self-started daemon stopped.
+  Homebrew installations receive `brew upgrade msgvault` guidance instead of
+  self-updating.
+- Preserve the host daemon's runtime record when commands run inside a
+  PID-namespace sandbox.
+- Report empty stored originals as sample errors in `verify` and as
+  inconclusive in Gmail audits. Verification sample errors appear in the summary
+  without changing the exit status.
+- Restore Mistral document extraction with `mistral-ocr-4-1`. Update or remove
+  an explicit `mistral-ocr-4-0` setting, then run
+  `msgvault documents probe-mistral` and `msgvault documents consent-mistral` again.
+- Process long PDFs through Docling in 50-page jobs and reuse saved progress
+  after restarts. Saved range text is plaintext; status and backups disclose it,
+  and `documents purge-derived` removes it.
+- Complete embedding builds when a message contains only invisible or control
+  characters by skipping empty content.
+- Reject schedules with out-of-range wrapped values in both Settings and the
+  daemon. Rewrite previously saved invalid ranges, such as `60-5`, using valid
+  field values.
+- Apply HTML sanitizer bypass fixes to email rendering in the Web UI.
 
-- msgvault sends anonymous usage telemetry: a daemon ping at startup and once
-  each later UTC day, and an `app_opened` event the web UI reports through the
-  daemon when it opens and on its first focus on a later UTC day. Events carry
-  the version, commit, OS, architecture and a random install ID, never archive
-  content. `[telemetry] enabled = false` in `config.toml` or
-  `MSGVAULT_TELEMETRY_ENABLED=0` turns it off, and `serve` says so at startup
-  while it's on. See [telemetry](configuration.md#telemetry).
+### Acknowledgements
 
-- `list-accounts` and `embeddings list` keep working while a sync, import, or
-  embedding build runs. Accounts whose counts aren't ready yet show `pending`.
-- `search --help` explains the fts, vector and hybrid modes, and an empty
-  keyword search suggests `--mode hybrid` when embeddings can answer it. Search
-  adds `--snippet`, `--sort date` for semantic pages, and a `filename:` operator
-  that needs daemon API 3.14.0. `show` aliases `show-message`, which gains
-  `--body-only` and `--strip-quoted`, and `show-thread` reads a conversation
-  oldest first with quoted history removed. The reading view keeps complete
-  URLs and uncertain wrapped headers.
+Thanks to everyone who contributed to this release:
 
-- Granola and Circleback save meetings through the same path as Muesli, Notion,
-  and meeting file import. Organizer and attendee names are trimmed, a value
-  without `@` is no longer saved as a participant, a repeated attendee appears
-  once in search, and recipient rows record the address. Existing meetings keep
-  their earlier form until they change; run `sync-granola --full` or
-  `sync-circleback --full` to rewrite them. Granola now skips unchanged notes
-  instead of rewriting them.
+- [@AndrewWiggins](https://github.com/AndrewWiggins) for complete Gmail full syncs that include Spam and Trash, retrying failed Gmail downloads, and verifying empty stored originals.
+- [@cpcloud](https://github.com/cpcloud) for faster person and domain pages, lower Explore memory use, consistent page headers, and CI hardening.
+- [@elviskahoro](https://github.com/elviskahoro) for keeping sync progress lines aligned.
+- [@eserie](https://github.com/eserie) for decrypting Matrix history from the account's key backup.
+- [@franklintra](https://github.com/franklintra) for full-height saved view rows.
+- [@hansn74](https://github.com/hansn74) for faster attachment verification and fixing empty embedding inputs.
+- [@mariusvniekerk](https://github.com/mariusvniekerk) for running archive reads in parallel, restoring Mistral document extraction, Web UI security updates, and shared build caches.
+- [@morajabi](https://github.com/morajabi) for the Inline source.
+- [@rodboev](https://github.com/rodboev) for the redesigned Web UI, Telegram imports, attachment text search, shared local embeddings, saved IMAP folder exclusions, long Docling PDFs, and many speed and memory improvements.
+- [@salmonumbrella](https://github.com/salmonumbrella) for Pocket meetings, native daemon MCP, archived calendar events, finding chats, the MCP quickstart, IMAP command-limit pacing, and analytics memory budgets.
+- [@sweenzor](https://github.com/sweenzor) for listing the Beeper chats behind sync errors.
+- [@wesm](https://github.com/wesm) for contact tiers, iMessage attachments, tracking several people at once, room policy overrides, and calendar event state in message details.
 
-- Find mail by the address that received it: `received:work@example.org` finds
-  forwarded and Bcc'd mail delivered to a confirmed alias, and
-  `account:work@example.org` adds sent mail and calendar events. Older mail
-  fills in on each source's next sync or import, or with
-  `msgvault repair-derived`. API schema 3.5.0; older daemons refuse these
-  operators.
-- Pick a receiving address or the unattributed mail of a source in the TUI
-  account picker, the Web UI's Explore account filter, and the MCP `account`
-  argument; vector and hybrid search accept `received:` and `account:`. API
-  schema 3.11.0.
-- Rerunning `import-whatsapp` on an Apple `ChatStorage.sqlite` reads only the
-  chats that changed since the last successful import and writes only new and
-  changed messages, instead of rewriting the whole archive. It picks up edits
-  and senders that `LID.sqlite` resolves later. `--full` compares every message.
-- `import-whatsapp` accepts `--after` and `--before` for Apple databases, so a
-  first import can fetch recent messages before the full run. Android imports
-  reject both flags.
-- People provider keys stored with `msgvault person provider add --api-key-stdin`
-  or the Web UI now work on Windows. Every stored people provider key lives in
-  `tokens/provider-credentials.json` with the other provider keys, and keys an
-  older release kept under `tokens/people-providers/` move there the first time
-  msgvault uses the profile. After a people key is stored this way, an older
-  release rejects the credential file, so downgrading makes every stored
-  provider key unavailable. Before downgrading, run
-  `msgvault person provider remove <name>` for each profile with a stored key.
-  `remove` also deletes a stored key whose profile is no longer in the config.
-- [Calendar event control](usage/calendar.md#control-events-unreleased) adds
-  create, update, delete, move, self RSVP, and availability commands, plus HTTP
-  and MCP interfaces. Write consent and exact source permissions are opt-in;
-  guest notifications default to `none`. The daemon verifies calendar access
-  and archives successful changes immediately.
-- [Twilio calls](usage/meetings.md#twilio) archive as searchable meetings with
-  their recordings saved locally.
-- [Kata issues](usage/kata-issues.md) can quote an exact passage from a
-  message, transcript, or file, from the Web UI, `msgvault kata`, HTTP, or MCP
-  (`--allow-kata-writes`). Retrying a create returns the original issue, and
-  `msgvault kata issues` finds the issues, open or closed, that already cite
-  a message or file. `msgvault kata context` reads back each passage an issue
-  cites, with its state in the archive today and the text around it.
-  Agents can also cite the Docbank transcript of a delivered voice note.
-  Person agenda writes now work with a static Kata token.
-- [`message-tags`](cli-reference.md#message-tags) reads and edits Gmail
-  labels, IMAP keywords, and Microsoft Graph categories on one archived message
-  through the CLI, HTTP API, and MCP, and saves the verified result to the
-  archive. Microsoft Graph sync now archives categories, so the first sync of an
-  existing Microsoft account after upgrading walks every folder once.
-- Adding Calendar to a Gmail token recognizes Google's short and expanded
-  `email`/`profile` scope names, avoiding false missing-scope errors on re-consent.
-- Prepare and manage drafts through MCP with the caller's own daemon permissions, including restricted agent grants. Msgvault never sends.
-- `person identities` and `GET /api/v1/people/{id}/identities` list the email
-  addresses, phone numbers, and chat IDs your archive holds for a person, so
-  you can pick an email address for `draft-compose --to`. Phone numbers and
-  chat IDs show as unsupported. See
-  [Draft to a person](cli-reference.md#draft-to-a-person).
-- CardDAV sync supports Microsoft 365 and Outlook.com contacts through
-  Microsoft Graph. `msgvault add-carddav --microsoft <email>` signs in and
-  saves the connection. Contacts and each folder inside it are address books.
-  See [Microsoft contacts](usage/people-carddav.md#microsoft-contacts).
-- A CardDAV update or unpublish attempted while the Google sign-in is missing
-  goes out after sign-in, instead of turning into a conflict to review.
-- **Recording references:** Route Loom/Cap links and native Teams recording pointers to Docbank in the background with separate reference consent, including existing messages. Self-hosted Cap requires an exact configured origin.
-- **Transcripts beside recordings:** the Web reader shows each recording's
-  Docbank transcript, or why there isn't one, under the expanded message.
-  `GET /api/v1/messages/{id}/recordings` serves the same list (API schema 3.6.0).
+---
 
-- **Search spoken words:** `msgvault media search`, MCP `search_media`, and `GET /api/v1/media/search` find current recording transcripts and show partial coverage when some recordings aren't searchable (API schema 3.7.0).
+## 0.22.0
+<small>2026-10-23</small>
+
+Archive Matrix rooms, Plaud, Twenty, Omi, Chatwoot, and Twilio, search spoken
+words in recordings, and control calendar events from the CLI, HTTP API, and
+MCP. This release builds msgvault with Go 1.27.3, whose `crypto/x509` rejects
+the compromised intermediate certificates listed in
+[GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809) for every TLS connection,
+even before the operating system's trust store is updated.
+
+[GitHub release](https://github.com/kenn-io/msgvault/releases/tag/v0.22.0) ·
+[All changes since 0.21.0](https://github.com/kenn-io/msgvault/compare/v0.21.0...v0.22.0)
+
+Known issue: `documents` commands that use Mistral fail in 0.22.0 because
+Mistral retired the pinned `mistral-ocr-4-0` model. 0.23.0 fixes this.
+
+### Before upgrading
+
+- Cron schedules now use go-cron. Schedules with a step as large as its range, such as `*/60 * * * *`, and an empty zone name, such as `CRON_TZ= 0 3 * * *`, are rejected. Replace them first, for example with `0 * * * *` and `CRON_TZ=UTC 0 3 * * *`.
+- A standalone ` | ` between full-text searches now means OR. Quote it as `"a | b"` to search for the literal text. Saved Views created before this release keep the literal meaning.
+- Stored people provider keys move into `tokens/provider-credentials.json` the first time msgvault uses them. An older release cannot read that file, so before downgrading run `msgvault person provider remove <name>` for each profile with a stored key.
+- A stored person-enrichment suppression key now overrides `suppression_key_env`. Make the two agree before upgrading.
+- A server bound to a non-loopback address without an API key now generates `tokens/server-api-key` and reuses it, so the Web UI asks for a login on `127.0.0.1` too.
+- msgvault now sends anonymous usage telemetry. Turn it off with `[telemetry] enabled = false`, `MSGVAULT_TELEMETRY_ENABLED=0` or `DO_NOT_TRACK=1`.
+
+### New features
+
+- Archive joined Matrix and Element rooms from any homeserver with `msgvault add-matrix --homeserver <url> --user-id <id>` and `sync-matrix`, on demand or on the `[matrix]` schedule. Edits show their newest text, and redacted edits and reactions are removed. Only plaintext rooms are supported.
+- Archive Plaud cloud recordings, full transcripts with speaker labels, and every note tab as searchable meetings with `add-plaud` and `sync-plaud`. `--limit`, `--after`, `--full` and `--probe` bound, filter, repair or dry-run a sync. Audio stays at Plaud.
+- Archive Twenty call recordings, including those from its Granola, Fathom, Fireflies and Teams integrations, as searchable meetings with `add-twenty` and `sync-twenty`.
+- Archive Omi conversations with summaries, action items and speaker transcripts from hosted or self-hosted Omi. Sources share resumable sync and per-key request pacing.
+- Archive Chatwoot shared inboxes, files, source transcripts and linked call meetings.
+- Archive Twilio calls as searchable meetings, with their recordings saved locally up to 1 GiB each by default (`max_media_mb`).
+- Keep Muesli M4A and WAV recordings as meeting attachments with `recordings = true`, including from a remote recorder's Mac. Sync Muesli to a remote daemon with the owner credentials in `[remote]`, and keep it current with `sync-muesli --watch` or Muesli's completion hook.
+- Give Notion meeting attendees verified email addresses, guests included, by adding a workspace-users integration token as `users_token` on a `[[notion_meetings]]` entry, then rerunning `sync-notion-meetings`.
+- Archive Slack with a token limited to public channels, including channels you haven't joined; `search:read` is no longer required. Turn private channels on or off with `[slack].private_channels` or `sync-slack --private-channels`.
+- Search spoken words in recording transcripts with `msgvault media search`, MCP `search_media` and `GET /api/v1/media/search`. Everything search shows transcript matches for plain-word full-text queries, and the Web reader shows each recording's transcript under the expanded message.
+- Route Loom and Cap links and native Teams recording pointers to Docbank for transcripts, with separate reference consent. Self-hosted Cap requires an exact configured origin.
+- Mirror stored attachments to a Docbank folder, including files retained after source deletion. Status reports progress and failures, and message and attachment details show delivery receipts. Requires HTTP API schema 3.23.0.
+- Extract document text on your own hardware with a self-hosted Docling Serve instance: set `provider = "docling"` and `endpoint` under `[attachments.documents]`.
+- Match any of up to eight pipe-separated alternatives in full-text message search, for example `invoice | receipt`. Remote clients need a daemon with API schema 3.19.0 or newer.
+- Find mail by the address that received it with `received:work@example.org`, and add sent mail and calendar events with `account:work@example.org`. The TUI account picker, the Web UI's Explore account filter, MCP and vector and hybrid search accept the same choices.
+- Create, update, delete and move calendar events, respond to invitations and check availability from the CLI, HTTP API and MCP. Write consent and source permissions are opt-in, and guest notifications default to `none`.
+- Read and edit Gmail labels, IMAP keywords and Microsoft Graph categories on an archived message with `msgvault message-tags`, HTTP or MCP. Microsoft Graph sync now archives categories, so the first sync of an existing Microsoft account walks every folder once.
+- Quote an exact passage from a message, transcript or file in a Kata issue from the Web UI, `msgvault kata`, HTTP or MCP (`--allow-kata-writes`). `msgvault kata issues` finds issues that already cite a message or file, and `msgvault kata context` reads back each cited passage.
+- Prepare and manage drafts through MCP with the caller's own daemon permissions, including restricted agent grants. msgvault never sends.
+- List the email addresses, phone numbers and chat IDs your archive holds for a person with `msgvault person identities` or `GET /api/v1/people/{id}/identities`, to pick an address for `draft-compose --to`.
+- Find people by name and read the messaging routes your archive has verified for a person through MCP `find_contact_candidates` and `get_person_messaging_routes`, or the matching `/api/v1/people/` routes.
+- Let MCP clients check source status and scheduler work, request syncs, change Slack conversation selection and edit display names. Source writes need `--allow-source-writes`, display-name edits need `--allow-profile-writes`, and HTTP also needs `--http-allow-writes`.
+- Sync Microsoft 365 and Outlook.com contacts over CardDAV with `msgvault add-carddav --microsoft <email>`.
+- Look up a person by a subscribed CardDAV card's UID with `msgvault person get --vcard-uid <uid>`.
+- Find a person's attachment when you misremember its name by one letter with `msgvault person files <person-id> --filename <name> --fuzzy-filename`.
+- Link many people at once from Relationships: hover to show checkboxes, Shift-click for ranges or select all, then choose **Same person…**. Directory and Saved views add bulk deletion.
+- Click a day on a relationship's activity heatmap to show that day's messages in the timeline.
+- Merge a replaced or duplicate account into one live source with `msgvault merge-account --from <account> --into <account> --dry-run`, then again with `--yes`. `update-account` adds `--alias`, `--history-only` and `--accept-reanchor`.
+- Grant read-only remote clients their own reader credentials with response limits and optional collection writes.
+- Issue agent tokens for scoped archive reads through the remote CLI and MCP with `msgvault agent-token issue`, optionally with `--expires`. Requires `[server] agent_access = true`.
+- Keep Google OAuth client secrets and tokens in a password manager or macOS Keychain with `[oauth] client_secrets_command` and the commands under `[oauth.tokens]`. Existing plaintext credentials are not migrated.
+- Configure containers and supervised installs without startup scripts: `MSGVAULT_HOME`, `MSGVAULT_BIND_ADDR`, `MSGVAULT_API_PORT` and `MSGVAULT_REMOTE_URL` override config, `iface:NAME` binds to an interface's address, key files mount through `api_key_file`, `MSGVAULT_REMOTE_API_KEY_FILE` and `mcp --http-token-file`, and `msgvault credentials set <id> --from-file` stores provider keys.
+- Use msgvault as a Go library through `go.kenn.io/msgvault/pkg/archive`: set up and open SQLite or PostgreSQL archives, run the Slack and Discord importers, purge channels and sources, scope reads per request, and mount the HTTP API in your own server. PostgreSQL-only programs build without CGO.
+- Check embedding coverage, running and queued jobs, throughput with an ETA, and per-batch timings with `msgvault embeddings status`, `GET /api/v1/embeddings/status` or MCP `get_embeddings_status`.
+- Compare a new binary's expected archive version with the stored one using `schema-version`, then run `migrate` before replacing the executable.
+- Anonymous usage telemetry: a daemon ping at startup and once each later UTC day, Web UI opens, screen views at most once per day, session length in four buckets, and counts of searches, empty searches, message opens, manual syncs, displayed errors and failing sources. Events carry the version, commit, OS, architecture and a random install ID, never query text, IDs or archive content. CI runs and non-release builds never send, and the CLI and TUI wait at most 50 ms for pending reports at exit.
+
+### Improvements
+
+- Rerunning `import-whatsapp` on an Apple `ChatStorage.sqlite` reads only chats that changed and writes only new and changed messages, and picks up senders that `LID.sqlite` resolves later. `--full` compares every message, and `--after` and `--before` let a first import fetch recent messages first.
+- Repeat `import-emlx` runs skip unchanged Apple Mail files and write less to disk while still noticing late attachments. `--full-reconcile` revisits every file, and `--max-message-bytes` raises the 128 MiB merge limit.
+- SQLite metadata searches use substring indexes. Initialization backfills them once, so large archives need extra startup time and disk space.
+- Changing owned addresses rechecks only matching messages. SQLite upgrades may take several minutes to build a one-time From-address index.
+- Search help explains the fts, vector and hybrid modes, and an empty keyword search suggests `--mode hybrid` when embeddings can answer it. Search adds `--snippet`, `--sort date` for semantic pages and a `filename:` operator.
+- `show` aliases `show-message`, which gains `--body-only` and `--strip-quoted`, and `show-thread` reads a conversation oldest first with quoted history removed.
+- Root help groups commands by task and starts with the commands to try first. Unknown subcommands under help-only groups exit 1 with suggestions.
+- `list-accounts` and `embeddings list` keep working while a sync, import or embedding build runs, showing `pending` for counts that aren't ready.
+- A bad value in a setting only the daemon reads, such as `[integrations.kata] endpoint` or `MSGVAULT_API_PORT`, no longer stops other commands. They print a warning and still reach the daemon.
+- Cron schedules accept 7 as Sunday and ranges that wrap around, such as `22-2`. A run in an hour skipped for daylight saving starts after the jump, and a schedule in a repeated hour runs once.
+- MCP message searches, `search_in_message` and `list_messages` page past offset 1000. `search_by_domains` reports paging and caps pages at 500 rows.
+- MCP metadata searches run fewer queries, and a disconnected HTTP MCP client cancels its search on the daemon. `GET /api/v1/search/fast` omits aggregate `stats` unless you set `view_type`.
+- Message listings filtered by domain, and relationship cache builds for large group chats, do less database work and use less temporary disk.
+- Reply drafts from IMAP and Gmail send from the confirmed alias that received the original message.
+- Remote edits update source-owned values on published CardDAV imports while keeping unrelated local values. Edits that would overwrite another owner create a conflict.
+- Granola and Circleback save meetings through the shared meeting path, with trimmed names and deduplicated attendees. Run `sync-granola --full` or `sync-circleback --full` to rewrite existing meetings.
+- Deduplication prefers copies with native message IDs, thread evidence and an RFC822 Message-ID when earlier rules tie, and `identity discover --provider` includes the signed-in Gmail profile.
+- The Google and Microsoft contacts sign-in commands in Settings come in both POSIX shell and Command Prompt forms.
+- Vector search, daemon status and Explore coverage say to restart when settings changed after the daemon started.
+- On Windows, private folders such as token, export and spool folders are created owner-only from the start.
+- Release binaries include gRPC-Go 1.84.0, and container images install Debian's patched PCRE2 package.
+
+### Bug fixes
+
+- On SQLite archives, the CardDAV account upgrade added in 0.21.0 no longer stops `msgvault sync` at startup with "CardDAV account upgrade left dangling references" when unrelated rows have broken references.
+- On Linux, saving or editing `config.toml` works on filesystems that don't record file birth time, such as ext4 with 128-byte inodes. Before, every save, settings change and CardDAV account test failed with a config conflict.
+- `add-o365` no longer saves a token for a different Microsoft account when sign-in returns no email. When an IMAP sign-in name differs from the mailbox, pass it with `--sign-in`.
+- When an IMAP server marks one mailbox as both Sent and Drafts, msgvault treats it as Drafts, so unfinished drafts are no longer counted as sent mail.
+- Messages that declare `charset=utf-8` keep their accented characters in the body and search index. Messages archived earlier keep their old text.
+- Slack syncs interrupted by the scheduler finish their pass and reach stale channels, so the last successful sync advances.
+- On PostgreSQL, channel purge, account removal and exclusive maintenance no longer deadlock with another source's sync.
+- **Sync now** and `POST /api/v1/sync/{id}` on a running generic source queue a follow-up run and report `started`, `pending` or `coalesced`. Before, they claimed a sync started when none did, or failed with `503`.
+- Contact sync keeps working on CardDAV servers that require `Depth: 0` for sync reports.
+- Choosing **Use msgvault version** for a CardDAV conflict no longer duplicates an email you added in msgvault.
+- A CardDAV update or unpublish attempted while the Google sign-in is missing goes out after sign-in instead of becoming a conflict.
+- Renaming a published person updates the name on the CardDAV card. Run `msgvault sync-carddav` to fix existing publications.
+- Adding Calendar to a Gmail token recognizes Google's short and expanded `email` and `profile` scope names.
+- Embedding builds finish when some messages contain only invisible text, and embedding passes no longer count successful messages as failed.
+- `msgvault backup create` no longer fails with `no active backup freeze with that token` when a cache reader delays SQLite checkpointing.
+- `msgvault backup` and `backup restore` read pack blobs larger than 512 MiB on 64-bit systems.
+- `import-emlx` restores attachments in Apple Mail messages that mix LF and CRLF line endings, and `msgvault deduplicate` keeps the restored copy over one with placeholder attachments.
+- `import-whatsapp` counts and warns about messages it could not add to the search index.
+- Beeper syncs stop re-requesting files a bridge reports as missing, scheduled Beeper imports that yield mid-group stop repeating work, and Beeper voice notes from older archives reach Docbank for transcripts.
+- Saved Views in the Web UI keep their identity filter when the stored source ID or direction uses a looser form.
+- MCP `semantic_search_messages` results include `deleted_at` again, and Claude Desktop accepts the MCP server again when `query_sql` is enabled.
+- MCP CardDAV approval prompts summarize inline photos, logos, sounds and keys instead of showing base64.
+- `repair-message --audit` stops flagging messages with inline binary attachments after a successful repair.
+- Single-message `export-eml` refuses ambiguous provider IDs, and `export-messages` reports missing `--start` and `--end` before contacting the daemon.
+- New clients find a keyed daemon that is slow to start instead of failing with `msgvault daemon is already running for this data directory`.
+- After a client disconnects during a search that hits a stale vector index, the daemon keeps advising `msgvault daemon restart` instead of a full rebuild.
+- Renaming or linking a person over HTTP refreshes the people cache of the archive the daemon serves when `msgvault serve` was started with `--home` or `--config`.
+- On Windows, a keyed daemon's first start no longer fails with `provider credential DACL permits inherited access`, and saving provider keys, CardDAV connections or settings no longer fails intermittently.
+
+### Acknowledgements
+
+Thanks to everyone who contributed to this release:
+
+- [@eserie](https://github.com/eserie) for Matrix room archiving, faster repeat WhatsApp imports from Apple devices, and accurate **Sync now** results.
+- [@exactmike](https://github.com/exactmike) for starting Microsoft 365 and Outlook.com contacts sync.
+- [@freivokh](https://github.com/freivokh) for fixing config saves on Linux filesystems without file birth time.
+- [@fucx](https://github.com/fucx) for restoring Apple Mail attachments in messages with mixed line endings.
+- [@jr-k](https://github.com/jr-k) for OR searches with `|` and linking many people at once in Relationships.
+- [@mariusvniekerk](https://github.com/mariusvniekerk) for cron schedules that handle daylight saving, and patched toolchains for builds.
+- [@rodboev](https://github.com/rodboev) for searching recording transcripts, Microsoft 365 contacts sync, quoting archive passages in Kata issues, anonymous telemetry, and Windows startup fixes.
+- [@salmonumbrella](https://github.com/salmonumbrella) for Plaud, Twenty, Omi, Chatwoot and Twilio archiving, calendar event control, message tag editing, account merging, and new MCP tools.
+- [@wesm](https://github.com/wesm) for using msgvault as a library in other Go programs, Slack archives with public-channel-only tokens, the clickable relationship heatmap, and backup and Slack sync fixes.
+- [@X1pheR](https://github.com/X1pheR) for patching PCRE2 in container images.
+
+---
 
 ## 0.21.0
 <small>2026-10-02</small>

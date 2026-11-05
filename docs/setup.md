@@ -1,4 +1,5 @@
 ---
+last_edited: "2026-11-05"
 title: Setup Guide
 description: Install msgvault, choose a source, and explore your first archived messages.
 ---
@@ -9,22 +10,23 @@ terminal. The Gmail walkthrough below includes Google OAuth setup. For other
 mail providers, chats, meetings, contacts, or local exports, use
 [Choose a Source](guides/sources.md) after installation.
 
-Already have an archive? Read [the upgrade notes](changelog.md#before-upgrading) before
-opening an existing archive with a newer build.
-
 ## Install Release
+
+These installers install the maintained `unstaticlabs/msgvault` fork. The
+`msgvault.io` installers and public package-manager builds install upstream
+MsgVault instead; use the fork installers to retain this distribution’s features.
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://msgvault.io/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://msgvault.io/install.ps1 | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/unstaticlabs/msgvault/main/scripts/install.ps1 | iex"
 ```
 
-The installer detects your OS and architecture, downloads the latest release from [GitHub Releases](https://github.com/kenn-io/msgvault/releases), verifies the SHA-256 checksum, and installs the binary.
+The installer detects your OS and architecture, downloads the latest release from [GitHub Releases](https://github.com/unstaticlabs/msgvault/releases), verifies the SHA-256 checksum, and installs the binary.
 
 Windows releases include native AMD64 and ARM64 packages. On Windows ARM64,
 the PowerShell installer selects the native package when the release provides
@@ -42,7 +44,7 @@ msgvault --help
 ## Vendor a pinned binary
 
 Applications can download a release archive directly from
-[GitHub Releases](https://github.com/kenn-io/msgvault/releases). Pin the tag,
+[GitHub Releases](https://github.com/unstaticlabs/msgvault/releases). Pin the tag,
 pick the archive for your platform from that release's asset list, and check it
 against the release's `SHA256SUMS` before extracting it. Fail the download if
 the archive or its checksum entry is missing.
@@ -50,12 +52,23 @@ the archive or its checksum entry is missing.
 Archives use `msgvault_<version>_<os>_<arch>`, with the version's leading `v`
 removed. Use `darwin` for macOS, `linux` for Linux, and `windows` for Windows;
 architectures are `amd64` and `arm64`. macOS and Linux archives end in `.tar.gz`;
-Windows archives end in `.zip`, such as `msgvault_0.21.0_windows_arm64.zip`.
+Windows archives end in `.zip`, such as `msgvault_0.23.0_windows_arm64.zip`.
+
+For this first Linux upgrade from a release before 0.23, run the fork installer
+above once. The older `msgvault update` installs only the main executable and
+cannot install the new companion. Subsequent updates from this build keep both
+members matched. Container deployments already include both members.
+
+Linux archives also contain `msgvault-codex-bridge`. Keep it beside the main
+executable when installing an archive manually. The installer and `msgvault
+update` install this helper under its SHA-256 filename before replacing the main
+executable. Existing helpers remain available to running older daemons. Each
+executable is replaced separately; this is not a two-file atomic transaction.
 
 ### Migrate before replacing the executable
 
-The following commands are new on `main` and are not in v0.21.0. Use a candidate
-binary that includes them. Run maintenance on the archive host; for a configured
+These commands are available in 0.22.0 and later; run them from the candidate
+binary. Run maintenance on the archive host; for a configured
 remote server, use `--local` only when intentionally selecting this host's archive.
 
 1. Download, verify, and extract the candidate into a separate directory.
@@ -104,7 +117,7 @@ conda install -c conda-forge msgvault
 
 ## Build From Source
 
-On macOS and Linux, source builds require Go 1.27+, Bun 1.3.14+, Node.js
+On macOS and Linux, source builds require Go 1.27+, Bun (the version pinned in `web/package.json`), Node.js
 (20.19+ on 20.x, 22.13+ on 22.x, or 24+), and a C/C++ compiler (GCC or Clang).
 Bun builds the browser application embedded in the binary, and Node runs the
 embed validator that `make install` invokes. CGO is required because msgvault
@@ -119,7 +132,7 @@ sudo apt install -y libsqlite3-dev
 ```
 
 ```bash
-git clone https://github.com/kenn-io/msgvault.git
+git clone https://github.com/unstaticlabs/msgvault.git
 cd msgvault
 make install
 ```
@@ -216,6 +229,13 @@ msgvault add-account you@gmail.com
 This opens your browser for OAuth consent. For headless servers, see the [copy-token workflow](/docs/guides/oauth-setup/#headless-server-setup).
 
 If you plan to deploy to a remote host (NAS, cloud VM, etc.), run `msgvault setup` after this step to generate a ready-to-run deployment bundle with Docker Compose and remote configuration. See the [Remote Deployment](/docs/guides/remote-deployment/) guide.
+
+During setup, choose the detected host IANA timezone for activity day
+boundaries, or enter another IANA zone. Setup writes the effective zone to
+`[activity].timezone` in the local config and to any NAS bundle it creates. If
+the daemon is running, restart it to load the new zone; later projection passes
+then re-date existing activity rows automatically. `Local` is not accepted
+because it depends on the host at runtime.
 
 ## Add an IMAP Account
 

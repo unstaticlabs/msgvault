@@ -2,7 +2,8 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -47,9 +48,8 @@ var userListCmd = &cobra.Command{
 			return fmt.Errorf("list users: %w", err)
 		}
 		if userListJSON {
-			encoder := json.NewEncoder(os.Stdout)
-			encoder.SetIndent("", "  ")
-			return encoder.Encode(users)
+			encoder := jsontext.NewEncoder(os.Stdout, jsontext.WithIndent("  "))
+			return json.MarshalEncode(encoder, users)
 		}
 		if len(users) == 0 {
 			fmt.Println("No users yet. A user is created on first sign-in through the identity provider.")

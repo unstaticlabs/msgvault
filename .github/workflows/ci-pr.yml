@@ -1,13 +1,28 @@
 name: CI
 
-# The PR dispatcher always calls the main-pinned workflow. That workflow
-# independently routes same-repository Linux jobs to the managed public fleet
-# and fork jobs to GitHub-hosted runners.
+# The PR dispatcher validates the combined checkout. Its reusable workflow
+# runs PR jobs on GitHub-hosted runners, including fork PRs.
 on:
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions: read-all
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   run:
-    uses: unstaticlabs/msgvault/.github/workflows/ci.yml@main
+    uses: ./.github/workflows/ci.yml
+
+  gate:
+    name: CI gate
+    needs: run
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check CI result
+        if: needs.run.result != 'success'
+        run: exit 1

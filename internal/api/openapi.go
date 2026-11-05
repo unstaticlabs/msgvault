@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -365,15 +366,47 @@ import (
 // reads and delta updates.
 // 3.16.0 adds authenticated implementation-only MCP capability discovery.
 // 3.17.0 adds bounded opt-in filename suggestions, including person scope.
-// 3.18.0 combines upstream operations with scoped mailbox and email-work contracts.
-// 3.19.0 adds same-source call/conversation links while retaining scoped mailbox and calendar contracts.
-const APISchemaVersion = "3.19.0"
+// 3.18.0 adds optional related_message_id to message detail and conversation windows.
+// 3.19.0 adds pipe OR in full-text search queries.
+// 3.20.0 adds read-only durable contact candidates and archived messaging routes.
+// 3.21.0 adds message embedding coverage and live batch diagnostics.
+// 3.22.0 adds account aliases, source lifecycle fields, account merging, and
+// owner source-maintenance requests. Existing source identifiers and account
+// requests remain valid.
+// 3.23.0 adds the Docbank attachment mirror routes, receipts and status states.
+// 3.24.0 adds authenticated streamed Muesli recording imports.
+// 3.25.0 adds archived chat discovery ranked by the best matching name or title.
+// 3.26.0 adds bounded search-aware deletion resolution with an explicit
+// max_results cap and matched_count for skipped matches.
+// 3.27.0 adds optional attachment text results and recording errors in media search.
+// 3.28.0 adds the typed calendar projection to calendar event message details.
+// 3.29.0 adds literal address filtering to the durable people Directory.
+// 3.30.0 adds the stored hidden_text_present flag to message details and search rows.
+// 3.31.0 adds literal OR warnings to full-text search responses.
+// 3.32.0 adds scheduled-work queue times and CardDAV scheduler activity.
+// 3.33.0 adds the read-only person tier preview and explanation routes.
+// 3.34.0 adds answered-call counts to person tier signals.
+// 3.35.0 adds archived calendar occurrence listing.
+// 3.36.0 adds stored plaintext range counts to document indexing status.
+// 3.37.0 omits first_at and last_at on person summaries with no sent or received messages, and returns participants with no sent or received messages instead of 404.
+// 3.38.0 adds exact sender and To participant identities to conversation windows
+// and canonical entry-kind filters to analytical requests.
+// 3.39.0 adds the optional account to staged deletion list summaries.
+// 3.40.0 adds timezone-aware daily message grouping and sent_only group filtering.
+// It also filters participant timelines to events and meetings attended by the owner.
+// 3.41.0 adds body_text for a single message's stored plain-text body, which can be generated from HTML and is empty when no plain text is stored; conversation windows leave it unset.
+// Older servers omit body_text; body keeps its HTML fallback.
+// 3.42.0 adds iMessage participant and attachment-size limits to settings.
+// 3.43.0 adds receiver-reported sender authentication to single-message reads.
+// 3.44.0 retains scoped mailbox, related-email work, calendar coverage and provider-state contracts alongside upstream 3.43.
+const APISchemaVersion = "3.44.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.
 func OpenAPIDocument() *huma.OpenAPI {
 	doc := baseOpenAPIDocument(false)
 	hardenSourceStatusPublicSchemas(doc)
+	hardenEmbeddingStatusSchemas(doc, false)
 	relaxResponseAdditionalProperties(doc)
 	hardenOperationSchemas(doc)
 	return doc
@@ -382,6 +415,7 @@ func OpenAPIDocument() *huma.OpenAPI {
 func openAPIClientDocument() *huma.OpenAPI {
 	doc := baseOpenAPIDocument(true)
 	hardenSourceStatusClientSchemas(doc)
+	hardenEmbeddingStatusSchemas(doc, true)
 	clearResponseAdditionalProperties(doc)
 	hardenOperationSchemas(doc)
 	applyClientCodegenExtensions(doc)
@@ -646,15 +680,21 @@ func hardenTaskLinkSchemas(doc *huma.OpenAPI) {
 }
 
 func hardenSourceStatusPublicSchemas(doc *huma.OpenAPI) {
+	nullablePublicObjectRefs(doc, "SourceStatus", "active_sync", "latest_sync", "last_successful_sync")
+}
+
+// nullablePublicObjectRefs publishes nullable object references as a oneOf
+// with null, which Huma does not infer from pointer fields.
+func nullablePublicObjectRefs(doc *huma.OpenAPI, schemaName string, names ...string) {
 	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
 		return
 	}
-	schema := doc.Components.Schemas.Map()["SourceStatus"]
+	schema := doc.Components.Schemas.Map()[schemaName]
 	if schema == nil {
 		return
 	}
-	for _, name := range []string{"active_sync", "latest_sync", "last_successful_sync"} {
-		if property := schema.Properties[name]; property != nil {
+	for _, name := range names {
+		if property := schema.Properties[name]; property != nil && property.Ref != "" {
 			ref := property.Ref
 			property.Ref = ""
 			property.Type = ""
@@ -685,6 +725,47 @@ func hardenSourceStatusClientSchemas(doc *huma.OpenAPI) {
 	for name := range nullableRuns {
 		if property := schema.Properties[name]; property != nil {
 			property.Nullable = true
+		}
+	}
+}
+
+// embeddingStatusNullableFields are always-present nullable fields. The
+// public document marks object references with nullablePublicObjectRefs; the
+// Go client uses optional pointers for all of them, as with SourceStatus.
+var embeddingStatusNullableFields = map[string][]string{
+	"EmbeddingStatus":         {"active_generation", "diagnostics", "messages_per_minute", "eta_seconds"},
+	"EmbeddingDiagnostics":    {"current_batch", "last_error", "finished_at", "last_successful_batch_at"},
+	"EmbeddingBatch":          {"error"},
+	"EmbeddingJobState":       {"started_at", "queued_at"},
+	"EmbeddingSchedulerState": {"slot_held_since"},
+}
+
+func hardenEmbeddingStatusSchemas(doc *huma.OpenAPI, client bool) {
+	if doc == nil || doc.Components == nil || doc.Components.Schemas == nil {
+		return
+	}
+	for schemaName, names := range embeddingStatusNullableFields {
+		if !client {
+			nullablePublicObjectRefs(doc, schemaName, names...)
+			continue
+		}
+		schema := doc.Components.Schemas.Map()[schemaName]
+		if schema == nil {
+			continue
+		}
+		for _, name := range names {
+			property := schema.Properties[name]
+			if property == nil {
+				continue
+			}
+			if property.Ref != "" {
+				property.AllOf = []*huma.Schema{{Ref: property.Ref}}
+				property.Ref = ""
+				property.Type = "object"
+			}
+			property.Nullable = true
+			schema.Required = slices.DeleteFunc(schema.Required, func(required string) bool { return required == name })
+			nullableSchemaProperty(schema, name)
 		}
 	}
 }
@@ -751,7 +832,7 @@ func hardenExploreSchemas(doc *huma.OpenAPI) {
 }
 
 func exploreGroupingEnum() []any {
-	dimensions := explorecatalog.GroupingDimensions()
+	dimensions := explorecatalog.RequestGroupingDimensions()
 	values := make([]any, len(dimensions))
 	for index, dimension := range dimensions {
 		values[index] = dimension
@@ -929,7 +1010,48 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		return
 	}
 	schemas := doc.Components.Schemas.Map()
+	// These response properties stay required in JSON, but allow empty strings.
+	for _, field := range []struct{ schema, property string }{
+		{"Attendee", "email"},
+		{"Attendee", "display_name"},
+		{"CalendarOccurrence", "start_date"},
+		{"CalendarOccurrence", "end_date"},
+		{"CalendarOccurrence", "subject"},
+		{"ContactCandidate", "display_name"},
+		{"MediaAttachmentResult", "filename"},
+		{"MediaAttachmentResult", "containing_title"},
+		{"MessagingRoute", "merged_into_chat_id"},
+		{"MessagingRoute", "network"},
+		{"MessagingRoute", "network_label"},
+		{"MessagingRoute", "provider_chat_id"},
+		{"PersonMessagingRoutesPage", "alias_reason"},
+	} {
+		if schema := schemas[field.schema]; schema != nil {
+			if property := schema.Properties[field.property]; property != nil {
+				if property.Extensions == nil {
+					property.Extensions = map[string]any{}
+				}
+				property.Extensions["x-omitempty"] = false
+				property.Extensions["x-oapi-codegen-extra-tags"] = map[string]any{
+					"validate": "omitempty",
+				}
+			}
+		}
+	}
 	const emailProperty = "email"
+	if calendar := schemas["CalendarProjection"]; calendar != nil {
+		for name, goType := range map[string]string{"all_day": "*bool", "sequence": "*int64"} {
+			if property := calendar.Properties[name]; property != nil {
+				setCodegenGoType(property, goType)
+			}
+		}
+		// Fields the stored event does not carry are present as null, including
+		// zero-capable scalars. Keep every field nullable through parsing and
+		// encoding.
+		for _, name := range []string{statusFieldName, "sequence", "start", "end", "all_day", "time_zone", "ical_uid"} {
+			nullableSchemaProperty(calendar, name)
+		}
+	}
 	if input := schemas["GCalEventInput"]; input != nil {
 		for name, goType := range map[string]string{"attendees": "*[]GCalAttendee", "recurrence": "*[]string"} {
 			if field := input.Properties[name]; field != nil {
@@ -1020,9 +1142,22 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 		}
 	}
 
-	for _, schemaName := range []string{"FileSearchRow", "FileMetadataResponse", "PersonFileSearchRow", "MessageRecording"} {
-		if schema := schemas[schemaName]; schema != nil {
-			for _, property := range []string{"filename", "mime_type"} {
+	// An account without an alias still includes the required alias property.
+	if account := schemas["CliAccountResponse"]; account != nil && account.Properties["alias"] != nil {
+		account.Properties["alias"].Nullable = true
+	}
+	for _, fields := range []struct {
+		name       string
+		properties []string
+	}{
+		{"FileSearchRow", []string{"filename", "mime_type"}},
+		{"FileMetadataResponse", []string{"filename", "mime_type"}},
+		{"PersonFileSearchRow", []string{"filename", "mime_type"}},
+		{"MessageRecording", []string{"filename", "mime_type"}},
+		{"ChatDiscoveryResult", []string{"title", "source_display_name", "source_conversation_id", "source_identifier"}},
+	} {
+		if schema := schemas[fields.name]; schema != nil {
+			for _, property := range fields.properties {
 				if schema.Properties[property] != nil {
 					schema.Properties[property].Nullable = true
 				}
@@ -1245,7 +1380,7 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 	}
 	setEnumNames(schemas["ExploreGroupDimension"], []any{
 		"ExploreGroupDimensionSource", "ExploreGroupDimensionParticipant", "ExploreGroupDimensionDomain",
-		"ExploreGroupDimensionMessageType", "ExploreGroupDimensionMailingList", "ExploreGroupDimensionKind", "ExploreGroupDimensionYear", "ExploreGroupDimensionMonth",
+		"ExploreGroupDimensionMessageType", "ExploreGroupDimensionMailingList", "ExploreGroupDimensionKind", "ExploreGroupDimensionYear", "ExploreGroupDimensionMonth", "ExploreGroupDimensionDay",
 	})
 	if counter := schemas["OperationPublicCounter"]; counter != nil {
 		setEnumNames(counter.Properties["unit"], []any{
@@ -1327,8 +1462,9 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 			"readiness": {"ExploreCacheUnavailableResponseReadinessAbsent", "ExploreCacheUnavailableResponseReadinessBuilding", "ExploreCacheUnavailableResponseReadinessInterrupted", "ExploreCacheUnavailableResponseReadinessStaleSchema", "ExploreCacheUnavailableResponseReadinessDrifted"},
 		},
 		"ExploreFilter": {
-			"dimension": {"ExploreFilterDimensionSource", "ExploreFilterDimensionParticipant", "ExploreFilterDimensionDomain", "ExploreFilterDimensionMessageType", "ExploreFilterDimensionMailingList", "ExploreFilterDimensionAfter", "ExploreFilterDimensionBefore", "ExploreFilterDimensionDeletion", "ExploreFilterDimensionIdentity", "ExploreFilterDimensionAccount"},
+			"dimension": {"ExploreFilterDimensionSource", "ExploreFilterDimensionParticipant", "ExploreFilterDimensionDomain", "ExploreFilterDimensionMessageType", "ExploreFilterDimensionKind", "ExploreFilterDimensionMailingList", "ExploreFilterDimensionAfter", "ExploreFilterDimensionBefore", "ExploreFilterDimensionDeletion", "ExploreFilterDimensionIdentity", "ExploreFilterDimensionAccount"},
 		},
+		"ExploreGroupRow": {"level": {"ExploreGroupRowLevelNone", "ExploreGroupRowLevelFirstQuartile", "ExploreGroupRowLevelSecondQuartile", "ExploreGroupRowLevelThirdQuartile", "ExploreGroupRowLevelFourthQuartile"}},
 		"ExploreGroupSort": {
 			"direction": {"ExploreGroupSortDirectionAsc", "ExploreGroupSortDirectionDesc"},
 			"field":     {"ExploreGroupSortFieldKey", "ExploreGroupSortFieldCount", "ExploreGroupSortFieldEstimatedBytes", "ExploreGroupSortFieldLatestAt"},
@@ -1353,9 +1489,7 @@ func applyClientCodegenExtensions(doc *huma.OpenAPI) {
 				"ImportJobResponseStatusFailed",
 			},
 		},
-		"ExploreSelection": {
-			"mode": {"ExploreSelectionModeExplicit", "ExploreSelectionModeAllMatching"},
-		},
+		"ExploreSelection": {"mode": {"ExploreSelectionModeExplicit", "ExploreSelectionModeAllMatching"}},
 		"ExploreSort": {
 			"direction": {"ExploreSortDirectionDesc"},
 			"field":     {"ExploreSortFieldOccurredAt"},

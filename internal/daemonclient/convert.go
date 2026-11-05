@@ -10,6 +10,7 @@ import (
 	"go.kenn.io/msgvault/internal/deletion"
 	"go.kenn.io/msgvault/internal/identityops"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/senderauth"
 	"go.kenn.io/msgvault/internal/store"
 	"go.kenn.io/msgvault/pkg/client/generated"
 )
@@ -302,26 +303,27 @@ func cliHybridSearchResultFromGenerated(item generated.HybridSearchItem) (CLIHyb
 	}
 	out := CLIHybridSearchResult{
 		Message: query.MessageSummary{
-			ID:              item.ID,
-			SourceID:        int64Value(item.SourceID),
-			SourceMessageID: stringValue(item.SourceMessageID),
-			ConversationID:  int64Value(item.ConversationID),
-			Subject:         item.Subject,
-			Snippet:         item.Snippet,
-			AttachmentCount: intValue(item.AttachmentCount),
-			AttachmentNames: item.AttachmentNames,
-			FromEmail:       stringValue(item.FromEmail),
-			FromName:        stringValue(item.FromName),
-			FromPhone:       stringValue(item.FromPhone),
-			To:              queryAddressesFromStrings(item.To),
-			Cc:              queryAddressesFromStrings(item.Cc),
-			Bcc:             queryAddressesFromStrings(item.Bcc),
-			SentAt:          sentAt,
-			SizeEstimate:    item.SizeBytes,
-			HasAttachments:  item.HasAttachments,
-			Labels:          item.Labels,
-			DeletedAt:       deletedAt,
-			MessageType:     stringValue(item.MessageType),
+			ID:                item.ID,
+			SourceID:          int64Value(item.SourceID),
+			SourceMessageID:   stringValue(item.SourceMessageID),
+			ConversationID:    int64Value(item.ConversationID),
+			Subject:           item.Subject,
+			Snippet:           item.Snippet,
+			AttachmentCount:   intValue(item.AttachmentCount),
+			AttachmentNames:   item.AttachmentNames,
+			FromEmail:         stringValue(item.FromEmail),
+			FromName:          stringValue(item.FromName),
+			FromPhone:         stringValue(item.FromPhone),
+			To:                queryAddressesFromStrings(item.To),
+			Cc:                queryAddressesFromStrings(item.Cc),
+			Bcc:               queryAddressesFromStrings(item.Bcc),
+			SentAt:            sentAt,
+			SizeEstimate:      item.SizeBytes,
+			HasAttachments:    item.HasAttachments,
+			HiddenTextPresent: item.HiddenTextPresent,
+			Labels:            item.Labels,
+			DeletedAt:         deletedAt,
+			MessageType:       stringValue(item.MessageType),
 		},
 		AttachmentCount:  item.AttachmentCount,
 		ID:               item.ID,
@@ -379,6 +381,7 @@ func queryMessageSummaryFromGenerated(msg generated.CLIQueryMessageSummary) quer
 		Subject:              msg.Subject,
 		Snippet:              msg.Snippet,
 		MatchSnippet:         stringValue(msg.MatchSnippet),
+		HiddenTextPresent:    msg.HiddenTextPresent,
 		AttachmentNames:      msg.AttachmentNames,
 		FromEmail:            msg.FromEmail,
 		FromName:             msg.FromName,
@@ -423,6 +426,8 @@ func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query
 		SourceID:             int64Value(resp.SourceID),
 		InboxState:           providerStateFromEnum(resp.InboxState),
 		ReadState:            providerStateFromEnum(resp.ReadState),
+		SenderAuth:           senderAuthFromGenerated(resp.SenderAuth),
+		Calendar:             calendarProjectionFromGenerated(resp.Calendar),
 		SourceMessageID:      resp.SourceMessageID,
 		RFC822MessageID:      stringValue(resp.Rfc822MessageID),
 		ConversationID:       resp.ConversationID,
@@ -443,6 +448,7 @@ func cliMessageDetailFromGenerated(resp *generated.GetCLIMessageResponse) *query
 		Attachments:          cliMessageAttachmentsFromGenerated(resp.Attachments),
 		BodyText:             resp.BodyText,
 		BodyHTML:             resp.BodyHTML,
+		HiddenTextPresent:    resp.HiddenTextPresent,
 	}
 }
 
@@ -474,6 +480,7 @@ func cliMessageAttachmentsFromGenerated(
 			MimeType:    attachment.MimeType,
 			Size:        attachment.Size,
 			ContentHash: attachment.ContentHash,
+			Docbank:     docbankRefsFromGenerated(attachment.Docbank),
 			URL:         stringValue(attachment.URL),
 		}
 	}
@@ -487,8 +494,9 @@ func cliAccountsFromGenerated(resp *generated.ListCLIAccountsResponse) []CLIAcco
 	out := make([]CLIAccount, len(resp.Accounts))
 	for i, account := range resp.Accounts {
 		out[i] = CLIAccount{
-			CalendarCoverage:   calendarCoverageFromGenerated(account.CalendarCoverage),
-			ID:                 account.ID,
+			CalendarCoverage: calendarCoverageFromGenerated(account.CalendarCoverage),
+			ID:               account.ID,
+			Identifier:       account.Identifier, Alias: stringValue(account.Alias), HistoryOnly: account.HistoryOnly, ReanchorRequired: account.ReanchorRequired, MergedIntoSourceID: account.MergedIntoSourceID,
 			Email:              account.Email,
 			Type:               account.Type,
 			DisplayName:        account.DisplayName,
@@ -960,4 +968,37 @@ func providerStateFromString(value string) string {
 		return "unknown"
 	}
 	return value
+}
+
+func docbankRefsFromGenerated(refs []generated.DocbankAttachmentRef) []store.DocbankAttachmentRef {
+	if refs == nil {
+		return nil
+	}
+	result := make([]store.DocbankAttachmentRef, len(refs))
+	for i, ref := range refs {
+		result[i] = store.DocbankAttachmentRef{Endpoint: ref.Endpoint, Folder: ref.Folder, NodeID: ref.NodeID, VersionID: ref.VersionID, BlobHash: ref.BlobHash}
+	}
+	return result
+}
+
+func calendarProjectionFromGenerated(calendar *generated.CalendarProjection) *store.CalendarProjection {
+	if calendar == nil {
+		return nil
+	}
+	return &store.CalendarProjection{
+		Status:   calendar.Status,
+		Sequence: calendar.Sequence,
+		Start:    calendar.Start,
+		End:      calendar.End,
+		AllDay:   calendar.AllDay,
+		TimeZone: calendar.TimeZone,
+		ICalUID:  calendar.IcalUID,
+	}
+}
+
+func senderAuthFromGenerated(v *generated.SenderAuthVerdict) *senderauth.Verdict {
+	if v == nil {
+		return nil
+	}
+	return &senderauth.Verdict{Verified: v.Verified, Domain: stringValue(v.Domain), AuthservID: stringValue(v.AuthservID), SPF: stringValue(v.Spf), DKIM: stringValue(v.Dkim), DMARC: stringValue(v.Dmarc)}
 }

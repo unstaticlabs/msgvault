@@ -3,7 +3,7 @@ package query
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"slices"
 	"strings"
@@ -57,10 +57,11 @@ func (e *DuckDBEngine) emailWorkPopulationLocked(ctx context.Context, scope Emai
 	if err != nil {
 		return nil, err
 	}
+	// Nil and empty source sets have different authority and must keep distinct memo keys.
 	encoded, err := json.Marshal(struct {
 		Authority string  `json:"authority"`
 		Sources   []int64 `json:"sources"`
-	}{scope.AuthorityKey, sources})
+	}{scope.AuthorityKey, sources}, json.FormatNilSliceAsNull(true))
 	if err != nil {
 		return nil, err
 	}

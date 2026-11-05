@@ -3,8 +3,11 @@
  */
 import type { AttachmentInfo } from "./attachmentInfo";
 import type { CalendarEventState } from "./calendarEventState";
+import type { CalendarProjection } from "./calendarProjection";
+import type { ConversationParticipant } from "./conversationParticipant";
 import type { MessageDetailInboxState } from "./messageDetailInboxState";
 import type { MessageDetailReadState } from "./messageDetailReadState";
+import type { SenderAuthVerdict } from "./senderAuthVerdict";
 
 export interface MessageDetail {
   attachments: AttachmentInfo[];
@@ -12,6 +15,10 @@ export interface MessageDetail {
   body: string;
   body_html?: string;
   body_omitted?: boolean;
+  /** Stored plain-text body of a single message, which can be generated from HTML and is empty when no plain text is stored; conversation windows leave it unset. Older servers omit this field; body keeps its HTML fallback. */
+  body_text?: string;
+  /** Calendar state for calendar events: status, sequence, start, end, all-day, time zone, and iCal UID. A field is null when the stored event does not carry it; calendar sync does not store a sequence of 0. */
+  calendar?: CalendarProjection;
   calendar_state?: CalendarEventState;
   cc?: string[];
   conversation_id?: number;
@@ -21,8 +28,11 @@ export interface MessageDetail {
   from: string;
   from_email?: string;
   from_name?: string;
+  /** Sender participant ID, populated for conversation windows. */
+  from_participant_id?: number;
   from_phone?: string;
   has_attachments: boolean;
+  hidden_text_present: boolean;
   id: number;
   inbox_state?: MessageDetailInboxState;
   is_from_me?: boolean;
@@ -30,6 +40,7 @@ export interface MessageDetail {
   message_type?: string;
   read_state?: MessageDetailReadState;
   related_message_id?: number;
+  sender_auth?: SenderAuthVerdict;
   sent_at: string;
   size_bytes: number;
   snippet: string;
@@ -37,5 +48,7 @@ export interface MessageDetail {
   source_message_id?: string;
   subject: string;
   to: string[];
+  /** Recipient participants, populated for conversation windows. */
+  to_participants?: ConversationParticipant[];
   [key: string]: unknown;
 }

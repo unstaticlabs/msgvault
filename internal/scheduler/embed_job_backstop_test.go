@@ -64,23 +64,25 @@ func (s *e2eWorkStore) SetEmbedGen(ctx context.Context, ids []int64, target int6
 	return err
 }
 
-func (s *e2eWorkStore) SetEmbedGenIfUnchanged(ctx context.Context, items []store.EmbedGenStamp, target int64) (missed []int64, err error) {
+func (s *e2eWorkStore) SetEmbedGenIfUnchanged(ctx context.Context, items []store.EmbedGenStamp, target int64) (missed []int64, covered int, err error) {
 	for _, it := range items {
 		res, err := s.db.ExecContext(ctx,
 			`UPDATE messages SET embed_gen = ? WHERE id = ? AND last_modified = ?`,
 			target, it.ID, it.LastModified)
 		if err != nil {
-			return missed, err
+			return missed, covered, err
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return missed, err
+			return missed, covered, err
 		}
 		if n == 0 {
 			missed = append(missed, it.ID)
+		} else {
+			covered++
 		}
 	}
-	return missed, nil
+	return missed, covered, nil
 }
 
 // e2eCoverage satisfies EmbedCoverage from the live main DB so the
@@ -251,14 +253,14 @@ END;`)
 
 	// Tick A (within interval): RunOnce only. The sub-watermark straggler is
 	// NOT recovered because RunOnce resumes from the watermark.
-	job.Run(ctx)
+	_ = job.Run(ctx)
 	assert.Equal(1, countMissingE2E(t, mainDB, int64(gen)),
 		"within interval: RunOnce alone misses the sub-watermark straggler")
 
 	// Tick B (interval elapsed): the backstop runs and recovers the
 	// straggler without re-embedding the already-stamped messages.
 	*clock = now.Add(25 * time.Hour)
-	job.Run(ctx)
+	_ = job.Run(ctx)
 	assert.Equal(0, countMissingE2E(t, mainDB, int64(gen)),
 		"after interval: backstop recovers the sub-watermark straggler")
 }

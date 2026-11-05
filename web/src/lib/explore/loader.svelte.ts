@@ -3,14 +3,16 @@ import { tick, untrack } from 'svelte';
 import type { APIClient } from '../api/client';
 import type {
   EntryRow,
+  ExplorePredicate,
   ExploreCacheUnavailable,
   ExploreGroupDimension,
   ExploreGroupResult,
   ExploreGroupRow,
   ExploreResult,
+  ExploreSearchMode,
   FileMIMEFamily
 } from './models';
-import { createExploreAPI, type ExploreAPI } from './api';
+import { createExploreAPI, ExploreAPIError, type ExploreAPI, type TimelineScope } from './api';
 import { parseAttachmentSelection } from './attachment-authority';
 import { parseArchiveMeetingSelection } from '../meetings/archive-selection';
 import { parseRecordingSelection } from '../archive/recording-selection';
@@ -32,9 +34,11 @@ export type PageLoadOutcome =
  * wrote to that shared state, preserving imperative last-write-wins order. */
 export interface ExploreLoaderCallbacks {
   isEnabled: () => boolean;
+  predicate?: () => ExplorePredicate;
   onPredicateChange: () => void;
   onPagingNotice: (message: string | null) => void;
   onRestorationFocus: () => void;
+  onSearchAccepted?: (query: string, mode: ExploreSearchMode, signal: AbortSignal, count?: number) => void;
 }
 
 const REPEATED_CURSOR_NOTICE = 'Pagination stopped because the server repeated a cursor without progress.';
@@ -64,6 +68,9 @@ function samePageAuthority(
  * to `workspace === 'everything'`), so this class is shared by both call
  * sites rather than owned exclusively by EverythingWorkspace.
  */
+// A message table the shell's reader and Display commands act on.
+export type MessagesTable = { state: ExploreState; loader: ExploreLoader; openRow: (row: EntryRow) => void; resultsWidth: number };
+
 export class ExploreLoader {
   rows = $state<EntryRow[]>([]);
   groupRows = $state<ExploreGroupRow[]>([]);
@@ -73,6 +80,7 @@ export class ExploreLoader {
   loading = $state(false);
   loadingMore = $state(false);
   error = $state('');
+  errorKind = $state<'other' | undefined>();
   /** Cursor-page failure. Kept apart from `error` so a failed later page
    * never hides the rows already loaded; while `nextCursor` survived (a
    * transient failure) a retry re-attempts the same page. */
@@ -84,6 +92,7 @@ export class ExploreLoader {
   private readonly state: ExploreState;
   private readonly api: ExploreAPI;
   private readonly callbacks: ExploreLoaderCallbacks;
+  submitted = $state(false);
   private requestGeneration = 0;
   private requestController: AbortController | undefined;
   private pagePredicate: ReturnType<ExploreState['predicate']> | undefined;
@@ -100,16 +109,16 @@ export class ExploreLoader {
   private cacheBuildRetry: ReturnType<typeof setTimeout> | undefined;
   #retryRevision = $state(0);
 
-  constructor(client: APIClient, state: ExploreState, callbacks: ExploreLoaderCallbacks) {
+  constructor(client: APIClient, state: ExploreState, callbacks: ExploreLoaderCallbacks, scope?: TimelineScope) {
     this.state = state;
-    this.api = createExploreAPI(client);
+    this.api = createExploreAPI(client, scope);
     this.callbacks = callbacks;
 
     // Declared as a constructor-local (rather than a class field) because a
     // $derived field initializer referencing `this.state` would run before
     // the constructor body above assigns it; TS's field-initializer-order
     // check flags that even though $derived itself is evaluated lazily.
-    const requestFingerprint = $derived(predicateFingerprint(this.state.predicate()));
+    const requestFingerprint = $derived(predicateFingerprint(this.callbacks.predicate?.() ?? this.state.predicate()));
 
     $effect(() => {
       if (this.state.peekRestorationEpoch() === undefined) this.restoring = false;
@@ -119,20 +128,23 @@ export class ExploreLoader {
   }
 
   private runLoad(requestFingerprint: string): void {
+    const submitted = untrack(() => this.submitted);
+    this.submitted = false;
     this.clearCacheBuildRetry();
     const workspace = this.state.current.workspace;
     const restorationEpoch = this.state.restorationEpoch;
     void this.#retryRevision;
-    const predicate = untrack(() => this.state.predicate());
+    const predicate = untrack(() => this.callbacks.predicate?.() ?? this.state.predicate());
     const fingerprint = requestFingerprint;
     if (fingerprint !== this.selectionFingerprint) {
-      this.callbacks.onPredicateChange();
+      untrack(() => this.callbacks.onPredicateChange());
       this.selectionFingerprint = fingerprint;
     }
     const filesGrouping = workspace === 'files' && this.state.current.groupingChain.length > 0;
     const fileFilenameQuery = this.state.current.fileFilenameQuery;
     const fileMIMEFamilies = this.state.current.fileMIMEFamilies;
     if (!this.callbacks.isEnabled() || (workspace !== 'everything' && !filesGrouping)) {
+      if (workspace === 'files' && !filesGrouping) this.submitted = submitted;
       this.requestGeneration += 1;
       this.requestController?.abort();
       this.loading = false;
@@ -170,6 +182,7 @@ export class ExploreLoader {
     this.loadingMore = false;
     this.loading = true;
     this.error = '';
+    this.errorKind = undefined;
     this.pageError = '';
     this.unavailable = undefined;
     // A fresh predicate load must not leave the previous result visible and
@@ -191,6 +204,9 @@ export class ExploreLoader {
     void request
       .then((loaded) => {
         if (generation !== this.requestGeneration) return;
+        if (loaded.status !== 'unavailable') {
+          this.callbacks.onSearchAccepted?.(predicate.query ?? '', predicate.search_mode ?? 'full_text', controller.signal, submitted ? loaded.result.rows.length : undefined);
+        }
         if (loaded.status === 'unavailable') {
           this.rows = [];
           this.groupRows = [];
@@ -200,6 +216,7 @@ export class ExploreLoader {
             this.cacheBuildRetry = setTimeout(() => {
               this.cacheBuildRetry = undefined;
               if (generation === this.requestGeneration && !controller.signal.aborted) {
+                this.submitted = submitted;
                 this.#retryRevision += 1;
               }
             }, CACHE_BUILD_RETRY_DELAY_MS);
@@ -217,6 +234,7 @@ export class ExploreLoader {
           const groupResult = loaded.result as ExploreGroupResult;
           this.result = {
             rows: [],
+            warnings: groupResult.warnings,
             totalCount: groupResult.totalCount,
             cacheRevision: groupResult.cacheRevision,
             searchProvenance: groupResult.searchProvenance,
@@ -238,7 +256,7 @@ export class ExploreLoader {
         this.rows = [];
         this.groupRows = [];
         this.result = undefined;
-        this.error = cause instanceof Error ? cause.message : 'Could not load Everything.';
+        this.error = cause instanceof Error ? cause.message : 'Could not load Messages.';
       })
       .finally(() => {
         if (generation === this.requestGeneration) {
@@ -332,7 +350,10 @@ export class ExploreLoader {
     } catch (cause: unknown) {
       if (generation !== this.requestGeneration) return { status: 'stale' };
       if (cause instanceof DOMException && cause.name === 'AbortError') return { status: 'aborted' };
-      this.failPage(cause instanceof Error ? cause.message : 'Could not load more Everything results.');
+      if (cause instanceof ExploreAPIError && cause.status === 409 && cause.code === 'archive_revision_changed') {
+        return this.failPaging(REVISION_CHANGED_NOTICE);
+      }
+      this.failPage(cause instanceof Error ? cause.message : 'Could not load more Messages results.');
       return { status: 'failed' };
     } finally {
       if (generation === this.requestGeneration) this.loadingMore = false;

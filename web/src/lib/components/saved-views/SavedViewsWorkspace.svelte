@@ -4,16 +4,15 @@
     listSavedViews as generatedListSavedViews,
     patchSavedView as generatedPatchSavedView,
   } from '../../api/generated/api/api';
-  import { Button, EmptyState, Modal, TextInput } from '@kenn-io/kit-ui';
+  import { Button, EmptyState, Modal, TextInput, PageHeader } from '@kenn-io/kit-ui';
   import { onMount } from 'svelte';
-  import PageHeader from '../shell/PageHeader.svelte';
   import type { APIClient } from '../../api/client';
   import type { SavedView } from '../../api/generated/models';
   import type { ExploreURLState } from '../../explore/models';
   import { ExploreSelectionState } from '../../explore/state.svelte';
   import SelectionCheckbox from '../common/SelectionCheckbox.svelte';
   import {
-    CURRENT_SCHEMA_VERSION,
+    supportsSavedViewSchema,
     exploreStateFromSavedView,
     savedViewSummary,
     type CanonicalState,
@@ -75,7 +74,7 @@
   }
   function canonicalState(): CanonicalState { return canonicalSavedViewState(currentState); }
   function localIncompatibilityFor(view: SavedView): string {
-    if (!view.canonical_state || typeof view.canonical_state !== "object" || Array.isArray(view.canonical_state)) return "This saved definition cannot be opened. Create a new view from Explore.";
+    if (!view.canonical_state || typeof view.canonical_state !== "object" || Array.isArray(view.canonical_state)) return "This saved definition cannot be opened. Create a new view from Messages.";
     const saved = view.canonical_state as CanonicalState;
     const seen = new Set<string>();
     let sourceValues: string[] | undefined;
@@ -93,39 +92,39 @@
         return `This view has an unsupported v1 filter value for ${filter.field}.`;
       }
       if (!['account', 'participant', 'domain', 'mailing_list'].includes(dimension)) {
-        if (seen.has(dimension)) return `This view repeats its ${dimension} filter. Select the filters again in Explore and save a new view. Your saved definition is unchanged.`;
+        if (seen.has(dimension)) return `This view repeats its ${dimension} filter. Select the filters again in Messages and save a new view. Your saved definition is unchanged.`;
         seen.add(dimension);
       }
       if (dimension === 'participant' && filter.values.some((value) => !isValidFilterID(value))) {
-        return 'This saved people filter does not identify selected people. Select the people again in Explore and save a new view, or repair it with the current filters. Your saved definition is unchanged.';
+        return 'This saved people filter does not identify selected people. Select the people again in Messages and save a new view, or repair it with the current filters. Your saved definition is unchanged.';
       }
       if (dimension === 'source') {
-        if (filter.values.some((value) => !isValidFilterID(value))) return 'This saved source filter does not identify selected sources. Select the sources again in Explore and save a new view. Your saved definition is unchanged.';
+        if (filter.values.some((value) => !isValidFilterID(value))) return 'This saved source filter does not identify selected sources. Select the sources again in Messages and save a new view. Your saved definition is unchanged.';
         sourceValues = filter.values;
       }
       if (dimension === 'identity') {
         if (filter.values.length !== 3 || !isValidFilterID(filter.values[0]!) || !['', 'any', 'sender', 'recipient'].includes(filter.values[2]!)) {
-          return 'This saved identity filter has incomplete values or an unsupported direction. Select the identity again in Explore and save a new view. Your saved definition is unchanged.';
+          return 'This saved identity filter has incomplete values or an unsupported direction. Select the identity again in Messages and save a new view. Your saved definition is unchanged.';
         }
         identityValues = filter.values;
       }
       if (dimension === 'after' || dimension === 'before') {
         if (filter.values.length !== 1 || !rfc3339Timestamp(filter.values[0]!)) {
-          return 'This saved date filter needs one valid timestamp. Select the date again in Explore and save a new view. Your saved definition is unchanged.';
+          return 'This saved date filter needs one valid timestamp. Select the date again in Messages and save a new view. Your saved definition is unchanged.';
         }
       }
       if (dimension === 'deletion' && (filter.values.length !== 1 || !['active', 'deleted'].includes(filter.values[0]!))) {
-        return 'This saved deletion filter needs one recognized status. Select the deletion status again in Explore and save a new view. Your saved definition is unchanged.';
+        return 'This saved deletion filter needs one recognized status. Select the deletion status again in Messages and save a new view. Your saved definition is unchanged.';
       }
       const mailboxValues = dimension === 'inbox_state' ? ['inbox', 'outside', 'unknown'] : dimension === 'read_state' ? ['read', 'unread', 'unknown'] : undefined;
       if (mailboxValues && filter.values.some((value) => !mailboxValues.includes(value))) {
-        return 'This saved mailbox filter has an unrecognized status. Select the mailbox status again in Explore and save a new view. Your saved definition is unchanged.';
+        return 'This saved mailbox filter has an unrecognized status. Select the mailbox status again in Messages and save a new view. Your saved definition is unchanged.';
       }
     }
     const workProblem = emailWorkFilterProblem((saved.filters ?? []).map((filter) => ({dimension: FILTER_ALIASES.get(filter.field) ?? filter.field, values: filter.values})));
     if (workProblem) return workProblem;
     if (identityValues && (sourceValues?.length !== 1 || BigInt(sourceValues[0]!) !== BigInt(identityValues[0]!))) {
-      return 'This identity view needs its matching source. Select the source and identity again in Explore and save a new view. Your saved definition is unchanged.';
+      return 'This identity view needs its matching source. Select the source and identity again in Messages and save a new view. Your saved definition is unchanged.';
     }
     if (saved.search_mode && !['full_text', 'semantic', 'hybrid'].includes(saved.search_mode)) {
       return `This view has an unsupported v1 search mode: ${saved.search_mode}.`;
@@ -149,7 +148,7 @@
   }
   function canRepairFilters(view: SavedView): boolean {
     if (!view.canonical_state || typeof view.canonical_state !== "object" || Array.isArray(view.canonical_state)) return false;
-    return view.schema_version === CURRENT_SCHEMA_VERSION && !localIncompatibilityFor({
+    return supportsSavedViewSchema(view.schema_version) && !localIncompatibilityFor({
       ...view, canonical_state: repairFilterState(view)
     });
   }
@@ -234,10 +233,10 @@
   function open(view: SavedView): void {
     const incompatibility = incompatibilityFor(view);
     if (incompatibility) return;
-    onOpen({ ...exploreStateFromSavedView(view.canonical_state as CanonicalState), savedViewID: view.id, savedViewRevision: view.revision });
+    onOpen({ ...exploreStateFromSavedView(view.canonical_state as CanonicalState, view.schema_version), savedViewID: view.id, savedViewRevision: view.revision });
   }
   function incompatibilityFor(view: SavedView): string {
-    if (view.schema_version !== CURRENT_SCHEMA_VERSION) {
+    if (!supportsSavedViewSchema(view.schema_version)) {
       return `This view uses schema version ${view.schema_version}. Automatic migration is not supported; remove it and save the current view again.`;
     }
     return view.incompatibility_reason || localIncompatibilityFor(view);
@@ -272,7 +271,7 @@
   {:else if views.length === 0}
     <EmptyState
       title="No saved views yet"
-      description="Use Save view… in Everything or Files to keep a search and layout you want to return to."
+      description="Use Save view… in Messages or Files to keep a search and layout you want to return to."
     />
   {:else}
     <div class="selection-toolbar" aria-label="Saved view selection">
@@ -309,10 +308,10 @@
             />
           </span>
           {#if editing?.id === view.id}
-            <label>Edit name<TextInput ariaLabel="Edit name" bind:value={editName} /></label>
-            <label>Edit description<TextInput ariaLabel="Edit description" bind:value={editDescription} /></label>
+            <label>Edit name<TextInput ariaLabel="Edit name" bind:value={editName} block /></label>
+            <label>Edit description<TextInput ariaLabel="Edit description" bind:value={editDescription} block /></label>
             {#if repairingFilters}
-              <p class="notice">Replace this view’s filters with the current Explore filters below. The saved definition stays unchanged until you select Save repaired filters.</p>
+              <p class="notice">Replace this view’s filters with the current Messages filters below. The saved definition stays unchanged until you select Save repaired filters.</p>
               <ul aria-label="Replacement filters">
                 {#each currentState.filters as filter}<li>{filterCaption(filter)}</li>{:else}<li>All archive entries</li>{/each}
               </ul>
@@ -465,6 +464,7 @@
     font-size: var(--font-size-xs);
   }
   label {
+    min-width: 0;
     display: grid;
     gap: var(--space-1);
     color: var(--text-muted);
@@ -487,7 +487,7 @@
   }
   article.needs-attention { display: grid; grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   article.repairing { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: stretch; }
-  article.repairing .notice, article.repairing ul, article.repairing .actions { grid-column: 1 / -1; }
+  article.repairing .row-checkbox, article.repairing .notice, article.repairing ul, article.repairing .actions { grid-column: 1 / -1; }
   article.repairing ul { margin: 0; padding-left: var(--space-5); }
   .actions { flex-wrap: wrap; }
   article:last-child {

@@ -21,10 +21,7 @@ func (e *DuckDBEngine) exploreLogicalSQLLocked(ctx context.Context, request Expl
 		if withLists {
 			return buildExploreLogicalSQLWithCandidateRank(conditions, rank), nil, func() {}, nil
 		}
-		if rank == "NULL::BIGINT" {
-			return buildExploreLogicalSQLNoLists(conditions), nil, func() {}, nil
-		}
-		return buildExploreFilteredClassifiedCTE(conditions, rank) + exploreLogicalEntriesCTE(false), nil, func() {}, nil
+		return buildExploreNarrowFilteredClassifiedCTE(conditions, rank) + exploreLogicalEntriesCTE(false), nil, func() {}, nil
 	}
 	if request.Context.RowUnit != RowUnitEmailWork {
 		return "", nil, nil, fmt.Errorf("%w: unsupported row unit", ErrInvalidExploreRequest)

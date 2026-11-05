@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/vector"
 )
 
@@ -410,6 +411,7 @@ func TestFusedSearch_BM25TopKRespectsRank(t *testing.T) {
 // schema used by FusedSearch. Cleanup is registered via t.Cleanup.
 func openFusedMainWithSchema(t *testing.T, path string) *sql.DB {
 	t.Helper()
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	db, err := sql.Open("sqlite3", path)
 	require.NoError(t, err, "open main")
 	t.Cleanup(func() { _ = db.Close() })
@@ -447,6 +449,7 @@ CREATE TABLE message_recipients (
 
 func openFusedMainWithoutMessageType(t *testing.T, path string) *sql.DB {
 	t.Helper()
+	testutil.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	db, err := sql.Open("sqlite3", path)
 	require.NoError(t, err, "open main")
 	t.Cleanup(func() { _ = db.Close() })
@@ -529,7 +532,7 @@ func TestFusedSearch_PinnedPoolKeepsAttach(t *testing.T) {
 	// were unpinned AND vec.* actually missing, we wouldn't hang.
 	// With the pin it will timeout waiting for the tx's conn — which
 	// is exactly the intended serialisation, not a failure.
-	queryCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond) //nolint:kennlint // the deadline is the expected result; the open transaction holds the pinned connection
+	queryCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond) //nolint:kennlint // deadlinetest: the deadline is the expected result; the open transaction holds the pinned connection
 	defer cancel()
 	// This is a serialisation probe, not a data read: we only inspect
 	// secondErr to distinguish a deadlock-avoidance timeout from a

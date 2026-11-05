@@ -1,18 +1,18 @@
 <script lang="ts">
+  import { recordingSelection } from './lib/archive/recording-selection';
+  import { defaultExploreURLState, serializeExploreURLState } from './lib/explore/state.svelte';
   import { getSettings as generatedGetSettings } from './lib/api/generated/api/api';
   import { Button } from '@kenn-io/kit-ui';
-  import { startAppOpenedReporting } from '@kenn-io/kit-ui/utils/app-opened';
-  import { onDestroy, onMount } from 'svelte';
+  import { startTelemetryReporting, stopTelemetryReporting } from './lib/telemetry/actions';
+  import { onMount } from 'svelte';
   import { receiveGoogleContactsCallback } from './lib/settings/google-authorization';
   import { createSessionController, type SessionController } from './lib/api/session.svelte';
-  import { createSessionAwareAPIClient } from './lib/api/client';
   import { provideKataReadiness } from './lib/kata/kata-ready.svelte';
+  import { provideVisualReadiness } from './lib/search/visual-ready.svelte';
   import { provideMediaReadiness } from './lib/search/media-ready.svelte';
   import Login from './lib/components/auth/Login.svelte';
   import SettingsWorkspace from './lib/components/settings/SettingsWorkspace.svelte';
   import AppShell from './lib/components/shell/AppShell.svelte';
-  import MessagePage from './lib/components/reader/MessagePage.svelte';
-  import { startScreenViewReporting } from './lib/telemetry/screen-views';
   import { startSessionReporting } from './lib/telemetry/session';
   import type { ExploreSearchMode } from './lib/explore/models';
   import { availableSearchModeStorage, parseSearchMode, rememberSearchMode } from './lib/search/modes';
@@ -32,9 +32,18 @@
   provideKataReadiness(session.client);
   // svelte-ignore state_referenced_locally
   provideMediaReadiness(session.client);
+  // svelte-ignore state_referenced_locally
+  provideVisualReadiness(session.client);
   let oauthCallback = $state(false);
-  let pathname = $state(window.location.pathname);
-  const messageID = $derived(Number(/^\/messages\/([1-9]\d*)\/?$/.exec(pathname)?.[1]) || undefined);
+  const messageID = Number(/^\/messages\/([1-9]\d*)\/?$/.exec(window.location.pathname)?.[1]);
+  if (messageID) {
+    const search = new URLSearchParams(serializeExploreURLState({
+      ...defaultExploreURLState,
+      selectedRow: recordingSelection(messageID),
+    }));
+    search.delete('mode');
+    window.history.replaceState(window.history.state, '', `/?${search}${window.location.hash}`);
+  }
   let appearanceDefaults = $state<AppearanceDefaults>({ theme: 'system', density: 'compact' });
   let shellMounted = $derived(session.status !== undefined && session.authMode !== 'required');
   let searchModeDefault = $state<ExploreSearchMode | undefined>();
@@ -44,14 +53,16 @@
   // read the daemon before the save, so these values win over its result,
   // and a saved search mode keeps it from reconfiguring the open view.
   let savedSinceDefaultsLoad: SavedAppearance = {};
+  let sessions: ReturnType<typeof startSessionReporting> | undefined;
   onMount(() => {
     oauthCallback = receiveGoogleContactsCallback();
     if (!oauthCallback) void session.bootstrap();
+    return () => sessions?.stop();
   });
   // AppShell owns appearance while mounted; the boot and login screens apply
   // the same defaults and stored override so they render in the right theme.
   $effect(() => {
-    if (shellMounted && messageID === undefined) return;
+    if (shellMounted) return;
     const appearance = createAppearancePreferences(appearanceDefaults);
     return () => appearance.destroy();
   });
@@ -68,33 +79,18 @@
     savedSinceDefaultsLoad = {};
     void loadBrowserDefaults(generation);
   });
-  // Reporting needs the session, so it runs only while authenticated; kit-ui dedupes by UTC day.
-  $effect(() => {
+  // Register the telemetry transport before child screen effects create the shared reporter.
+  $effect.pre(() => {
     if (session.authMode === undefined || session.authMode === 'required') return;
     const client = session.client;
-    return startAppOpenedReporting({
-      route: '/api/v1/telemetry/events',
-      surface: 'web',
-      storageKey: 'msgvault.app-opened.web',
-      post: (route, event) =>
-        client.fetch(route, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(event),
-        }),
-    });
+    startTelemetryReporting(client, session.telemetryClient);
+    sessions ??= startSessionReporting(client);
+    sessions.signedIn(true);
+    return () => {
+      sessions?.signedIn(false);
+      stopTelemetryReporting(client);
+    };
   });
-  $effect(() => {
-    if (oauthCallback || !shellMounted || messageID === undefined) return;
-    return startScreenViewReporting(session.client, 'message');
-  });
-  let reporter: ReturnType<typeof startSessionReporting> | undefined;
-  $effect(() => {
-    const signedIn = session.authMode !== undefined && session.authMode !== 'required';
-    if (signedIn) reporter ??= startSessionReporting(createSessionAwareAPIClient(fetch, () => session.csrfToken));
-    reporter?.signedIn(signedIn);
-  });
-  onDestroy(() => reporter?.stop());
   async function loadBrowserDefaults(generation: number): Promise<void> {
     try {
       const { data } = await generatedGetSettings(session.client);
@@ -142,10 +138,8 @@
   }
 </script>
 
-<svelte:window onpopstate={() => pathname = window.location.pathname} />
-
 <svelte:head>
-  {#if !shellMounted || messageID !== undefined}<title>msgvault</title>{/if}
+  {#if !shellMounted}<title>msgvault</title>{/if}
 </svelte:head>
 
 {#if oauthCallback}
@@ -153,11 +147,8 @@
 {:else if session.authMode === 'required'}
   <Login {session} />
 {:else if shellMounted}
-  {#if messageID !== undefined}
-    <MessagePage client={session.client} {messageID} />
-  {:else}
   <AppShell principal={session.principal} client={session.client} {appearanceDefaults} {searchModeDefault}>
-    {#snippet settings(cardDAVRequest, onCardDAVRequestConsumed, navigationTarget, category, onCategoryChange)}
+    {#snippet settings(cardDAVRequest, onCardDAVRequestConsumed, navigationTarget, category, onCategoryChange, onSources, onOpenStatus, onStatusChange, operationsController, onDirectoryChange)}
       <SettingsWorkspace
         client={session.client}
         plainHTTPWarning={session.status?.plain_http_warning ?? false}
@@ -169,11 +160,15 @@
         {navigationTarget}
         {category}
         {onCategoryChange}
+        {onSources}
+        {onOpenStatus}
+        {onStatusChange}
+        {operationsController}
+        {onDirectoryChange}
         onAppearanceSaved={appearanceSaved}
       />
     {/snippet}
   </AppShell>
-  {/if}
 {:else if session.error !== undefined}
   <main class="boot-screen" aria-label="Connection error">
     <p class="boot-screen__brand">msgvault</p>

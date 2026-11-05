@@ -13,6 +13,7 @@ import (
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/slack"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/telemetry"
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
@@ -66,6 +67,57 @@ func TestResolveSlackSyncSourcesFiltersByTeam(t *testing.T) {
 	require.ErrorContains(err, `slack workspace "TYPO" is not registered`)
 }
 
+func TestResolveSlackSyncSourcesSkipsRetiredWorkspaces(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	st := testutil.NewTestStore(t)
+	retired, err := st.GetOrCreateSource(sourceTypeSlack, "T01:UOLD")
+	require.NoError(err)
+	active, err := st.GetOrCreateSource(sourceTypeSlack, "T02:UNEW")
+	require.NoError(err)
+	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+		FromSourceID: retired.ID,
+		IntoSourceID: active.ID,
+	})
+	require.NoError(err)
+
+	all, err := resolveSlackSyncSources(st, "")
+	require.NoError(err)
+	require.Len(all, 1)
+	assert.Equal(active.ID, all[0].ID)
+
+	_, err = resolveSlackSyncSources(st, "T01")
+	require.ErrorIs(err, store.ErrSourceRetired)
+}
+
+func TestScheduledSlackSyncSkipsRetiredMalformedWorkspace(t *testing.T) {
+	cfg := testConfigValue()
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	retired, err := st.GetOrCreateSource(sourceTypeSlack, "malformed-no-colon")
+	require.NoError(err)
+	active, err := st.GetOrCreateSource(sourceTypeSlack, "T09:UME")
+	require.NoError(err)
+	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+		FromSourceID: retired.ID,
+		IntoSourceID: active.ID,
+	})
+	require.NoError(err)
+
+	tmpDir := t.TempDir()
+	savedCfg := cfg
+	t.Cleanup(func() { cfg = savedCfg })
+	cfg = &config.Config{
+		HomeDir: tmpDir,
+		Data:    config.DataConfig{DataDir: tmpDir},
+	}
+	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+
+	err = runConfiguredSlackSync(testCtx, st)
+	require.ErrorContains(err, "no Slack token for UME in workspace T09")
+	require.NotContains(err.Error(), "malformed identifier")
+}
+
 func TestRunConfiguredSlackSyncIsolatesBrokenWorkspaces(t *testing.T) {
 	cfg := testConfigValue()
 
@@ -88,11 +140,18 @@ func TestRunConfiguredSlackSyncIsolatesBrokenWorkspaces(t *testing.T) {
 		Data:    config.DataConfig{DataDir: tmpDir},
 	}
 	testCtx := testInvocationContext(t.Context(), cfg, invocationOptions{})
-	_ = testCtx
+	events := 0
+	invocationFromContext(testCtx).syncFailures = &telemetry.SyncFailures{Capture: func(event string, props map[string]any) error {
+		assert.Equal(t, "sync_failed", event)
+		assert.Equal(t, "slack", props["sync_source"])
+		events++
+		return nil
+	}}
 
 	err = runConfiguredSlackSync(testCtx, st)
 	require.ErrorContains(err, "malformed identifier")
 	require.ErrorContains(err, "no Slack token for UME in workspace T09")
+	assert.Equal(t, 2, events)
 }
 
 func TestScheduledSlackAttemptsResumeAfterInterruptedWorkspace(t *testing.T) {

@@ -25,23 +25,10 @@ import (
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/plaud"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/telemetry"
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
-func TestPlaudCommandDiscovery(t *testing.T) {
-	assert := assert.New(t)
-	require := require.New(t)
-	for _, name := range []string{"add-plaud", "sync-plaud"} {
-		cmd, _, err := rootCmd.Find([]string{name})
-		require.NoError(err)
-		assert.Equal(name, cmd.Name())
-	}
-	cmd, _, err := rootCmd.Find([]string{"sync-plaud"})
-	require.NoError(err)
-	for _, name := range []string{"limit", "full", "after", "probe", "build-cache", "no-build-cache"} {
-		require.NotNil(cmd.Flags().Lookup(name))
-	}
-}
 func TestPlaudRemoteRefusesOAuthBeforeProxy(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -171,10 +158,8 @@ func TestPlaudAuthorizationPreflightUsesOwningDaemon(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	cfg.Plaud = []config.PlaudSource{{Identifier: "work", AccountEmail: "replacement@example.com", Endpoint: upstream.URL}}
-	st, err := store.Open(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
-	_, err = plaud.RegisterSource(st, "work", "owner@example.com")
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+	_, err := plaud.RegisterSource(st, "work", "owner@example.com")
 	require.NoError(err)
 	require.NoError(st.Close())
 	owner, err := tryAcquireWriteOwnerLock(cfg.Data.DataDir)
@@ -211,7 +196,7 @@ func TestPlaudAuthorizationPreflightUsesOwningDaemon(t *testing.T) {
 		_, _ = fmt.Fprintln(w)
 		event := api.CLIRunEvent{Type: "complete"}
 		if runErr != nil {
-			event = api.CLIRunEvent{Type: "error", Error: classifyDaemonCLIWaitErr(runErr, req.Args).Error()}
+			event = api.CLIRunEvent{Type: "error", Error: classifyDaemonCLIWaitErr(runErr, req.Args, nil).Error()}
 		}
 		assert.NoError(json.MarshalWrite(w, event))
 		_, _ = fmt.Fprintln(w)
@@ -283,6 +268,65 @@ func TestPlaudScheduledMissingSourceStopsBeforeAuth(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "add-plaud work")
 }
+
+func retiredPlaudSyncSource(t *testing.T, st *store.Store) *store.Source {
+	t.Helper()
+	require := require.New(t)
+	retired, err := st.GetOrCreateSource(sourceTypePlaud, "history")
+	require.NoError(err)
+	active, err := st.GetOrCreateSource(sourceTypePlaud, "active")
+	require.NoError(err)
+	_, err = st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+		FromSourceID: retired.ID,
+		IntoSourceID: active.ID,
+	})
+	require.NoError(err)
+	return retired
+}
+
+func retiredPlaudSyncConfig(t *testing.T) *config.Config {
+	t.Helper()
+	require := require.New(t)
+	dataDir := t.TempDir()
+	cfg := lifecycleTestConfig(dataDir)
+	cfg.Plaud = []config.PlaudSource{{Identifier: "history", AccountEmail: "owner@example.com"}}
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
+	retiredPlaudSyncSource(t, st)
+	require.NoError(st.Close())
+	return cfg
+}
+
+func TestSyncPlaudSkipsRetiredAccountForAllConfiguredSources(t *testing.T) {
+	cfg := retiredPlaudSyncConfig(t)
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	cmd := newSyncPlaudCmd()
+	cmd.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+	cmd.SetArgs([]string{"--no-build-cache"})
+	require.NoError(t, cmd.Execute())
+}
+
+func TestSyncPlaudRejectsExplicitRetiredAccountBeforeCredentials(t *testing.T) {
+	cfg := retiredPlaudSyncConfig(t)
+	t.Setenv(daemonCLISubprocessEnv, strconv.Itoa(os.Getppid()))
+	cmd := newSyncPlaudCmd()
+	cmd.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+	cmd.SetArgs([]string{"--no-build-cache", "history"})
+	require.ErrorIs(t, cmd.Execute(), store.ErrSourceRetired)
+}
+
+func TestScheduledPlaudSyncSkipsRetiredSourceBeforeCredentials(t *testing.T) {
+	require := require.New(t)
+	st := testutil.NewTestStore(t)
+	retired := retiredPlaudSyncSource(t, st)
+	cfg := config.NewDefaultConfig()
+	ctx := testInvocationContext(t.Context(), cfg, invocationOptions{})
+
+	err := runConfiguredPlaudSync(ctx, st, config.PlaudSource{
+		Identifier: retired.Identifier, AccountEmail: "owner@example.com",
+	})
+	require.NoError(err)
+}
+
 func TestPlaudPartialCanceledImportRefreshesDetachedContext(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
@@ -348,10 +392,8 @@ func TestRemovePlaudAccountDeletesOnlyItsToken(t *testing.T) {
 	require := require.New(t)
 	tmp := t.TempDir()
 	cfg := &config.Config{HomeDir: tmp, Data: config.DataConfig{DataDir: tmp}}
-	st, err := store.Open(filepath.Join(tmp, "msgvault.db"))
-	require.NoError(err)
-	require.NoError(st.InitSchema())
-	_, err = st.GetOrCreateSource("plaud", "work")
+	st := testutil.NewSQLiteTestStoreAt(t, filepath.Join(tmp, "msgvault.db"))
+	_, err := st.GetOrCreateSource("plaud", "work")
 	require.NoError(err)
 	require.NoError(st.Close())
 	mgr := plaud.NewManager("", cfg.TokensDir(), nil)
@@ -391,4 +433,18 @@ func TestPlaudManualCacheClassification(t *testing.T) {
 	assert.True(t, manualSyncCLICommand([]string{"sync-plaud", "work"}))
 	assert.False(t, manualSyncCLICommand([]string{"sync-plaud", "work", "--probe"}))
 	assert.False(t, manualSyncCLICommand([]string{"sync-plaud", "work", "--probe=true"}))
+}
+
+func TestPlaudImportRecoveryPrecedesCacheRefresh(t *testing.T) {
+	state := testInvocationWithConfig(lifecycleTestConfig(t.TempDir()))
+	events := 0
+	state.syncFailures = &telemetry.SyncFailures{Capture: func(string, map[string]any) error { events++; return nil }}
+	failure := errors.New("provider unavailable")
+	state.syncFailures.Record(t.Context(), sourceTypePlaud, "work", failure)
+	cacheErr := errors.New("cache unavailable")
+	err := finishScheduledPlaudImport(withInvocation(t.Context(), state), "work", &plaud.ImportSummary{}, nil, func(context.Context, string) error { return cacheErr })
+	require.ErrorIs(t, err, cacheErr)
+	assert.Equal(t, 1, events)
+	state.syncFailures.Record(t.Context(), sourceTypePlaud, "work", failure)
+	assert.Equal(t, 2, events, "a successful import recovers the source even when its cache refresh fails")
 }

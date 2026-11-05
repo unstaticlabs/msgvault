@@ -19,6 +19,7 @@ import (
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/scheduler"
 	"go.kenn.io/msgvault/internal/store"
+	"go.kenn.io/msgvault/internal/testutil"
 	"go.kenn.io/msgvault/internal/testutil/storetest"
 )
 
@@ -38,9 +39,7 @@ func TestRunActivityBuildLocalUsesConfigAndBackstop(t *testing.T) {
 	cfg.Activity.BatchSize = 1
 	cfg.Activity.MaxDirectCounterparts = 1
 
-	st, err := store.OpenForTest(cfg.DatabaseDSN())
-	require.NoError(err)
-	require.NoError(st.InitSchema())
+	st := testutil.NewSQLiteTestStoreAt(t, cfg.DatabaseDSN())
 	source, err := st.GetOrCreateSource("gmail", "activity-cli@example.com")
 	require.NoError(err)
 	require.NoError(st.AddAccountIdentity(
@@ -278,14 +277,14 @@ func testScheduledProjectionYieldsToSyncBetweenPasses(t *testing.T, f *storetest
 	require.NoError(registerActivityProjectionJob(sched, f.Store, config.ActivityConfig{
 		Timezone: "UTC", BatchSize: 1, MaxDirectCounterparts: 25, Schedule: "0 0 1 1 *",
 	}, testDiscardLogger()))
-	_, startErr := sched.StartJob(activityProjectionJob)
+	_, startErr := sched.StartJob(activityProjectionJob, false)
 	require.NoError(startErr)
 	select {
 	case <-gate.acquired:
 	case <-time.After(10 * time.Second):
 		require.FailNow("projection did not acquire the gate")
 	}
-	require.NoError(sched.TriggerSync("short@example.com"))
+	require.NoError(sched.TriggerSync("short@example.com", false))
 	// Queued is set before the sync goroutine reaches the gate.
 	synctest.Wait()
 	require.True(sched.Status()[0].Queued)

@@ -32,9 +32,22 @@ import (
 // message dimension; version 26 adds envelope_address (the header address as
 // recorded, NULL when absent) to message_recipients and makes email_address
 // the resolved recipient address (envelope, else participant), never an empty
-// Unified cache schema includes upstream account scopes and direct activity,
-// plus provider mailbox status and revision-pinned email-work facts/journal.
-const CacheSchemaVersion = 32
+// string. Version 27 adds curated person display names.
+// Version 28 projects RFC Message-ID into every messages cache shard.
+// Version 29 persists compact logical and temperature contributions so
+// incremental builds can update them without rescanning expanded activity.
+// Version 30 stores direct activity edges and expands conversation membership
+// from the current roster when queried.
+// Version 31 adds the message account_address and account_path projection.
+// Version 32 marks merged archive-only messages so deletion preflight counts
+// only messages that can still be deleted from their source.
+// Version 33 flags unsent messages in the relationship activity dataset.
+// Version 34 carries hidden_text_present in message rows.
+// Version 35 combines these projections with provider mailbox state and
+// revision-pinned related-email facts and recovery journals.
+// Schema bumps force a full rebuild before readers use an older publication,
+// so committed caches never mix shards of different shapes.
+const CacheSchemaVersion = 35
 
 // CacheSyncState is the commit marker written after a complete analytics
 // cache publication. SQLite remains authoritative; these watermarks only
@@ -99,6 +112,7 @@ type CacheSyncState struct {
 	// fields are mutable and bake into cache datasets that incremental builds
 	// otherwise never revisit; this fingerprint detects that drift.
 	ConversationTypesFingerprint string                          `json:"conversation_types_fingerprint,omitempty"`
+	UnsentFingerprint            string                          `json:"unsent_fingerprint,omitempty"`
 	Stats                        identityindex.CacheStatsSummary `json:"stats"`
 }
 

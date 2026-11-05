@@ -275,6 +275,11 @@ type CLIAccount struct {
 	CalendarCoverage *store.CalendarCoverage `json:"calendar_coverage,omitempty"`
 	VirtualAccounts  []store.VirtualAccount  `json:"virtual_accounts,omitempty"`
 
+	Identifier         string     `json:"identifier"`
+	Alias              string     `json:"alias"`
+	HistoryOnly        bool       `json:"history_only"`
+	ReanchorRequired   bool       `json:"reanchor_required"`
+	MergedIntoSourceID int64      `json:"merged_into_source_id"`
 	ID                 int64      `json:"id"`
 	Email              string     `json:"email"`
 	Type               string     `json:"type"`
@@ -905,7 +910,7 @@ func (c *Client) runCLIStream(
 
 	return decodeCLIStream(resp.Body, operation, func(event cliStreamEvent) (bool, error) {
 		switch event.Type {
-		case "stdout", "stderr":
+		case "stdout", "stderr", "outcome":
 			if output != nil && event.Data != "" {
 				if err := output(event.Type, event.Data); err != nil {
 					return false, err
@@ -948,7 +953,7 @@ func (c *Client) GetCLIStats(
 }
 
 func (c *Client) GetCLISearch(ctx context.Context, req CLISearchRequest) (*CLISearch, error) {
-	if err := c.requireListIDCapability(ctx, search.Parse(req.Query), query.MessageFilter{}); err != nil {
+	if err := c.requireListIDCapability(ctx, search.ParseOR(req.Query), query.MessageFilter{}); err != nil {
 		return nil, err
 	}
 	if req.DeletionScope != "" {
@@ -982,7 +987,7 @@ func (c *Client) GetCLISearch(ctx context.Context, req CLISearchRequest) (*CLISe
 	}
 	result := cliSearchFromGenerated(resp.JSON200)
 	for i := range result.Results {
-		result.Results[i].WebURL = c.messageWebURL(result.Results[i].ID)
+		result.Results[i].WebURL = c.messageWebURL(ctx, result.Results[i].ID)
 	}
 	return result, nil
 }
@@ -1039,7 +1044,7 @@ func (c *Client) GetCLIHybridSearch(
 		return nil, err
 	}
 	for i := range result.Results {
-		result.Results[i].Message.WebURL = c.messageWebURL(result.Results[i].Message.ID)
+		result.Results[i].Message.WebURL = c.messageWebURL(ctx, result.Results[i].Message.ID)
 	}
 	return result, nil
 }
@@ -1084,7 +1089,7 @@ func (c *Client) FindSimilarMessages(
 			Fingerprint: resp.JSON200.Generation.Fingerprint,
 			State:       resp.JSON200.Generation.State,
 		},
-		Messages: c.messageSummariesWithURLs(resp.JSON200.Messages),
+		Messages: c.messageSummariesWithURLs(ctx, resp.JSON200.Messages),
 	}, nil
 }
 
@@ -1144,13 +1149,18 @@ func (c *Client) UpdateCLIAccount(
 	if req.SourceIDSet || req.SourceID != 0 {
 		sourceID = &req.SourceID
 	}
+	var displayName *string
+	if req.DisplayName != "" {
+		displayName = &req.DisplayName
+	}
 	resp, err := CLIResponse(c, func(client *apiclient.Client) (*generated.UpdateCLIAccountResp, error) {
 		return client.UpdateCLIAccountWithResponse(ctx, &generated.UpdateCLIAccountRequestOptions{
 			Body: &generated.UpdateCLIAccountBody{
 				Account:     account,
 				Email:       email,
 				SourceID:    sourceID,
-				DisplayName: req.DisplayName,
+				DisplayName: displayName,
+				Alias:       req.Alias, HistoryOnly: req.HistoryOnly, AcceptReanchor: &req.AcceptReanchor,
 			},
 		})
 	})
@@ -1438,7 +1448,7 @@ func (c *Client) GetCLIMessage(ctx context.Context, id string) (*query.MessageDe
 	}
 	message := cliMessageDetailFromGenerated(resp.JSON200)
 	if message != nil {
-		message.WebURL = c.messageWebURL(message.ID)
+		message.WebURL = c.messageWebURL(ctx, message.ID)
 	}
 	return message, nil
 }
@@ -1666,6 +1676,7 @@ func cliAccountUpdateResultFromGenerated(result *generated.UpdateResult) *CLIAcc
 	return &CLIAccountUpdateResult{
 		Email:       result.Email,
 		DisplayName: result.DisplayName,
+		Identifier:  result.Identifier, Alias: result.Alias, HistoryOnly: result.HistoryOnly, ReanchorRequired: result.ReanchorRequired,
 	}
 }
 
@@ -1763,17 +1774,17 @@ func inboxArchiveResultFromGenerated(
 
 // messageWebURL opens the selected daemon's direct message route.
 // Message IDs are local to that daemon.
-func (c *Client) messageWebURL(id int64) string {
+func (c *Client) messageWebURL(ctx context.Context, id int64) string {
 	if id <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s/messages/%d", c.baseURL, id)
+	return fmt.Sprintf("%s/messages/%d", apiprotocol.BrowserOrigin(ctx, c.currentDaemonURL()), id)
 }
 
-func (c *Client) messageSummariesWithURLs(messages []generated.MessageSummary) []query.MessageSummary {
+func (c *Client) messageSummariesWithURLs(ctx context.Context, messages []generated.MessageSummary) []query.MessageSummary {
 	result := messageSummariesFromGenerated(messages)
 	for i := range result {
-		result[i].WebURL = c.messageWebURL(result[i].ID)
+		result[i].WebURL = c.messageWebURL(ctx, result[i].ID)
 	}
 	return result
 }

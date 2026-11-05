@@ -231,6 +231,21 @@ func OpenHTTPStore(ctx context.Context, minimumSchema ...string) (*daemonclient.
 	return openHTTPStoreWithStartupCacheIntent(ctx, startupCacheBuildIntentNone, minimumSchema...)
 }
 
+// newLocalDaemonClient connects to the local daemon described by rt.
+func newLocalDaemonClient(ctx context.Context, cfg *config.Config, rt *DaemonRuntime) (*daemonclient.Client, error) {
+	st, err := newDaemonCLIClient(ctx, daemonclient.Config{
+		URL:              urlFromDaemonRuntime(rt),
+		APIKey:           cfg.Server.AuthenticationKey(),
+		LocalDaemonToken: rt.Record.Metadata[runtimeShutdownToken],
+		AllowInsecure:    true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	st.SetBusyNotifier(reportDaemonBusyWait)
+	return st, nil
+}
+
 func openHTTPStoreWithStartupCacheIntent(
 	ctx context.Context,
 	intent startupCacheBuildIntent,
@@ -267,16 +282,10 @@ func openHTTPStoreWithStartupCacheIntent(
 		return nil, HTTPStoreInfo{}, fmt.Errorf("resolve server API key after local daemon startup: %w", err)
 	}
 	url := urlFromDaemonRuntime(rt)
-	st, err := newDaemonCLIClient(ctx, daemonclient.Config{
-		URL:              url,
-		APIKey:           currentCfg.Server.AuthenticationKey(),
-		LocalDaemonToken: rt.Record.Metadata[runtimeShutdownToken],
-		AllowInsecure:    true,
-	})
+	st, err := newLocalDaemonClient(ctx, currentCfg, rt)
 	if err != nil {
 		return nil, HTTPStoreInfo{}, err
 	}
-	st.SetBusyNotifier(reportDaemonBusyWait)
 	return st, HTTPStoreInfo{
 		Kind:                     HTTPStoreLocalDaemon,
 		URL:                      url,
@@ -393,7 +402,9 @@ func ensureLocalDaemonRuntimeWithStartupCacheIntent(
 	// daemon that is running instead of restarting it.
 	autoStart := c.Server.DaemonAutoStartEnabled()
 	restartPolicy := c.Server.DaemonAutoRestart
-	if !autoStart {
+	// A daemon must not be replaced by one this config cannot start.
+	configErr := c.DaemonConfigError()
+	if !autoStart || configErr != nil {
 		restartPolicy = config.DaemonAutoRestartNever
 	}
 	if err := os.MkdirAll(c.Data.DataDir, 0o700); err != nil {
@@ -462,6 +473,9 @@ func ensureLocalDaemonRuntimeWithStartupCacheIntent(
 		incompatibleGuidance = "restart or upgrade the supervised service"
 	}
 	prep, err := prepareBackgroundDaemonStart(c, restartPolicy, incompatibleGuidance, loggerFromContext(ctx))
+	if errors.Is(err, errIncompatibleDaemon) && configErr != nil && autoStart {
+		return nil, localDaemonStartupInfo{}, daemonConfigStartError(configErr)
+	}
 	if err != nil {
 		return nil, localDaemonStartupInfo{}, err
 	}
@@ -473,6 +487,9 @@ func ensureLocalDaemonRuntimeWithStartupCacheIntent(
 	}
 	if !autoStart {
 		return nil, localDaemonStartupInfo{}, localDaemonAutoStartDisabledError(c.Data.DataDir)
+	}
+	if configErr != nil {
+		return nil, localDaemonStartupInfo{}, daemonConfigStartError(configErr)
 	}
 
 	startedAt := time.Now()
@@ -542,6 +559,11 @@ func ensureLocalDaemonRuntimeWithStartupCacheIntent(
 		LogPath: proc.LogPath,
 		Outcome: startupCacheBuildOutcomeFromRuntime(rt),
 	}, nil
+}
+
+// daemonConfigStartError refuses to start a daemon from a config it would reject.
+func daemonConfigStartError(err error) error {
+	return fmt.Errorf("start background daemon: daemon config invalid: %w", err)
 }
 
 // errLocalDaemonAutoStartDisabled marks a local resolution that found no

@@ -15,6 +15,7 @@ import (
 // attachment marker that has not been downloaded yet.
 type PendingAttachmentMessage struct {
 	MessageID        int64
+	ConversationID   int64
 	SourceMessageID  string
 	ChatID           string // conversations.source_conversation_id
 	ConversationType string
@@ -33,7 +34,7 @@ type DiscordAttachmentMessage = PendingAttachmentMessage
 
 func (s *Store) replaceMessageProviderAttachmentsContext(ctx context.Context, messageID int64, providerPrefix string, refs []AttachmentRef) error {
 	return s.replaceMessageAttachmentsWhereContext(ctx,
-		messageID, `source_attachment_id LIKE ?`, false, refs, providerPrefix+"%",
+		messageID, `source_attachment_id LIKE ?`, refs, providerPrefix+"%",
 	)
 }
 
@@ -43,7 +44,8 @@ func (s *Store) messageProviderAttachments(messageID int64, providerPrefix strin
 
 // messageProviderAttachmentsContext honors cancellation during messageProviderAttachments.
 func (s *Store) messageProviderAttachmentsContext(ctx context.Context, messageID int64, providerPrefix string) (map[string]AttachmentRef, error) {
-	refs, err := s.messageAttachmentsWhere(ctx, messageID, `source_attachment_id LIKE ?`, providerPrefix+"%")
+	refs, err := s.messageAttachmentsWhere(ctx, messageID, `source_attachment_id LIKE ?
+		AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = attachments.id)`, providerPrefix+"%")
 	if err != nil {
 		return nil, err
 	}
@@ -54,10 +56,19 @@ func (s *Store) messageProviderAttachmentsContext(ctx context.Context, messageID
 	return out, nil
 }
 
+// MessageIMessageAttachmentsContext returns a message's Messages occurrences by source attachment ID.
+func (s *Store) MessageIMessageAttachmentsContext(ctx context.Context, messageID int64) (map[string]AttachmentRef, error) {
+	return s.messageProviderAttachmentsContext(ctx, messageID, "imessage:")
+}
+
 // MessageMIMEAttachmentsContext returns a message's MIME attachment rows in
 // row order, including pending and skipped occurrences.
 func (s *Store) MessageMIMEAttachmentsContext(ctx context.Context, messageID int64) ([]AttachmentRef, error) {
-	return s.messageAttachmentsWhere(ctx, messageID, `source_attachment_id IS NULL`)
+	return s.messageAttachmentsWhere(ctx, messageID, `source_attachment_id IS NULL
+		AND NOT EXISTS (
+			SELECT 1 FROM source_merge_preserved_attachments spa
+			WHERE spa.attachment_id = attachments.id
+		)`)
 }
 
 func (s *Store) messageAttachmentsWhere(ctx context.Context, messageID int64, where string, args ...any) ([]AttachmentRef, error) {
@@ -106,7 +117,7 @@ func (s *Store) listRetryableAttachmentMessagesContext(ctx context.Context,
 	sourceID int64, providerPrefix string, policy attachmentpolicy.Policy,
 ) ([]PendingAttachmentMessage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT m.id, m.source_message_id, c.source_conversation_id,
+		SELECT m.id, c.id, m.source_message_id, c.source_conversation_id,
 		       c.conversation_type, COALESCE(c.participant_count, 0),
 		       COALESCE(a.attachment_state, ''), COALESCE(a.size, 0),
 		       COALESCE(a.content_hash, ''), a.storage_path,
@@ -115,7 +126,9 @@ func (s *Store) listRetryableAttachmentMessagesContext(ctx context.Context,
 		JOIN conversations c ON c.id = m.conversation_id
 		JOIN attachments a ON a.message_id = m.id
 		WHERE m.source_id = ?
-		  AND a.source_attachment_id LIKE ?
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
+ AND a.source_attachment_id LIKE ?
 		ORDER BY m.id, a.id
 	`, sourceID, providerPrefix+"%")
 	if err != nil {
@@ -129,7 +142,7 @@ func (s *Store) listRetryableAttachmentMessagesContext(ctx context.Context,
 		var state attachmentpolicy.DownloadState
 		var size int64
 		var contentHash, storagePath, mediaType, conversationMetadata string
-		if err := rows.Scan(&item.MessageID, &item.SourceMessageID, &item.ChatID,
+		if err := rows.Scan(&item.MessageID, &item.ConversationID, &item.SourceMessageID, &item.ChatID,
 			&item.ConversationType, &item.ParticipantCount, &state, &size,
 			&contentHash, &storagePath, &mediaType, &conversationMetadata); err != nil {
 			return nil, err
@@ -153,6 +166,29 @@ func (s *Store) listRetryableAttachmentMessagesContext(ctx context.Context,
 		}
 	}
 	return items, rows.Err()
+}
+
+// ReplaceMessageInlineProviderAttachments replaces Inline-managed attachment occurrences.
+func (s *Store) ReplaceMessageInlineProviderAttachments(messageID int64, refs []AttachmentRef) error {
+	return s.withTx(func(tx *loggedTx) error {
+		if err := s.requireSyncMessageSourceTx(tx, messageID); err != nil {
+			return err
+		}
+		if err := s.replaceMessageAttachmentsWhereTx(tx, messageID, `source_attachment_id LIKE ?`, refs, "inline:%"); err != nil {
+			return err
+		}
+		return recomputeMessageAttachmentStatsWith(tx, messageID)
+	})
+}
+
+// MessageInlineProviderAttachments returns Inline-managed rows keyed by stable source ID.
+func (s *Store) MessageInlineProviderAttachments(messageID int64) (map[string]AttachmentRef, error) {
+	return s.messageProviderAttachments(messageID, "inline:")
+}
+
+// ListInlineProviderRetryableAttachmentMessages returns unfinished Inline media under the current policy.
+func (s *Store) ListInlineProviderRetryableAttachmentMessages(sourceID int64, policy attachmentpolicy.Policy) ([]PendingAttachmentMessage, error) {
+	return s.listRetryableAttachmentMessages(sourceID, "inline:", policy)
 }
 
 // ListBeeperRetryableAttachmentMessages returns only unfinished Beeper media.
@@ -192,7 +228,9 @@ func (s *Store) ApplyBeeperRetryableAttachmentPolicy(
 			JOIN messages m ON m.id = a.message_id
 			JOIN conversations c ON c.id = m.conversation_id
 			WHERE m.source_id = ?
-			  AND a.source_attachment_id LIKE 'beeper:%'
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+			  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
+ AND a.source_attachment_id LIKE 'beeper:%'
 			  AND COALESCE(a.content_hash, '') = ''
 			  AND COALESCE(a.media_type, '') <> 'link'
 			  AND COALESCE(a.attachment_state, '') IN ('', ?, ?, ?)
@@ -338,7 +376,7 @@ func (s *Store) AttachmentConversationMembershipContext(ctx context.Context, mes
 	record := decodeMembershipRecord(metadata)
 	return ConversationMembership{
 		Conversation:   conversation,
-		RosterArchived: record.counted && !record.unknown,
+		RosterArchived: record.counted && !record.unknown && !record.repairPending,
 	}, err
 }
 
@@ -355,8 +393,14 @@ type MessageConversationRef struct {
 // could not read, so the archived participant count becomes authoritative
 // before policy is evaluated again.
 func (s *Store) MessageConversation(messageID int64) (MessageConversationRef, error) {
+	return s.MessageConversationContext(context.Background(), messageID)
+}
+
+// MessageConversationContext is MessageConversation with a context. A message
+// that does not exist returns an error wrapping sql.ErrNoRows.
+func (s *Store) MessageConversationContext(ctx context.Context, messageID int64) (MessageConversationRef, error) {
 	var ref MessageConversationRef
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT c.id, COALESCE(c.source_conversation_id, ''), COALESCE(c.conversation_type, '')
 		FROM messages m
 		JOIN conversations c ON c.id = m.conversation_id
@@ -371,11 +415,12 @@ func (s *Store) MessageConversation(messageID int64) (MessageConversationRef, er
 // Provider identities used to select membership semantics. Callers pass
 // either a source type or the provider's attachment-ID prefix.
 const (
-	sourceTypeDiscord   = "discord"
-	sourceTypeTeams     = "teams"
-	sourceTypeSlack     = "slack"
-	sourceTypeSlackdump = "slackdump"
-	sourceTypeBeeper    = "beeper"
+	sourceTypeDiscord       = "discord"
+	sourceTypeTeams         = "teams"
+	sourceTypeSlack         = "slack"
+	sourceTypeSlackdump     = "slackdump"
+	sourceTypeBeeper        = "beeper"
+	sourceTypeAppleMessages = "apple_messages"
 )
 
 // membershipRecord is the provider-maintained membership a conversation's
@@ -385,9 +430,10 @@ const (
 // present at once: a count read earlier stays for reference while the unknown
 // marker says the latest read failed and the roster is unresolved.
 type membershipRecord struct {
-	memberCount int
-	counted     bool
-	unknown     bool
+	memberCount   int
+	counted       bool
+	unknown       bool
+	repairPending bool
 }
 
 func decodeMembershipRecord(metadata string) membershipRecord {
@@ -395,13 +441,17 @@ func decodeMembershipRecord(metadata string) membershipRecord {
 		return membershipRecord{}
 	}
 	var stored struct {
-		MemberCount        *int `json:"member_count"`
-		MemberCountUnknown bool `json:"member_count_unknown"`
+		MemberCount         *int `json:"member_count"`
+		MemberCountUnknown  bool `json:"member_count_unknown"`
+		RosterRepairPending bool `json:"roster_repair_pending"`
 	}
 	if err := json.Unmarshal([]byte(metadata), &stored); err != nil {
 		return membershipRecord{}
 	}
-	record := membershipRecord{unknown: stored.MemberCountUnknown}
+	record := membershipRecord{
+		unknown:       stored.MemberCountUnknown,
+		repairPending: stored.RosterRepairPending,
+	}
 	if stored.MemberCount != nil {
 		record.memberCount, record.counted = *stored.MemberCount, true
 	}
@@ -411,13 +461,13 @@ func decodeMembershipRecord(metadata string) membershipRecord {
 // attachmentPolicyParticipantCount resolves the participant count media policy
 // evaluates for an archived conversation. Discord stages an authoritative
 // catalog count that may only raise the observed one, so recomputed
-// conversation stats cannot silently relax an exclusion. Teams, Slack, and
-// Beeper archive the exact roster they read (Beeper: the participant total it
-// reports, which a truncated listing's rows undercount), which is
-// authoritative in both directions: participant rows only ever accumulate, so
-// membership that shrank below the threshold would otherwise keep excluding
-// the conversation's media forever. Conversation stats keep the observed count
-// for UI and search.
+// conversation stats cannot silently relax an exclusion. Teams, Slack,
+// Beeper, Inline, and Messages archive the exact roster they read
+// (Beeper: the participant total it reports, which a truncated listing's
+// rows undercount), which is authoritative in both directions: participant
+// rows only ever accumulate, so membership that shrank below the threshold
+// would otherwise keep excluding the conversation's media forever.
+// Conversation stats keep the observed count for UI and search.
 func attachmentPolicyParticipantCount(sourceType string, observed int, metadata string) int {
 	record := decodeMembershipRecord(metadata)
 	if !record.counted {
@@ -426,7 +476,7 @@ func attachmentPolicyParticipantCount(sourceType string, observed int, metadata 
 	switch strings.TrimSuffix(sourceType, ":") {
 	case sourceTypeDiscord:
 		return max(record.memberCount, observed)
-	case sourceTypeTeams, sourceTypeSlack, sourceTypeSlackdump, sourceTypeBeeper:
+	case sourceTypeTeams, sourceTypeSlack, sourceTypeSlackdump, sourceTypeBeeper, "inline", sourceTypeAppleMessages:
 		return record.memberCount
 	default:
 		return observed
@@ -447,7 +497,7 @@ func policyParticipantCount(
 	sourceType string, observed int, metadata string, policy attachmentpolicy.Policy,
 ) int {
 	record := decodeMembershipRecord(metadata)
-	if policy.MaxParticipants > 0 && (!record.counted || record.unknown) {
+	if policy.MaxParticipants > 0 && (!record.counted || record.unknown || record.repairPending) {
 		return policy.MaxParticipants + 1
 	}
 	return attachmentPolicyParticipantCount(sourceType, observed, metadata)
@@ -455,14 +505,16 @@ func policyParticipantCount(
 
 func (s *Store) listPendingAttachmentMessages(sourceID int64, providerPrefix string) ([]PendingAttachmentMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.source_message_id, c.source_conversation_id
+		SELECT m.id, c.id, m.source_message_id, c.source_conversation_id
 		FROM messages m
 		JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.source_id = ?
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
 		  AND EXISTS (
 		    SELECT 1 FROM attachments a
 		    WHERE a.message_id = m.id
-		      AND a.source_attachment_id LIKE ?
+		      AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
+ AND a.source_attachment_id LIKE ?
 		      AND (a.content_hash IS NULL OR a.content_hash = '')
 		      AND COALESCE(a.media_type, '') <> 'link'
 		      AND COALESCE(a.attachment_state, '') <> ?
@@ -476,7 +528,7 @@ func (s *Store) listPendingAttachmentMessages(sourceID int64, providerPrefix str
 	var items []PendingAttachmentMessage
 	for rows.Next() {
 		var item PendingAttachmentMessage
-		if err := rows.Scan(&item.MessageID, &item.SourceMessageID, &item.ChatID); err != nil {
+		if err := rows.Scan(&item.MessageID, &item.ConversationID, &item.SourceMessageID, &item.ChatID); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -667,13 +719,15 @@ func (s *Store) MessageDiscordAttachmentsContext(ctx context.Context, messageID 
 // one Discord attachment that does not resolve to a trusted local CAS path.
 func (s *Store) ListDiscordPendingAttachmentMessages(sourceID int64) ([]DiscordPendingAttachmentMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.source_message_id, c.source_conversation_id,
+		SELECT m.id, c.id, m.source_message_id, c.source_conversation_id,
 		       a.storage_path, COALESCE(a.content_hash, '')
 		FROM messages m
 		JOIN conversations c ON c.id = m.conversation_id
 		JOIN attachments a ON a.message_id = m.id
 		WHERE m.source_id = ?
-		  AND a.source_attachment_id LIKE ?
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
+ AND a.source_attachment_id LIKE ?
 		ORDER BY m.id, a.id
 	`, sourceID, "discord:%")
 	if err != nil {
@@ -693,7 +747,7 @@ func (s *Store) ListDiscordPendingAttachmentMessages(sourceID int64) ([]DiscordP
 		var item DiscordPendingAttachmentMessage
 		var ref AttachmentRef
 		if err := rows.Scan(
-			&item.MessageID, &item.SourceMessageID, &item.ChatID,
+			&item.MessageID, &item.ConversationID, &item.SourceMessageID, &item.ChatID,
 			&ref.StoragePath, &ref.ContentHash,
 		); err != nil {
 			return nil, err
@@ -721,17 +775,19 @@ func (s *Store) ListDiscordPendingAttachmentMessages(sourceID int64) ([]DiscordP
 // ListDiscordPendingAttachmentMessages.
 func (s *Store) ListDiscordAttachmentMessages(sourceID int64) ([]DiscordAttachmentMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.source_message_id, c.source_conversation_id,
+		SELECT m.id, c.id, m.source_message_id, c.source_conversation_id,
 		       c.conversation_type, COALESCE(c.participant_count, 0),
 		       COALESCE(CAST(c.metadata AS TEXT), '')
 		FROM messages m
 		JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.source_id = ?
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
 		  AND EXISTS (
 		    SELECT 1
 		    FROM attachments a
 		    WHERE a.message_id = m.id
-		      AND a.source_attachment_id LIKE ?
+		      AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
+ AND a.source_attachment_id LIKE ?
 		  )
 		ORDER BY m.id
 	`, sourceID, "discord:%")
@@ -744,7 +800,7 @@ func (s *Store) ListDiscordAttachmentMessages(sourceID int64) ([]DiscordAttachme
 	for rows.Next() {
 		var message DiscordAttachmentMessage
 		var metadata string
-		if err := rows.Scan(&message.MessageID, &message.SourceMessageID, &message.ChatID,
+		if err := rows.Scan(&message.MessageID, &message.ConversationID, &message.SourceMessageID, &message.ChatID,
 			&message.ConversationType, &message.ParticipantCount, &metadata); err != nil {
 			return nil, err
 		}

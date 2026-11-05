@@ -2,7 +2,8 @@ package authz
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"strings"
@@ -111,7 +112,7 @@ func (id ActingIdentity) Validate() error {
 // HeaderValue renders the identity for ActingIdentityHeader: one line of
 // JSON restricted to printable ASCII, so every proxy carries it unchanged.
 func (id ActingIdentity) HeaderValue() string {
-	data, err := json.Marshal(id)
+	data, err := json.Marshal(id, jsontext.EscapeForHTML(true))
 	if err != nil {
 		// Unreachable: the struct holds only strings.
 		return ""

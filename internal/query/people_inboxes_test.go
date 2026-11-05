@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -11,7 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPersonInboxesListsDeduplicatedChatSources(t *testing.T) {
+func TestPersonInboxesDeduplicateChatSources(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	require := require.New(t)
 	b := NewTestDataBuilder(t)
@@ -83,6 +85,15 @@ func TestPersonInboxesListsDeduplicatedChatSources(t *testing.T) {
 	b.AddFrom(emailMessage, subject, "Subject")
 	b.AddTo(emailMessage, owner, "Owner")
 
+	outbox := b.AddMessage(MessageOpt{
+		SourceID: whatsAppSource, ConversationID: whatsAppConversation,
+		MessageType: "whatsapp", ConversationType: "group_chat",
+		SentAt: sentWhatsApp.Add(48 * time.Hour), IsFromMe: true,
+	})
+	b.AddFrom(outbox, owner, "Owner")
+	b.AddTo(outbox, subject, "Subject")
+	b.unsentMessages = fmt.Sprintf("(SELECT %d::BIGINT AS message_id)", outbox)
+
 	engine := b.BuildEngine()
 	state, err := ReadCacheSyncState(engine.analyticsDir)
 	require.NoError(err)
@@ -110,6 +121,7 @@ func TestPersonInboxesListsDeduplicatedChatSources(t *testing.T) {
 }
 
 func TestPersonInboxesRejectsNonPositiveCanonicalID(t *testing.T) {
+	t.Parallel()
 	engine := NewTestDataBuilder(t).BuildEngine()
 	_, err := engine.ListPersonInboxes(context.Background(), PersonInboxRequest{})
 	require.ErrorIs(t, err, ErrInvalidExploreRequest)

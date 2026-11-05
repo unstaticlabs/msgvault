@@ -86,6 +86,14 @@ func SanitizeUTF8(s string) string {
 	return sb.String()
 }
 
+// ReplaceNUL replaces U+0000 with U+FFFD in display/search projections, so both
+// backends represent a character that PostgreSQL TEXT cannot store the same way.
+// It does not repair invalid UTF-8. Never apply this lossy conversion to identity
+// keys or original payload bytes.
+func ReplaceNUL(s string) string {
+	return strings.ReplaceAll(s, "\x00", "\ufffd")
+}
+
 // GetEncodingByName returns an encoding for the given IANA charset name.
 func GetEncodingByName(name string) encoding.Encoding {
 	switch name {
@@ -294,4 +302,14 @@ func RuneByteRange(s string, startRune, endRune int) (int, int, bool) {
 		return startByte, len(s), true
 	}
 	return 0, 0, false
+}
+
+// SnippetFromBody returns a body preview of up to 200 runes.
+func SnippetFromBody(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	line := FirstLine(body)
+	return TruncateRunes(line, 200)
 }

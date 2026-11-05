@@ -2,7 +2,7 @@ package store
 
 import (
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 )
 
 // CalendarCoverage describes a successfully expanded window, plus the latest

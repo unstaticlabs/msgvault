@@ -5,7 +5,8 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -157,7 +158,7 @@ func seed(destination string) error {
 	if _, err = st.CreateSavedView(ctx, store.SavedViewInput{Name: "[QA] Related email across accounts", SchemaVersion: store.CurrentSavedViewSchemaVersion, CanonicalState: state}); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(records, "", "  ")
+	encoded, err := json.Marshal(records, jsontext.WithIndent("  "), json.Deterministic(true))
 	if err != nil {
 		return err
 	}

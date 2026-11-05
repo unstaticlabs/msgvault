@@ -24,6 +24,7 @@ const (
 	schemaTypeArray    = "array"
 	schema202012       = "https://json-schema.org/draft/2020-12/schema"
 	maxJSONSafeInteger = float64(9007199254740991)
+	hiddenTextFlagDoc  = "hidden_text_present is a best-effort flag. True means the stored HTML likely hides readable text, which includes newsletter preheaders, so it marks hidden text rather than malicious intent. False does not guarantee that text is visible. "
 )
 
 type toolSecurityClass uint8
@@ -42,8 +43,6 @@ const (
 )
 
 type catalogCapabilities struct {
-	emailWork         bool
-	emailWorkRecovery bool
 	sqlQuery          bool
 	semanticSearch    bool
 	vectorInMessage   bool
@@ -52,16 +51,22 @@ type catalogCapabilities struct {
 	mediaSearch       bool
 	people            bool
 	directoryPeople   bool
+	chatDiscovery     bool
 	visualSearch      bool
+	embeddingStatus   bool
 	savedViews        bool
 	meetings          bool
 	personAgenda      bool
+	personTier        bool
 	kata              bool
 	kataLookup        bool
 	kataDocbank       bool
+	contactRoutes     bool
 	identityReview    bool
 	personCardDAV     bool
 	messageTags       bool
+	emailWork         bool
+	emailWorkRecovery bool
 }
 
 func visualSearchAvailable(capabilities catalogCapabilities) bool {
@@ -137,8 +142,6 @@ func capabilitiesFor(opts ServeOptions) catalogCapabilities {
 	_, emailWork := opts.SavedViews.(savedview.EmailWorkReader)
 	_, emailWorkRecovery := opts.SavedViews.(savedview.EmailWorkRecovery)
 	return catalogCapabilities{
-		emailWork:         emailWork,
-		emailWorkRecovery: emailWorkRecovery,
 		sqlQuery:          opts.ArchiveSQLQuerier != nil,
 		semanticSearch:    opts.HybridEngine != nil || opts.HybridSearcher != nil,
 		vectorInMessage:   opts.HybridEngine != nil && opts.Backend != nil,
@@ -147,16 +150,22 @@ func capabilitiesFor(opts ServeOptions) catalogCapabilities {
 		mediaSearch:       opts.MediaSearcher != nil,
 		people:            opts.PeopleBackend != nil,
 		directoryPeople:   opts.DirectoryBackend != nil,
+		chatDiscovery:     opts.ChatDiscoveryBackend != nil,
 		visualSearch:      opts.VisualSearcher != nil,
+		embeddingStatus:   opts.EmbeddingStatus != nil,
 		savedViews:        opts.SavedViews != nil,
 		meetings:          opts.Meetings != nil,
 		personAgenda:      opts.PersonAgendaBackend != nil,
+		personTier:        opts.PersonTierBackend != nil,
 		kata:              opts.Kata != nil,
 		kataLookup:        opts.Kata != nil && opts.KataLookup,
 		kataDocbank:       opts.Kata != nil && opts.KataDocbank,
+		contactRoutes:     opts.ContactRoutesBackend != nil,
 		identityReview:    opts.IdentityReview != nil,
 		personCardDAV:     opts.PersonCardDAV != nil,
 		messageTags:       opts.MessageTags != nil,
+		emailWork:         emailWork,
+		emailWorkRecovery: emailWorkRecovery,
 	}
 }
 
@@ -221,6 +230,20 @@ func operationCatalog(opts ServeOptions, _ *handlers) []toolDefinition {
 }
 
 func buildOperationCatalog(capabilities catalogCapabilities) []toolDefinition {
+	definitions := operationDefinitions(capabilities)
+	available := definitions[:0]
+	for _, definition := range definitions {
+		if definition.availability(capabilities) {
+			available = append(available, definition)
+		}
+	}
+	sort.Slice(available, func(i, j int) bool {
+		return available[i].name < available[j].name
+	})
+	return available
+}
+
+func operationDefinitions(capabilities catalogCapabilities) []toolDefinition {
 	definitions := []toolDefinition{
 		aggregateDefinition(nil),
 		archiveFromInboxDefinition(nil),
@@ -248,6 +271,10 @@ func buildOperationCatalog(capabilities catalogCapabilities) []toolDefinition {
 		applyEmailWorkActionDefinition(nil),
 		undoEmailWorkActionDefinition(nil),
 		getPersonAgendaDefinition(),
+		previewPersonTiersDefinition(),
+		explainPersonTierDefinition(),
+		findContactCandidatesDefinition(),
+		getPersonMessagingRoutesDefinition(),
 		getSavedViewDefinition(nil),
 		getStatsDefinition(nil),
 		listMessagesDefinition(nil),
@@ -255,6 +282,7 @@ func buildOperationCatalog(capabilities catalogCapabilities) []toolDefinition {
 		listIdentityMatchesDefinition(),
 		listMeetingActionItemsDefinition(nil),
 		listDirectoryPeopleDefinition(nil),
+		findChatDefinition(),
 		listSavedViewsDefinition(nil),
 		querySQLDefinition(),
 		runSavedViewDefinition(nil),
@@ -268,6 +296,7 @@ func buildOperationCatalog(capabilities catalogCapabilities) []toolDefinition {
 		searchPeopleDefinition(nil),
 		searchPersonFilesDefinition(nil),
 		searchVisualAttachmentsDefinition(),
+		embeddingStatusDefinition(),
 		semanticSearchMessagesDefinition(nil, capabilities.semanticSearch),
 		stageDeletionDefinition(nil),
 		promotePersonDefinition(nil),
@@ -281,16 +310,7 @@ func buildOperationCatalog(capabilities catalogCapabilities) []toolDefinition {
 	}
 	definitions = append(definitions, kataDefinitions(capabilities.kataDocbank)...)
 
-	available := definitions[:0]
-	for _, definition := range definitions {
-		if definition.availability(capabilities) {
-			available = append(available, definition)
-		}
-	}
-	sort.Slice(available, func(i, j int) bool {
-		return available[i].name < available[j].name
-	})
-	return available
+	return definitions
 }
 
 func querySQLDefinition() toolDefinition {
@@ -574,12 +594,14 @@ func offsetProperty() *jsonschema.Schema {
 }
 
 const (
-	searchMetadataOperatorDoc = "Supported operators: from:, to:, cc:, bcc:, subject:, label: (or l:), filename: (attachment name substring), has:attachment, " +
+	searchOperatorDoc = "Supported operators: from:, to:, cc:, bcc:, subject:, label: (or l:), filename: (attachment name substring), has:attachment, " +
 		"before:/after: (YYYY-MM-DD), older_than:/newer_than: (e.g. 7d, 2w, 1m, 1y), larger:/smaller: (e.g. 5M), " +
 		"account:, received: (exact addresses; received: excludes sent mail and calendar events). " +
 		"Bare domains on from:/to: match any address at that domain. Different operators are ANDed; " +
 		"repeated account: or received: values are ORed. " +
-		"Not supported: negation (-), OR, or parentheses grouping."
+		"Not supported: negation (-) or parentheses grouping."
+	searchMetadataOperatorDoc = searchOperatorDoc + " " +
+		"Full-text message search accepts a standalone unquoted | between complete alternatives for OR; other modes read pipes as text."
 	searchMetadataFreeTextDoc = "Free text matches subject, snippet, and sender/recipient metadata only (not bodies). " +
 		"Use search_message_bodies for body keywords or semantic_search_messages for vector/hybrid search."
 	searchMetadataPaginationDoc = "Results are ordered newest-first (by sent date); there is no sort parameter — " +
@@ -637,19 +659,20 @@ func searchMessageBodiesDefinition(_ *handlers) toolDefinition {
 	searchIntro := "Keyword full-text search over message bodies. " +
 		"Returns messages whose body text contains the query terms, newest-first, " +
 		"each with matches — up to 5 excerpt snippets centered on matched terms. " +
+		hiddenTextFlagDoc +
 		"Backend excerpts may omit char_offset and line when efficient source locations are unavailable; use search_in_message when exact locations are needed. " +
 		"When matches_truncated is true on a hit, more than 5 excerpts matched — use search_in_message or get_message to read the full body. " +
 		"Known Gmail operators (from:, subject:, label:, etc.) apply as metadata filters only and do not satisfy the free-text requirement. " +
 		"Filter-only queries such as from:alice are rejected — use search_metadata for filter-only queries. " +
 		"Unrecognized word:value tokens (e.g. RXD2:V2) are treated as literal body text, not filters. " +
 		"Query syntax: space-separated words are ANDed (each must appear somewhere in the body); " +
-		"a double-quoted phrase is one exact phrase (e.g. \"RXD2 V2\"); OR and NOT are not supported. " +
-		searchMetadataOperatorDoc + " "
+		"a double-quoted phrase is one exact phrase (e.g. \"RXD2 V2\"); pipe OR and NOT are not supported in body-only search. " +
+		searchOperatorDoc + " "
 	queryDesc := "Body search query with at least one free-text term (bare word or quoted phrase). " +
 		"Gmail operators (from:, subject:, etc.) are metadata filters, not body search — " +
 		"subject:test alone is rejected; combine with body terms (from:alice budget) or use search_metadata for filter-only queries. " +
 		"Unrecognized word:value tokens (RXD2:V2) are literal text. " +
-		"Space-separated words are ANDed; double quotes match an exact phrase; OR/NOT unsupported."
+		"Space-separated words are ANDed; double quotes match an exact phrase; pipe OR/NOT unsupported in body-only search."
 	return readDefinition(
 		ToolSearchMessageBodies,
 		searchIntro+
@@ -687,8 +710,9 @@ func semanticSearchMessagesDefinition(_ *handlers, vectorAvailable bool) toolDef
 		"min_score filters chunk excerpts only; it does not remove or reorder ranked messages. " +
 		"Requires at least one free-text term (used to embed); filter-only queries must use search_metadata. " +
 		"Known Gmail operators (from:, subject:, label:, etc.) apply as metadata filters only. " +
-		searchMetadataOperatorDoc + " "
-	queryDesc := "Free-text query to embed (requires at least one free-text term). " +
+		"Vector and hybrid modes read pipes as text. " +
+		searchOperatorDoc + " "
+	queryDesc := "Free-text query to embed (requires at least one free-text term). Vector and hybrid modes read pipes as text. " +
 		"Gmail operators are metadata filters, not body search; combine with body terms or use search_metadata for filter-only queries."
 	mode := stringSchema("Search mode: vector (semantic only) or hybrid (BM25 + vector fused via RRF). Defaults to hybrid when omitted.", searchModeVector, searchModeHybrid)
 	mode.Default = jsontext.Value(`"hybrid"`)
@@ -718,18 +742,24 @@ func getMessageDefinition(_ *handlers) toolDefinition {
 	return readDefinition(
 		ToolGetMessage,
 		"Get message details including recipients, labels, attachments, and a slice of the message body. "+
+			"sender_auth.verified covers only the sender domain; empty results mean the pinned receiver reported nothing. "+
 			"Returns plain text when available; HTML-only messages return a body_html slice with body_format=html. "+
+			"Set include_segments to return authored, quoted, forwarded, and signature byte ranges overlapping the body window, with absolute offsets and depth on quoted ranges. "+
+			"Authored means no relay marker was recognized; markers are recognized in English, plus Thunderbird's German and French separators and single-line dated reply headers, so other languages' history can appear authored. "+
+			"Non-email messages get one authored range. "+
+			hiddenTextFlagDoc+
 			"Body paging mirrors search pagination: body_length=total bytes, offset=where this chunk starts, body_returned=bytes in this chunk, has_more=more body follows. "+
 			"To read sequentially: call again with offset += body_returned. "+
 			"To jump to a known match location: use center_at=<byte offset> to center the window on that location. "+
 			"Note: snippet is pre-stored source metadata (may be empty for non-Gmail sources).",
 		closedObject(map[string]*jsonschema.Schema{
-			"id":            safeIDSchema("Message ID"),
-			toolArgOffset:   nonNegativeIntegerSchema("Byte offset from the start of the selected body to begin reading (default 0). Ignored when center_at is provided.", 0),
-			"center_at":     signedSafeIntegerSchema("Byte offset from the start of the selected body to center the window on. Takes precedence over offset.", -1),
-			toolArgMaxChars: signedSafeIntegerSchema("Maximum selected-body bytes to return (default 2000, max 4000). Values above 4000 are clamped to 4000; zero or negative values use the default.", 2000),
-			"body_format":   bodyFormat,
-			"full_body":     booleanSchema("Return the complete selected body in one response, ignoring offset, center_at, and max_chars. Use only when the full content is explicitly needed."),
+			"id":               safeIDSchema("Message ID"),
+			toolArgOffset:      nonNegativeIntegerSchema("Byte offset from the start of the selected body to begin reading (default 0). Ignored when center_at is provided.", 0),
+			"center_at":        signedSafeIntegerSchema("Byte offset from the start of the selected body to center the window on. Takes precedence over offset.", -1),
+			toolArgMaxChars:    signedSafeIntegerSchema("Maximum selected-body bytes to return (default 2000, max 4000). Values above 4000 are clamped to 4000; zero or negative values use the default.", 2000),
+			"body_format":      bodyFormat,
+			"full_body":        booleanSchema("Return the complete selected body in one response, ignoring offset, center_at, and max_chars. Use only when the full content is explicitly needed."),
+			"include_segments": booleanSchema("Include plain-text body ranges; HTML returns segments_unavailable=unsupported_format."),
 		}, "id"),
 		outputSchemaFor[getMessageResponse](),
 		(*handlers).getMessage,
@@ -778,6 +808,7 @@ func listThreadDefinition() toolDefinition {
 	return readDefinition(
 		ToolListThread,
 		"List visible archived messages in one conversation in chronological order (sent_at, undated last, then id). "+
+			"SQLite compares instants to the millisecond, with ties in message-ID order. "+
 			"Pass exactly one of id or source_message_id (any message in the thread) or thread_id (provider conversation ID, such as a Gmail threadId); "+
 			"add account when a provider ID exists in more than one account. "+
 			"Page with offset until has_more is false; total counts the whole conversation. "+
@@ -834,7 +865,8 @@ func exportAttachmentDefinition(_ *handlers) toolDefinition {
 
 func searchInMessageDefinition(_ *handlers, vectorAvailable bool) toolDefinition {
 	description := "Find matches within one message body. Default mode=keyword finds literal term occurrences. " +
-		"Each match includes char_offset (byte offset into body_text), snippet, and line. " +
+		"Each match includes char_offset (byte offset into the plain-text body, or the raw HTML body for HTML-only mail), snippet, and line. " +
+		"This is the same body get_message returns with the automatic body format. " +
 		"Use char_offset with get_message center_at to read a larger window around any match."
 	properties := map[string]*jsonschema.Schema{
 		"id":          safeIDSchema("Message ID"),
@@ -854,7 +886,7 @@ func searchInMessageDefinition(_ *handlers, vectorAvailable bool) toolDefinition
 	}
 	return readDefinition(
 		ToolSearchInMessage,
-		description,
+		description+" "+hiddenTextFlagDoc,
 		closedObject(properties, "id", toolArgQuery),
 		outputSchemaFor[searchInMessageResponse](),
 		(*handlers).searchInMessage,
@@ -917,10 +949,10 @@ func searchByDomainsDefinition(_ *handlers) toolDefinition {
 	return readDefinition(
 		ToolSearchByDomains,
 		"Find messages where any participant (from, to, or cc) belongs to one of the given domains. Searches all accounts available to this session. "+
-			"Useful for finding all communication with a company regardless of direction. Returns an object with a data array of matching message summaries.",
+			"Useful for finding all communication with a company regardless of direction. Returns data, returned, offset, has_more, and total (always -1); page with offset while has_more is true.",
 		closedObject(map[string]*jsonschema.Schema{
 			toolArgDomains: stringSchema("Comma-separated domain names (e.g. 'gobright.com,ascentae.com')"),
-			toolArgLimit:   nonNegativeIntegerSchema("Maximum results to return (default 100)", 100),
+			toolArgLimit:   nonNegativeIntegerSchema("Maximum results to return (default 100, max 500)", 100),
 			toolArgOffset:  offsetProperty(),
 			toolArgAfter:   afterProperty(),
 			toolArgBefore:  beforeProperty(),
@@ -933,7 +965,8 @@ func searchByDomainsDefinition(_ *handlers) toolDefinition {
 func stageDeletionDefinition(_ *handlers) toolDefinition {
 	return adminWriteDefinition(
 		ToolStageDeletion,
-		"Stage messages for deletion. Use EITHER 'query' (Gmail-style search) OR structured filters (from, domain, label, etc.), not both. Does NOT delete immediately. To execute, set '[deletion] remote_enabled = true' in the invoking CLI's config.toml for durable consent, then run 'msgvault delete-staged'. One-command alternative: MSGVAULT_ENABLE_REMOTE_DELETE=1 msgvault delete-staged.",
+		fmt.Sprintf("Stage deletion without deleting immediately. Queries select Gmail, Microsoft Graph, and IMAP mail, report undeletable matches in skipped_count, and refuse above %d matches or when none are deletable. Structured filters select eligible Gmail and Microsoft Graph mail. ", maxStageDeletionResults)+
+			"Use EITHER 'query' (Gmail-style search) OR structured filters (from, domain, label, etc.), not both. To execute, set '[deletion] remote_enabled = true' in the invoking CLI's config.toml for durable consent, then run 'msgvault delete-staged'. One-command alternative: MSGVAULT_ENABLE_REMOTE_DELETE=1 msgvault delete-staged.",
 		closedObject(map[string]*jsonschema.Schema{
 			toolArgAccount:   accountProperty(),
 			toolArgQuery:     stringSchema("Gmail-style search query (e.g. 'from:linkedin subject:job alert'). Cannot be combined with structured filters."),
@@ -1050,20 +1083,24 @@ type searchMetadataResponse struct {
 
 	CalendarCache *CalendarCache `json:"calendar_cache,omitempty"`
 	IndexState    string         `json:"index_state,omitempty"`
+	Warnings      []string       `json:"warnings,omitempty"`
 }
-type searchInMessageResponse paginatedResponse[messageMatch]
+type searchInMessageResponse struct {
+	paginatedResponse[messageMatch]
+
+	HiddenTextPresent bool `json:"hidden_text_present"`
+}
 type listMessagesResponse paginatedResponse[query.MessageSummary]
 type aggregateResponse struct {
 	Data []query.AggregateRow `json:"data"`
 }
-type searchByDomainsResponse struct {
-	Data []query.MessageSummary `json:"data"`
-}
+type searchByDomainsResponse paginatedResponse[query.MessageSummary]
 
 type getAttachmentResponse struct {
-	Filename string `json:"filename"`
-	MIMEType string `json:"mime_type"`
-	Size     int64  `json:"size"`
+	Docbank  []store.DocbankAttachmentRef `json:"docbank,omitempty"`
+	Filename string                       `json:"filename"`
+	MIMEType string                       `json:"mime_type"`
+	Size     int64                        `json:"size"`
 	// Chunk fields are present only when the call passed offset or length.
 	Offset     *int64  `json:"offset,omitzero"`
 	Length     *int64  `json:"length,omitzero"`
@@ -1079,6 +1116,7 @@ type exportAttachmentResponse struct {
 }
 
 type stageDeletionResponse struct {
+	SkippedCount int    `json:"skipped_count,omitzero"`
 	BatchID      string `json:"batch_id"`
 	MessageCount int    `json:"message_count"`
 	Status       string `json:"status"`

@@ -15,6 +15,7 @@ import (
 	"go.kenn.io/msgvault/internal/circleback"
 	"go.kenn.io/msgvault/internal/discord"
 	imaplib "go.kenn.io/msgvault/internal/imap"
+	"go.kenn.io/msgvault/internal/inline"
 	matrixsource "go.kenn.io/msgvault/internal/matrix"
 	"go.kenn.io/msgvault/internal/microsoft"
 	"go.kenn.io/msgvault/internal/oauth"
@@ -30,7 +31,7 @@ const (
 )
 
 // removeAccountAfterCascadeHook pauses tests after the database mutation and
-// before the lock-held cache rebuild.
+// before the cache rebuild.
 var removeAccountAfterCascadeHook func()
 
 // removeAccountBeforeDiscordLifecycleLockHook lets tests observe that store
@@ -64,6 +65,7 @@ Examples:
 		RunE: runRemoveAccount,
 	}
 	cmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
+	cmd.Flags().Bool("dry-run", false, "Check removal eligibility without deleting data")
 	cmd.Flags().Bool(removeAccountConfirmedFlag, false, "Internal: confirmation was already accepted by the frontend CLI")
 	if err := cmd.Flags().MarkHidden(removeAccountConfirmedFlag); err != nil {
 		panic(err)
@@ -91,7 +93,25 @@ func runRemoveAccountHTTP(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read --yes flag: %w", err)
 	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		return fmt.Errorf("read --dry-run flag: %w", err)
+	}
+	if dryRun {
+		return runDaemonCLICommandHTTPFromCobra(cmd, args)
+	}
 	if !yes {
+		dryRunFlag := cmd.Flags().Lookup("dry-run")
+		changed := dryRunFlag.Changed
+		if err := cmd.Flags().Set("dry-run", "true"); err != nil {
+			return fmt.Errorf("prepare removal preflight: %w", err)
+		}
+		preflightErr := runDaemonCLICommandHTTPFromCobra(cmd, args)
+		resetErr := cmd.Flags().Set("dry-run", "false")
+		dryRunFlag.Changed = changed
+		if err := errors.Join(preflightErr, resetErr); err != nil {
+			return err
+		}
 		ok, err := confirmRemoveAccount(cmd.InOrStdin(), cmd.OutOrStdout())
 		if err != nil {
 			return err
@@ -127,7 +147,7 @@ func runRemoveAccountLocal(cmd *cobra.Command, args []string) error {
 	return runRemoveAccountLocalWithMatrixLock(cmd, args, false)
 }
 
-func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matrixLockHeld bool) error {
+func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matrixLockHeld bool) (retErr error) {
 	state := invocationFromCommand(cmd)
 	if state == nil || state.cfg == nil {
 		return errors.New("configuration is unavailable")
@@ -156,6 +176,26 @@ func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matr
 	if err != nil {
 		cleanup()
 		return err
+	}
+	if err := s.CheckSourceRemovalAllowedContext(cmd.Context(), source.ID); err != nil {
+		cleanup()
+		return err
+	}
+	dryRun, err := cmd.Flags().GetBool("dry-run")
+	if err != nil {
+		cleanup()
+		return fmt.Errorf("read --dry-run flag: %w", err)
+	}
+	if dryRun {
+		defer cleanup()
+		active, err := s.GetActiveSync(source.ID)
+		if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
+			return err
+		}
+		if active != nil && !yes {
+			return fmt.Errorf("account %s has an active sync in progress; use --yes to force removal", source.Identifier)
+		}
+		return nil
 	}
 	if source.SourceType == sourceTypeMatrix && !matrixLockHeld {
 		cleanup()
@@ -207,6 +247,14 @@ func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matr
 	// the device but failed later in the local cascade, the missing credential
 	// is treated as an already-completed revocation.
 	if source.SourceType == sourceTypeMatrix {
+		// The credential lifecycle lock has already waited for Matrix sync.
+		// Keep execution ownership until the cascade commits so a merge cannot
+		// make this source ineligible while the remote logout is in flight.
+		release, err := s.AcquireSourceRemovalLockContext(cmd.Context(), source.ID)
+		if err != nil {
+			return fmt.Errorf("prepare Matrix account removal: %w", err)
+		}
+		defer func() { retErr = errors.Join(retErr, release()) }()
 		if err := revokeMatrixCredentials(cmd.Context(), cfg.TokensDir(), source.Identifier); err != nil {
 			return fmt.Errorf("revoke Matrix device (account was not removed): %w", err)
 		}
@@ -283,7 +331,6 @@ func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matr
 			cfg.AnalyticsDir(),
 			true,
 			false,
-			publishLockHeld,
 			analyticsBuilderOverrides(cfg.Analytics),
 		)
 		return errors.Join(
@@ -414,6 +461,10 @@ func runRemoveAccountLocalWithMatrixLock(cmd *cobra.Command, args []string, matr
 			fmt.Fprintf(os.Stderr,
 				"Warning: could not remove Circleback token: %v\n", err,
 			)
+		}
+	case sourceTypeInline:
+		if err := inline.NewOAuthManager("", cfg.TokensDir(), logger).DeleteToken(source.Identifier); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not remove Inline OAuth credentials: %v\n", err)
 		}
 	case sourceTypeIMAP:
 		if source.SyncConfig.Valid && source.SyncConfig.String != "" {

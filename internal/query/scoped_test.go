@@ -25,6 +25,7 @@ var knownOptionalInterfaces = []reflect.Type{
 	reflect.TypeFor[FileGrouper](),
 	reflect.TypeFor[MessageBodySearcher](),
 	reflect.TypeFor[DeletionTargetSearchResolver](),
+	reflect.TypeFor[BoundedDeletionTargetSearchResolver](),
 	reflect.TypeFor[DeletionTargetAggregateSearchResolver](),
 	reflect.TypeFor[TextEngine](),
 	reflect.TypeFor[TextSnapshotReader](),
@@ -198,4 +199,64 @@ func TestScopedEngineTextViewsNeedOneSource(t *testing.T) {
 	source, err = many.restrictSingle(int64Ptr(5))
 	require.NoError(err)
 	assert.Equal(int64(5), *source)
+}
+
+func TestScopedDomainSearchPreservesPaginationWithinVisibleSources(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	engine := NewScopedEngine(env.Engine, []int64{1})
+	for _, tc := range []struct {
+		name              string
+		sources           []int64
+		offset, wantCount int
+		wantMore          bool
+	}{
+		{name: "visible first page", wantCount: 2, wantMore: true},
+		{name: "visible last page", offset: 3, wantCount: 2},
+		{name: "requested hidden source", sources: []int64{999}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			got, err := engine.SearchByDomains(t.Context(), []string{"example.com"}, nil, nil, 2, tc.offset, tc.sources)
+			requirements.NoError(err)
+			assertions.Len(got.Messages, tc.wantCount)
+			assertions.Equal(tc.wantMore, got.HasMore)
+			for _, message := range got.Messages {
+				assertions.Equal(int64(1), message.SourceID)
+			}
+		})
+	}
+	assertions, requirements := assert.New(t), require.New(t)
+	empty := NewScopedEngine(env.Engine, nil)
+	got, err := empty.SearchByDomains(t.Context(), []string{"example.com"}, nil, nil, 2, 0, nil)
+	requirements.NoError(err)
+	assertions.Empty(got.Messages)
+	assertions.False(got.HasMore)
+}
+
+func TestScopedBoundedDeletionSearchKeepsSourceAndCountScope(t *testing.T) {
+	t.Parallel()
+	env := newTestEnv(t)
+	for _, tc := range []struct {
+		name        string
+		visible     []int64
+		wantMatched int
+	}{
+		{"permitted source", []int64{1}, 2},
+		{"hidden source", []int64{999}, 0},
+		{"no source", nil, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			engine := NewScopedEngine(env.Engine, tc.visible)
+			resolver, ok := engine.(BoundedDeletionTargetSearchResolver)
+			requirements.True(ok)
+			targets, matched, err := resolver.GetDeletionTargetsBySearchBounded(t.Context(), search.Parse(""), MessageFilter{}, DeletionSearchFast, 2)
+			requirements.NoError(err)
+			assertions.Equal(tc.wantMatched, matched)
+			for _, target := range targets {
+				assertions.Equal(int64(1), target.SourceID)
+			}
+		})
+	}
 }

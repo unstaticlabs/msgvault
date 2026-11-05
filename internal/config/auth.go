@@ -1,7 +1,8 @@
 package config
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"os"
@@ -115,9 +116,8 @@ func (c *Config) applyAuthEnvOverrides(lookupEnv func(string) string) error {
 	}
 	if value := strings.TrimSpace(lookupEnv("MSGVAULT_AUTH_API_KEYS")); value != "" {
 		var keys []APIKeyConfig
-		decoder := json.NewDecoder(strings.NewReader(value))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&keys); err != nil {
+		decoder := jsontext.NewDecoder(strings.NewReader(value))
+		if err := json.UnmarshalDecode(decoder, &keys, json.RejectUnknownMembers(true)); err != nil {
 			return fmt.Errorf("%w: %w", ErrAuthEnvAPIKeys, err)
 		}
 		c.Auth.APIKeys = append(c.Auth.APIKeys, keys...)

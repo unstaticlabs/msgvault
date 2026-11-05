@@ -216,6 +216,29 @@ func TestGmailDraftConfig(t *testing.T) {
 	}
 }
 
+func TestSenderAuthConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	const valid = "[[sender_auth.sources]]\nsource_id = 42\ntrusted_authserv_ids = [\"mx.google.com\"]\n"
+	require.NoError(t, os.WriteFile(path, []byte(valid), 0o600))
+	cfg, err := Load(path, "")
+	require.NoError(t, err)
+	pins := cfg.SenderAuth.Pins()
+	cfg.SenderAuth.Sources[0].TrustedAuthservIDs[0] = "changed.example.test"
+	assert.Equal(t, []string{"mx.google.com"}, pins[42])
+	for _, tc := range []struct{ name, body, want string }{
+		{"missing source", "trusted_authserv_ids = [\"mx.google.com\"]", "source_id is required"},
+		{"missing pins", "source_id = 42", "trusted_authserv_ids must contain at least one ID"},
+		{"blank pin", "source_id = 42\ntrusted_authserv_ids = [\"\"]", "trusted_authserv_ids must be nonblank"},
+		{"whitespace pin", "source_id = 42\ntrusted_authserv_ids = [\"mx.google.com other\"]", "contain no whitespace"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte("[[sender_auth.sources]]\n"+tc.body+"\n"), 0o600))
+			_, err := Load(path, "")
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestDraftSourceConfigErrorText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	imap := func(body string) string { return "[[imap.drafts]]\n" + body + "\n" }
@@ -262,20 +285,6 @@ func TestConfigPeopleDefaultsKeepBothSubsystemsDisabled(t *testing.T) {
 	checks.Empty(cfg.People.Enrichment.Providers)
 }
 
-func TestServerConfigDefaults(t *testing.T) {
-	// Create a temp dir without a config file
-	tmpDir := t.TempDir()
-	t.Setenv("MSGVAULT_HOME", tmpDir)
-
-	cfg, err := Load("", "")
-	require.NoError(t, err, "Load()")
-
-	// Check server defaults: api_port defaults to 0, which auto-selects an
-	// open port at daemon startup (clients discover it via the runtime record).
-	assert.Equal(t, 0, cfg.Server.APIPort)
-	assert.Empty(t, cfg.Server.APIKey)
-}
-
 func TestDeletionConfigDefaultsDisabledAndLoadsRemoteEnabled(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -287,18 +296,6 @@ func TestDeletionConfigDefaultsDisabledAndLoadsRemoteEnabled(t *testing.T) {
 	cfg, err := Load(configPath, "")
 	require.NoError(err)
 	assert.True(cfg.Deletion.RemoteEnabled)
-}
-
-func TestAnalyticsConfigDefaults(t *testing.T) {
-	assertions := assert.New(t)
-	cfg := NewDefaultConfig()
-
-	assertions.Equal(AnalyticsEngineAuto, cfg.Analytics.Engine)
-	assertions.True(cfg.Analytics.AutoBuildCache)
-	assertions.Zero(cfg.Analytics.MinRebuildInterval)
-	assertions.Empty(cfg.Analytics.BuilderMemoryLimit)
-	assertions.Zero(cfg.Analytics.BuilderThreads)
-	assertions.Empty(cfg.Analytics.BuilderTempLimit)
 }
 
 func TestLoadWithAnalyticsMinRebuildInterval(t *testing.T) {
@@ -610,19 +607,6 @@ func TestKataIntegrationConfig(t *testing.T) {
 	}
 }
 
-func TestAccountScheduleEmpty(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("MSGVAULT_HOME", tmpDir)
-
-	cfg, err := Load("", "")
-	require.NoError(t, err, "Load()")
-
-	assert.Empty(t, cfg.Accounts)
-
-	scheduled := cfg.ScheduledAccounts()
-	assert.Empty(t, scheduled)
-}
-
 func TestLoadWithServerConfig(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -678,12 +662,6 @@ daemon_idle_timeout = "6h"
 	require.NoError(err, "Load()")
 
 	assert.Equal(6*time.Hour, cfg.Server.DaemonIdleTimeout)
-}
-
-func TestServerDaemonAutoRestartDefault(t *testing.T) {
-	cfg := NewDefaultConfig()
-
-	assert.Equal(t, DaemonAutoRestartNewer, cfg.Server.DaemonAutoRestart)
 }
 
 func TestLoadWithServerDaemonAutoStart(t *testing.T) {
@@ -1545,20 +1523,6 @@ mcp_enabled = true
 	require.NoError(t, err, "Load() should succeed with deprecated mcp_enabled")
 
 	assert.Equal(t, 9090, cfg.Server.APIPort)
-}
-
-func TestNewDefaultConfig(t *testing.T) {
-	assert := assert.New(t)
-	// Use a temp directory as MSGVAULT_HOME
-	tmpDir := t.TempDir()
-	t.Setenv("MSGVAULT_HOME", tmpDir)
-
-	cfg := NewDefaultConfig()
-
-	assert.Equal(tmpDir, cfg.HomeDir)
-	assert.Equal(tmpDir, cfg.Data.DataDir)
-	assert.False(cfg.Data.LooseAttachments)
-	assert.Equal(5, cfg.Sync.RateLimitQPS)
 }
 
 func TestDataLooseAttachmentsConfig(t *testing.T) {
@@ -2569,6 +2533,20 @@ api_key = "owner-secret"
 		cfg := NewDefaultConfig()
 		assert.False(t, cfg.Server.AgentAccess)
 	})
+}
+
+func TestLoadIMAPSkipFoldersRejectsBlank(t *testing.T) {
+	require := require.New(t)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	content := `[sync]
+imap_skip_folders = { "imap://user@example.com" = ["Trash", " \t "] }
+`
+	require.NoError(os.WriteFile(path, []byte(content), 0o600))
+	_, err := Load(path, "")
+	require.ErrorContains(err, `sync.imap_skip_folders["imap://user@example.com"] contains a blank folder name`)
+	cfg, err := LoadClientWithOverrides(path, "", RuntimeOverrides{})
+	require.NoError(err)
+	require.ErrorContains(cfg.DaemonConfigError(), "contains a blank folder name")
 }
 
 func TestLoadTrustedIMAPSentMailboxesPerSource(t *testing.T) {

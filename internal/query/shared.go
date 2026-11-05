@@ -12,6 +12,7 @@ import (
 
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/search"
+	"go.kenn.io/msgvault/internal/sourcescope"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -37,6 +38,7 @@ const (
 	messageTypeEmail                = "email"
 	messageTypeCalendar             = "calendar_event"
 	timeGranularityMonth            = "month"
+	timeGranularityDay              = "day"
 	sortDirectionAsc                = "asc"
 	sortDirectionDesc               = "desc"
 	sortFieldCount                  = "count"
@@ -60,16 +62,24 @@ const emailOnlyFilterMsg = "(msg.message_type = '" + messageTypeEmail + "' OR ms
 // NULL and empty string handle old data where message_type was not yet populated.
 const emailOnlyFilterM = "(m.message_type = '" + messageTypeEmail + "' OR m.message_type IS NULL OR m.message_type = '')"
 
-// searchOverridesEmailDefault reports whether a parsed search query sets its
-// own message-type scope: message_type:, or account:, which also matches
-// calendar events. Default analytics apply the positive email-only predicate
-// only when it does not.
-func searchOverridesEmailDefault(searchQuery string) bool {
-	if searchQuery == "" {
+// defaultsToEmail leaves OR defaults to each alternative.
+func defaultsToEmail(q *search.Query, filter *MessageFilter, accountScopes []search.AccountScope) bool {
+	if len(accountScopes) > 0 || (filter != nil && (strings.TrimSpace(filter.MessageType) != "" || len(filter.AccountScopes) > 0)) {
 		return false
 	}
-	q := search.Parse(searchQuery)
-	return len(q.MessageTypes) > 0 || len(q.AccountAddrs) > 0
+	return q == nil || (!q.HasOR() && len(q.MessageTypes) == 0 && len(q.AccountAddrs) == 0)
+}
+
+func parseAnalyticsSearch(raw string, defaultEmail bool) *search.Query {
+	q := search.ParseOR(raw)
+	if defaultEmail && q.HasOR() {
+		for _, branch := range q.Alternatives {
+			if defaultsToEmail(branch, nil, nil) {
+				branch.MessageTypes = []string{messageTypeEmail}
+			}
+		}
+	}
+	return q
 }
 
 // shouldDefaultStatsToEmail reports whether a generic stats query should use
@@ -77,11 +87,7 @@ func searchOverridesEmailDefault(searchQuery string) bool {
 // message-type scope as search, while an explicit message_type remains
 // authoritative in either mode.
 func shouldDefaultStatsToEmail(opts StatsOptions) bool {
-	// An account scope selects email and calendar rows itself.
-	if opts.Filter != nil && len(opts.Filter.AccountScopes) > 0 {
-		return false
-	}
-	return !opts.SearchScope && !searchOverridesEmailDefault(opts.SearchQuery)
+	return !opts.SearchScope && defaultsToEmail(search.ParseOR(opts.SearchQuery), opts.Filter, nil)
 }
 
 // appendAccountScopeConditions adds one predicate per account scope against
@@ -182,40 +188,51 @@ func fetchLabelsForMessageList(ctx context.Context, db store.SQLReader, rebind r
 		return nil
 	}
 
-	ids := make([]any, len(messages))
-	placeholders := make([]string, len(messages))
 	idToIndex := make(map[int64]int)
 	for i, msg := range messages {
-		ids[i] = msg.ID
-		placeholders[i] = "?"
 		idToIndex[msg.ID] = i
 	}
 
-	query := fmt.Sprintf(`
-		SELECT ml.message_id, l.name
-		FROM %smessage_labels ml
-		JOIN %slabels l ON l.id = ml.label_id
-		WHERE ml.message_id IN (%s)
-	`, tablePrefix, tablePrefix, strings.Join(placeholders, ","))
+	for start := 0; start < len(messages); start += inListChunkSize {
+		end := min(start+inListChunkSize, len(messages))
+		chunk := messages[start:end]
+		ids := make([]any, len(chunk))
+		placeholders := make([]string, len(chunk))
+		for i, msg := range chunk {
+			ids[i] = msg.ID
+			placeholders[i] = "?"
+		}
 
-	rows, err := db.QueryContext(ctx, rebind(query), ids...)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
+		query := fmt.Sprintf(`
+			SELECT ml.message_id, l.name
+			FROM %smessage_labels ml
+			JOIN %slabels l ON l.id = ml.label_id
+			WHERE ml.message_id IN (%s)
+		`, tablePrefix, tablePrefix, strings.Join(placeholders, ","))
 
-	for rows.Next() {
-		var msgID int64
-		var labelName string
-		if err := rows.Scan(&msgID, &labelName); err != nil {
+		if err := func() error {
+			rows, err := db.QueryContext(ctx, rebind(query), ids...)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = rows.Close() }()
+			for rows.Next() {
+				var msgID int64
+				var labelName string
+				if err := rows.Scan(&msgID, &labelName); err != nil {
+					return err
+				}
+				if idx, ok := idToIndex[msgID]; ok {
+					messages[idx].Labels = append(messages[idx].Labels, labelName)
+				}
+			}
+			return rows.Err()
+		}(); err != nil {
 			return err
 		}
-		if idx, ok := idToIndex[msgID]; ok {
-			messages[idx].Labels = append(messages[idx].Labels, labelName)
-		}
 	}
 
-	return rows.Err()
+	return nil
 }
 
 // fetchParticipantsForMessageList adds recipients to message summaries using a batch query.
@@ -364,7 +381,7 @@ func fetchParticipantsShared(ctx context.Context, db store.SQLReader, rebind reb
 // rebind rewrites the ? placeholders for the driver in use.
 func fetchAttachmentsShared(ctx context.Context, db store.SQLReader, rebind rebindFunc, tablePrefix string, msg *MessageDetail) error {
 	rows, err := db.QueryContext(ctx, rebind(fmt.Sprintf(`
-		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, ''), COALESCE(storage_path, '')
+		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, ''), COALESCE(storage_path, ''), COALESCE(source_attachment_id, '')
 		FROM %sattachments
 		WHERE message_id = ?
 	`, tablePrefix)), msg.ID)
@@ -372,43 +389,42 @@ func fetchAttachmentsShared(ctx context.Context, db store.SQLReader, rebind rebi
 		return err
 	}
 	defer func() { _ = rows.Close() }()
+	var hashes []string
 
 	for rows.Next() {
 		var att AttachmentInfo
-		var storagePath string
-		if err := rows.Scan(&att.ID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash, &storagePath); err != nil {
+		var storagePath, sourceAttachmentID string
+		if err := rows.Scan(&att.ID, &att.Filename, &att.MimeType, &att.Size, &att.ContentHash, &storagePath, &sourceAttachmentID); err != nil {
 			return err
 		}
+		var receiptHash string
+		att.ContentHash, receiptHash = store.AttachmentReadHashes(att.ContentHash, storagePath, sourceAttachmentID)
 		if isURLStoragePath(storagePath) {
 			att.URL = storagePath
 			att.ContentHash = ""
-		} else if att.ContentHash == "" {
-			if pathHash, ok := attachmentCASPathHash(storagePath); ok {
-				att.ContentHash = pathHash
-			}
 		}
 		msg.Attachments = append(msg.Attachments, att)
+		hashes = append(hashes, receiptHash)
 	}
 
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	refs, err := store.LoadDocbankAttachmentRefs(ctx, db, rebind, tablePrefix, hashes)
+	if err != nil {
+		return err
+	}
+	for i := range msg.Attachments {
+		msg.Attachments[i].Docbank = refs[strings.ToLower(hashes[i])]
+	}
+	return nil
 }
 
 func isURLStoragePath(path string) bool {
 	return strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://")
-}
-
-func attachmentCASPathHash(storagePath string) (string, bool) {
-	if len(storagePath) != 67 || storagePath[2] != '/' {
-		return "", false
-	}
-	contentHash := storagePath[3:]
-	if contentHash != strings.ToLower(contentHash) || storagePath[:2] != contentHash[:2] {
-		return "", false
-	}
-	if _, err := hex.DecodeString(contentHash); err != nil {
-		return "", false
-	}
-	return contentHash, true
 }
 
 func attachmentCASPath(contentHash string) string {
@@ -497,6 +513,8 @@ func getMessageRawShared(ctx context.Context, db store.SQLReader, rebind rebindF
 // rebind rewrites the ? placeholders for the driver in use; it is applied
 // to every sub-query this function dispatches.
 func getMessageByQueryShared(ctx context.Context, db store.SQLReader, rebind rebindFunc, tablePrefix string, whereClause string, args ...any) (*MessageDetail, error) {
+	conditions, args := appendSourceFilter([]string{whereClause}, args, "m.", nil, sourcescope.IDs(ctx))
+	whereClause = strings.Join(conditions, " AND ")
 	query := fmt.Sprintf(`
 		SELECT
 			m.id,
@@ -513,6 +531,7 @@ func getMessageByQueryShared(ctx context.Context, db store.SQLReader, rebind reb
 			m.received_at,
 			COALESCE(m.size_estimate, 0),
 			m.has_attachments,
+			m.hidden_text_present,
 			COALESCE(m.is_from_me, FALSE),
 			m.deleted_from_source_at,
  m.metadata
@@ -539,6 +558,7 @@ func getMessageByQueryShared(ctx context.Context, db store.SQLReader, rebind reb
 		&receivedAt,
 		&msg.SizeEstimate,
 		&msg.HasAttachments,
+		&msg.HiddenTextPresent,
 		&msg.IsFromMe,
 		&deletedAt,
 		&metadata,
@@ -557,6 +577,9 @@ func getMessageByQueryShared(ctx context.Context, db store.SQLReader, rebind reb
 		return nil, err
 	}
 	msg.RelatedMessageID = related[0].RelatedMessageID
+	if msg.MessageType == messageTypeCalendar {
+		msg.Calendar = store.ParseCalendarProjection(metadata.String)
+	}
 	if sentAt.Valid {
 		msg.SentAt = sentAt.Time
 	}

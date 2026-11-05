@@ -42,5 +42,5 @@ func TestUnifiedSchemaNormalizesDraftRolesWithoutLosingEvidence(t *testing.T) {
 	assertions.Equal(after, repeated)
 	version, err := st.SchemaVersionContext(t.Context())
 	requirements.NoError(err)
-	assertions.Equal(7, version)
+	assertions.Equal(store.SchemaVersion, version)
 }

@@ -18,6 +18,7 @@ export interface CLIQueryMessageSummary {
   from_name: string;
   from_phone?: string;
   has_attachments: boolean;
+  hidden_text_present: boolean;
   id: number;
   inbox_state?: CLIQueryMessageSummaryInboxState;
   labels: string[];

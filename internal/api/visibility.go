@@ -11,6 +11,7 @@ import (
 
 	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/sourcescope"
 	"go.kenn.io/msgvault/internal/store"
 )
 
@@ -369,4 +370,14 @@ func visibleSources(ctx context.Context, requested []int64) []int64 {
 		return []int64{-1}
 	}
 	return out
+}
+
+// scopedStoreReadContext carries the same source boundary used by the query
+// engine into native Store readers. An empty binding remains an empty set.
+func scopedStoreReadContext(ctx context.Context) context.Context {
+	principal := principalFromContext(ctx)
+	if principal.Scoped() {
+		return sourcescope.WithSourceIDs(ctx, principal.VisibleSourceIDs)
+	}
+	return ctx
 }

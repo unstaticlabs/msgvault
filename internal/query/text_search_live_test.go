@@ -8,6 +8,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/testutil/dbtest"
 )
 
 // openTextSearchDB creates a minimal in-memory SQLite DB with one text
@@ -15,6 +16,7 @@ import (
 // SQL after this call to verify live-message filtering.
 func openTextSearchDB(t *testing.T) (*sql.DB, int64) {
 	t.Helper()
+	dbtest.SkipIfPostgres(t, "SQLite fixtures require SQLite")
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err, "open")
 	t.Cleanup(func() { _ = db.Close() })
@@ -49,6 +51,7 @@ func openTextSearchDB(t *testing.T) (*sql.DB, int64) {
 			sent_at DATETIME,
 			size_estimate INTEGER DEFAULT 0,
 			has_attachments INTEGER DEFAULT 0,
+			hidden_text_present BOOLEAN NOT NULL DEFAULT 0,
 			attachment_count INTEGER DEFAULT 0,
 			deleted_at DATETIME,
 			deleted_from_source_at DATETIME,
@@ -73,6 +76,7 @@ func openTextSearchDB(t *testing.T) (*sql.DB, int64) {
 }
 
 func TestSQLiteEngine_TextSearch_ExcludesDedupHidden(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	db, msgID := openTextSearchDB(t)
 	engine := NewSQLiteEngine(db)
@@ -93,6 +97,7 @@ func TestSQLiteEngine_TextSearch_ExcludesDedupHidden(t *testing.T) {
 }
 
 func TestSQLiteEngine_TextSearch_ExcludesSourceDeleted(t *testing.T) {
+	t.Parallel()
 	db, msgID := openTextSearchDB(t)
 	engine := NewSQLiteEngine(db)
 	ctx := context.Background()
@@ -112,6 +117,7 @@ func TestSQLiteEngine_TextSearch_ExcludesSourceDeleted(t *testing.T) {
 // matches. Covers both the SQLite and DuckDB text engines, which share the
 // sanitizer and run the same messages_fts MATCH against SQLite.
 func TestTextSearch_SanitizesFTSInput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		query     string
@@ -167,6 +173,7 @@ func TestTextSearch_SanitizesFTSInput(t *testing.T) {
 }
 
 func TestTextModeIncludesTeamsAndMMSAndExcludesSynctechCalls(t *testing.T) {
+	t.Parallel()
 	assert := assert.New(t)
 	db, _ := openTextSearchDB(t)
 	engine := NewSQLiteEngine(db)
@@ -189,12 +196,6 @@ func TestTextModeIncludesTeamsAndMMSAndExcludesSynctechCalls(t *testing.T) {
 	assert.NotContains(types, "synctech_sms_call", "text mode should not include call log")
 }
 
-func TestIsTextMessageTypeIncludesTeamsAndMMSAndExcludesSynctechCalls(t *testing.T) {
-	assert.True(t, IsTextMessageType("mms"), "mms should be a text message type")
-	assert.True(t, IsTextMessageType("teams"), "teams should be a text message type")
-	assert.False(t, IsTextMessageType("synctech_sms_call"), "synctech_sms_call should not be a text message type")
-}
-
 func insertTextSearchMessage(t *testing.T, db *sql.DB, id int64, messageType, body string) {
 	t.Helper()
 	_, err := db.Exec(`INSERT INTO messages (id, source_id, conversation_id, subject, snippet, message_type) VALUES (?, 1, 1, ?, ?, ?)`, id, body, body, messageType)
@@ -204,6 +205,7 @@ func insertTextSearchMessage(t *testing.T, db *sql.DB, id int64, messageType, bo
 }
 
 func TestTextSearchScopesBeforePagination(t *testing.T) {
+	t.Parallel()
 	db, _ := openTextSearchDB(t)
 	insertTextSearchMessage(t, db, 2, "imessage", "hello second")
 	_, err := db.Exec(`

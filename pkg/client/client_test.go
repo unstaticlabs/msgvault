@@ -639,6 +639,38 @@ func TestGeneratedMessageRecordingsAcceptUnnamedAudio(t *testing.T) {
 	requirements.Error(missing.Validate(), "missing required filename")
 }
 
+func TestGeneratedCLIAccountsRequireAliasPresenceButAcceptEmptyStrings(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		aliasProperty string
+		valid         bool
+	}{
+		{name: "empty", aliasProperty: `,"alias":""`, valid: true},
+		{name: "nonempty", aliasProperty: `,"alias":"archive"`, valid: true},
+		{name: "missing"},
+		{name: "null", aliasProperty: `,"alias":null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requirements := require.New(t)
+			assertions := assert.New(t)
+			payload := `{"id":1,"email":"archive@example.com","type":"gmail","display_name":"Archive","identifier":"archive@example.com","last_sync":null,"message_count":0,"source_deleted_count":0,"history_only":false,"reanchor_required":false,"merged_into_source_id":0` + tc.aliasProperty + `}`
+			var account generated.CliAccountResponse
+			requirements.NoError(json.Unmarshal([]byte(payload), &account))
+			var response generated.CliAccountsResponse
+			requirements.NoError(json.Unmarshal([]byte(`{"accounts":[`+payload+`]}`), &response))
+			requirements.Len(response.Accounts, 1)
+
+			if tc.valid {
+				assertions.NoError(account.Validate())
+				assertions.NoError(response.Validate())
+			} else {
+				requirements.ErrorContains(account.Validate(), "Alias")
+				assertions.ErrorContains(response.Validate(), "Accounts[0].Alias")
+			}
+		})
+	}
+}
+
 func TestGeneratedFileMetadataRequiresPresenceButAcceptsEmptyLegacyStrings(t *testing.T) {
 	t.Run("metadata response", func(t *testing.T) {
 		assertions := assert.New(t)
@@ -702,6 +734,43 @@ func TestGeneratedFileMetadataRequiresPresenceButAcceptsEmptyLegacyStrings(t *te
 		missingMIME.MimeType = nil
 		requirements.Error(missingMIME.Validate(), "missing required MIME type")
 	})
+}
+
+func TestGeneratedChatDiscoveryRequiresPresenceButAcceptsEmptyMetadata(t *testing.T) {
+	requirements := require.New(t)
+	assertions := assert.New(t)
+	const payload = `{"conversation_id":1,"message_id":7,"source_id":1,"source_type":"beeper","conversation_type":"direct_chat","network":"unknown","match_kind":"partial","matched_tokens":["peer"],"matched_names":["Peer"],"evidence_truncated":false,"title":"","source_display_name":"","source_conversation_id":"","source_identifier":""}`
+	var present generated.ChatDiscoveryResult
+	requirements.NoError(json.Unmarshal([]byte(payload), &present))
+	assertions.Equal(int64(7), present.MessageID)
+	requirements.NoError(present.Validate())
+	requirements.NoError((generated.ChatDiscoveryPage{Results: []generated.ChatDiscoveryResult{present}, HasMore: false}).Validate())
+	for _, field := range []string{"title", "source_display_name", "source_conversation_id", "source_identifier"} {
+		t.Run(field, func(t *testing.T) {
+			requirements := require.New(t)
+			var missing map[string]any
+			requirements.NoError(json.Unmarshal([]byte(payload), &missing))
+			delete(missing, field)
+			encoded, err := json.Marshal(missing)
+			requirements.NoError(err)
+			var result generated.ChatDiscoveryResult
+			requirements.NoError(json.Unmarshal(encoded, &result))
+			requirements.Error(result.Validate(), "missing required %s", field)
+			requirements.Error((generated.ChatDiscoveryPage{Results: []generated.ChatDiscoveryResult{result}, HasMore: false}).Validate())
+		})
+	}
+}
+
+func TestGeneratedMediaSearchAcceptsEmptyAttachmentMetadata(t *testing.T) {
+	requirements := require.New(t)
+	var response generated.MediaSearchResponse
+	requirements.NoError(json.Unmarshal([]byte(`{
+		"results":[],"coverage":{"state":"complete","binding_required":false,"complete_documents":1,"scoped_documents":1},"partial":false,"truncated":false,
+		"pending_occurrences":0,"unavailable_occurrences":0,"attribution_unavailable":0,
+		"attachments":{"results":[{"attachment_id":1,"message_id":2,"conversation_id":3,
+			"filename":"","containing_title":"","excerpt":"matching text"}],"truncated":false}
+	}`), &response))
+	requirements.NoError(response.Validate())
 }
 
 func TestGeneratedPersonFactEvidenceRequiresPresenceButAcceptsEmptyStrings(t *testing.T) {

@@ -5,7 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 
@@ -17,7 +18,7 @@ func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, message
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(NULLIF(lower(message_type), ''), 'email') FROM messages WHERE id = ?`, messageID).Scan(&messageType); err != nil {
 		return err
 	}
-	if format != "mime" || messageType != MessageTypeEmail {
+	if format != messageRawFormatMIME || messageType != MessageTypeEmail {
 		result, err := tx.ExecContext(ctx, `DELETE FROM email_linkage_facts WHERE message_id = ?`, messageID)
 		if err != nil {
 			return err
@@ -45,7 +46,8 @@ func (s *Store) extractEmailLinkageTx(ctx context.Context, tx *loggedTx, message
 }
 
 func (s *Store) storeEmailLinkageTx(ctx context.Context, tx *loggedTx, messageID int64, evidence mime.EmailLinkage, fingerprint string, existingMessage bool) (bool, error) {
-	encoded, err := json.Marshal(evidence)
+	// Preserve the existing fact bytes so rereading identical evidence is not a change.
+	encoded, err := json.Marshal(evidence, json.Deterministic(true), jsontext.EscapeForHTML(true), jsontext.EscapeForJS(true))
 	if err != nil {
 		return false, err
 	}
@@ -175,7 +177,7 @@ func (s *Store) BackfillEmailLinkage(ctx context.Context, sourceID int64, limit 
 			switch {
 			case errors.Is(rawErr, sql.ErrNoRows):
 				evidence.Outcome = "missing_raw"
-			case !format.Valid || format.String != "mime":
+			case !format.Valid || format.String != messageRawFormatMIME:
 				evidence.Outcome = "unsupported_raw"
 			case storedSize <= mime.EmailLinkageMaxBytes:
 				limitErr := errors.New("email linkage raw size limit")

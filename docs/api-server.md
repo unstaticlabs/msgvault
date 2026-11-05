@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-14"
+last_edited: "2026-11-01"
 title: Web UI & API Server
 description: Daemon-served analytical Web UI and REST API for your msgvault archive, with optional background sync scheduling.
 ---
@@ -23,6 +23,8 @@ browser login, secure remote deployment, search states, and keyboard controls.
 | Submit a background backfill | [Historical import jobs](#historical-import-jobs) |
 | Follow background work | `/api/v1/operations/runs` and `/api/v1/operations/status` |
 | Integrate an AI assistant | [MCP server](usage/chat.md) |
+
+Connect AI assistants through the [native MCP endpoints](usage/chat.md#native-daemon-endpoints).
 
 ### Filename suggestions
 
@@ -148,7 +150,7 @@ The serialized operation gate protects provider mutations and their archive
 writes, including delegated calls. Body decoding, authorization, availability,
 and dry runs do not hold the gate or wait for a sync to release it.
 
-[Calendar usage](usage/calendar.md#control-events-unreleased) owns setup,
+[Calendar usage](usage/calendar.md#control-events) owns setup,
 recurrence limits, notification behavior, and reconciliation instructions.
 `POST /api/v1/cli/add-calendar/plan` also accepts `write=true` to plan opt-in
 `calendar.events` consent while preserving existing Google scopes.
@@ -158,7 +160,33 @@ recurrence limits, notification behavior, and reconciliation instructions.
 The API publishes its generated OpenAPI contract at `/openapi.json`.
 `msgvault openapi` prints the checked-in contract without starting a daemon or
 opening an archive. OpenAPI `info.version` is the **API schema version**;
-it is separate from the binary release version. The current schema is **3.18.0**.
+it is separate from the binary release version. The current schema is **3.42.0**.
+
+Schema 3.40.0 adds timezone-aware daily message grouping and `sent_only` group filtering. It also filters participant timelines to events and meetings attended by the owner.
+
+Schema 3.39.0 adds the optional `account` to staged deletion list summaries.
+
+Schema 3.38.0 adds exact sender and To participant identities to conversation windows and `kind` filters for canonical Email, Conversation, Event, Meeting, and Item entries. Conversation classification includes older chat messages whose stored message type is empty.
+
+Schema 3.35.0 adds `GET /api/v1/calendar/events`, which lists archived calendar occurrences in a window with repeating events expanded. `msgvault calendar events` requires a daemon supporting this schema.
+
+Schema 3.32.0 adds scheduled-work queue times and CardDAV scheduler activity: `queued_at` in scheduler account and CardDAV status, `scheduler_queued_at` in Sources status, and CardDAV `scheduler_running`.
+
+Schema 3.29.0 adds the optional `address` filter to `GET /api/v1/people/directory`. It matches literal case-insensitive fragments on a saved person's currently bound identities or current curated contact points without semantic search. CLI and MCP address lookups require a daemon supporting this schema.
+
+Schema 3.33.0 adds the read-only [person tier preview](#get-apiv1peopletiers) and [explanation](#get-apiv1peopleidtier) routes. The `preview_person_tiers` and `explain_person_tier` MCP tools require a daemon supporting this schema.
+
+Schema 3.36.0 adds `stored_plaintext_ranges` to document indexing status.
+
+Schema 3.34.0 adds `calls_short` and `calls_long`, the answered-call counts, to person tier signals.
+
+Schema 3.28.0 adds `calendar` to `GET /messages/{id}` and the CLI message route for calendar events: `status`, `sequence`, `start`, `end`, `all_day`, `time_zone`, and `ical_uid`. A field is `null` when the stored event does not carry it, such as a cancellation recorded before any details were seen. Calendar sync does not store a `sequence` of 0, so a `null` sequence usually means 0.
+
+Schema 3.30.0 adds `hidden_text_present` to message details and search rows. It is a best-effort flag: true means the stored HTML likely hides readable text, and false does not guarantee that text is visible.
+
+Schema 3.42.0 adds `imessage.media_max_participants` and `imessage.max_media_mb` to the settings catalog and updates.
+
+Schema 3.19.0 adds pipe-separated OR in full-text message search queries.
 Upgrade clients and daemon together across incompatible schema versions,
 including remote deployments.
 
@@ -169,9 +197,18 @@ Schema 3.11.0 adds `GET /media/search/status` to report whether Docbank transcri
 Schema 3.9.0 adds source-scoped agent read permissions and optional `expires_at`. Admitted FTS search responses, including aggregates, filtered messages and total statistics with search text, carry optional `index_state`. Agent checks are bounded; owner CLI searches retain automatic verification and repair.
 See [scoped archive reads](cli-reference.md#scoped-archive-reads).
 
-Schema 3.3.0 adds `POST /api/v1/telemetry/events`, which the web and terminal UIs use to
+Schema 3.3.0 adds `POST /api/v1/telemetry/events`, which the web, terminal UI, and interactive CLI use to
 report anonymous usage events through the daemon. See
 [Telemetry](configuration.md#telemetry).
+
+Schema 3.22.0 adds account aliases and lifecycle fields, account merging, and
+owner source-maintenance requests. Existing source identifiers and account
+requests remain valid.
+
+Schema 3.23.0 adds the [Docbank attachment mirror](#docbank-attachment-mirror)
+routes, delivery receipts and status states.
+
+Schema 3.26.0 adds `max_results` to `GET /messages/gmail-ids` for bounded query staging and `matched_count` to its bounded responses. See [staged deletion via MCP](https://msgvault.io/docs/usage/chat/#staged-deletion-via-mcp) for supported sources, skipped matches, and the staging limit.
 
 Schema 3.0.0 removes the unguarded
 `POST /api/v1/identity/match-candidates/{id}/accept` and `/reject` routes.
@@ -223,7 +260,7 @@ conflict when one UID resolves to multiple people. Person responses expose
 Schema 3.11.0 adds structured `account_scopes` filters, the Explore account
 filter, and the virtual account catalog on `/cli/accounts`.
 
-Schema 3.1.0 adds unreleased [calendar event control](#calendar-control),
+Schema 3.1.0 adds [calendar event control](#calendar-control),
 availability queries, and opt-in `write` on Calendar consent plans.
 
 Schema 3.2.0 adds `counts_pending` to `GET /api/v1/cli/accounts`. See
@@ -237,6 +274,11 @@ Schema 3.7.0 adds `GET /api/v1/media/search` for scoped lexical transcript searc
 
 Schema 3.14.0 adds `filename:` search filters, optional match snippets,
 attachment names and counts, and `hybrid_available` to CLI search responses.
+
+Schema 3.20.0 adds [contact route discovery](#contact-route-discovery).
+
+Schema 3.21.0 adds `GET /api/v1/embeddings/status` and MCP
+`get_embeddings_status`. See [message embedding status](#message-embedding-status).
 
 Schema 2.35.0 adds `scope_escalation_source_type` (`gmail` or `msmail`) to
 `POST /api/v1/cli/delete-staged/plan` responses that require a permission
@@ -302,13 +344,10 @@ value under twelve characters, for the CardDAV password, and when nothing
 is set; the value itself is never returned. `validation` gains two optional
 fields:
 
-- `format: "cron"` marks a five-field cron schedule (minute, hour, day of
-  month, month, day of week) as the daemon's scheduler parses it: `*` or `?`,
-  numbers, ranges, comma lists, `/step`, and three-letter month and weekday
-  names. A `CRON_TZ=<zone>` or `TZ=<zone>` prefix with an IANA zone name runs
-  the schedule in that zone instead of the daemon's local time. Descriptors
-  such as `@hourly`, the `L`, `W`, and `#` extensions, and a field made only
-  of commas are rejected. The daemon trims surrounding whitespace and treats
+- `format: "cron"` marks a five-field cron schedule, optionally preceded by a
+  `CRON_TZ=<zone>` or `TZ=<zone>` prefix. The daemon accepts exactly the
+  [cron schedules](configuration.md#cron-schedules) its configuration file
+  accepts. The daemon trims surrounding whitespace and treats
   a zone prefix with no fields after it as the empty value, then validates
   the expression on PATCH; an empty value is rejected when the setting is
   `required`.
@@ -336,6 +375,8 @@ responses are bounded projections that omit raw vCards and resource hrefs;
 only the explicit publication preview route returns a raw vCard.
 See [release changes](changelog.md#upgrade-and-compatibility) for removed paths
 and the 1.x/2.x transition.
+
+Schema 3.37.0 returns HTTP 200 from `GET /api/v1/participants/{id}` for a participant with no sent or received messages, with `activity_count` set to 0 and `first_at` and `last_at` omitted. `GET /api/v1/participants/{id}/inboxes` also returns HTTP 200 with an empty list for that participant. `GET /api/v1/relationships/{id}/calendar` still returns 404 for that participant because it has no relationship score; check `activity_count` before requesting the calendar. The generated Go client in `pkg/client` declares `PersonSummary.FirstAt` and `LastAt` as `*time.Time`.
 
 ### Person UIDs and CardDAV bindings
 
@@ -536,7 +577,7 @@ is required. Three API-key authentication methods are supported:
 | API key header | `X-API-Key: <key>` | `X-API-Key: my-secret` |
 | Plain auth header | `Authorization: <key>` | `Authorization: my-secret` |
 
-If no effective API key is configured, authentication is not required. Secure startup requires a key for non-loopback addresses. On unreleased `main`, `serve` creates and persists one when no credential source is configured. See [server credentials](configuration.md#server) for file and environment sources, persistence, and explicit insecure mode.
+If no effective API key is configured, authentication is not required. Secure startup requires a key for non-loopback addresses. `serve` creates and persists one when no credential source is configured. See [server credentials](configuration.md#server) for file and environment sources, persistence, and explicit insecure mode.
 
 Keys listed under `[[server.remote_clients]]` authenticate the same way but reach only a fixed set of read operations; every other route returns 403. See [read-only remote clients](guides/remote-deployment.md#read-only-remote-clients).
 
@@ -759,6 +800,50 @@ when it has no qualifying connections.
 
 Invalid depths return `400`; an unknown durable person returns `404`. The
 projection has no ETag because it is not a mutation resource.
+
+---
+
+### Person tier preview {#get-apiv1peopletiers}
+
+**Endpoint:** `GET /api/v1/people/tiers`
+
+List saved people in tier 1 or 2, tier 1 first and the most recent contact
+first within a tier. The rules, windows, and thresholds are
+[`[people.tiers]`](/docs/configuration/#people-tiers), read from the config
+file at request time, so this answers the same as `msgvault person tiers
+preview --json`. The route only reads; track the people you choose with
+`PUT /api/v1/people/{id}/tracking`.
+
+```json
+{
+  "people": [
+    {"person_id": 7, "display_name": "Ana Example", "tier": 1, "rule": "tier1_intensity", "tracked": false, "last_contact_date": "2026-10-28"}
+  ],
+  "as_of": "2026-10-29",
+  "readiness": {"ready": true, "reasons": []},
+  "projection": {"timezone": "UTC", "max_direct": 25}
+}
+```
+
+`readiness.ready` is `false` while the activity projection is behind or was
+built under other `[activity]` settings; counts can then be too low. While the
+projection rebuilds after a change to `[activity] timezone` or
+`max_direct_counterparts`, the route returns `409` /
+`activity_projection_rebuilding`. Invalid `[people.tiers]` settings return
+`503` / `person_tiers_config_invalid`.
+
+---
+
+### Person tier explanation {#get-apiv1peopleidtier}
+
+**Endpoint:** `GET /api/v1/people/{id}/tier`
+
+Show every count behind one saved person's tier against its threshold,
+including people in tier 3. The body has the preview row's fields plus
+`exclusion` (`owner`, `automated_address`, `calendar_room`, or `null`),
+`signals` (the windowed counts), and `thresholds` (each check with `observed`,
+`required`, `enabled`, and `met`). An unknown person returns `404` /
+`person_profile_not_found`; rebuild and config errors match the preview.
 
 ---
 
@@ -1149,16 +1234,17 @@ use for message-type filtering when you do not need full-text ranking.
 }
 ```
 
-The companion `GET /api/v1/messages/gmail-ids` endpoint returns matching Gmail
-and Microsoft Graph mail (`msmail`) source message IDs in its `gmail_ids` field
-for email workflows such as deletion staging. The route and field names stay
-the same for both providers. It honors a subset of these parameters:
-`sender` / `sender_name`, `recipient` /
-`recipient_name`, `domain`, `label`, `source_id`, `after` / `before`, and
-`limit`. Results are restricted to Gmail and Microsoft Graph mail sources,
-exclude deleted messages, and are ordered newest-first; the remaining `/messages/filter`
-parameters (`message_type`, `conversation_id`, `attachments_only`,
-`hide_deleted`, `offset`, `sort`, `direction`) are ignored.
+The companion `GET /api/v1/messages/gmail-ids` endpoint returns source message IDs in `gmail_ids` and source metadata in `targets` for deletion staging. Without `max_results`, it selects Gmail and Microsoft Graph mail (`msmail`). The route and field names are shared by all supported providers.
+
+| Parameter | Behavior |
+| --- | --- |
+| `q` | Search expression. Combine it with structured filters to narrow the selection. |
+| `search_mode` | Required with `q`: `fast` searches metadata, `deep` includes bodies, and `aggregate` selects an aggregate row using `view_type` and `aggregate_key`. |
+| `max_results` | Integer from 1 through 100001. Requires `q` and `search_mode=fast` or `deep`. Caps search matches before resolving deletion targets. Empty or invalid values return `invalid_max_results`. |
+
+Bounded responses include `matched_count` before target lookup, so request one extra match to detect overflow; see [staged deletion via MCP](https://msgvault.io/docs/usage/chat/#staged-deletion-via-mcp) for supported sources and skipped matches.
+
+The endpoint also accepts `sender` / `sender_name`, `recipient` / `recipient_name`, `domain`, `label`, `message_type`, `conversation_id`, `attachments_only`, `source_id`, `source_ids`, and `after` / `before`, and applies them as `/messages/filter` does. Structured selections honor `limit`. Search selections use `max_results` for their bound. Results always exclude deleted messages and are ordered newest-first, so `hide_deleted`, `offset`, `sort`, and `direction` have no effect.
 
 ---
 
@@ -1714,6 +1800,7 @@ own schedule; nothing in this feed will invalidate them.
 | 429 | `rate_limit_exceeded` | The caller has outrun the [rate limit](#rate-limiting); `Retry-After` says how long to wait. Worth handling here more than anywhere else, because polling is what this endpoint is for. Polling faster does not make the feed advance sooner — `complete_through` moves with the database, not with your poll rate — and on SQLite it costs the importer write throughput |
 | 500 | `internal_error` | The watermark query failed. **PostgreSQL only:** this is also how the no-visibility-floor case above surfaces — a server that has never once read the bound while every writer of the message table was visible has no safe bound to report, so the endpoint refuses rather than returning a page that would step your cursor over an invisible writer's change. The server log names the `pg_read_all_stats` grant that fixes it; it also clears by itself when the foreign transaction ends |
 | 503 | `feature_unavailable`, `query_timeout` | `feature_unavailable`: the configured store cannot answer the watermark query, or cannot say which archive it is, so it cannot issue a cursor you could safely resume from. `query_timeout`: the request outran the server's per-request time limit. Both are retryable from the same cursor. (A request the caller abandoned is answered `query_canceled` on the same status, which by definition nobody is left to read.) |
+| 503 | `analytical_cache_unavailable` | The committed analytics cache is unavailable, for example while `remove-account` or a repair command rebuilds it under `engine = "duckdb"`. Retry the request. |
 
 ---
 
@@ -1740,6 +1827,7 @@ Full message details including body and attachment metadata.
   "has_attachments": true,
   "size_bytes": 52480,
   "body": "<plain text body, or HTML when no plain text body exists>",
+  "body_text": "<stored plain-text body, or an empty string when no plain text is stored>",
   "body_html": "<html><body><p>Full HTML body</p></body></html>",
   "attachments": [
     {
@@ -1753,7 +1841,11 @@ Full message details including body and attachment metadata.
 }
 ```
 
-The `cc`, `bcc`, and `body_html` fields are included only when present. `body` is the plain-text body when one exists; for HTML-only messages, it falls back to the HTML body so callers still receive message content.
+The `cc`, `bcc`, and `body_html` fields are included only when present. `body` is the stored plain-text body when one exists; otherwise, it falls back to the HTML body so callers still receive message content.
+
+API schema 3.41.0 adds `body_text` for a single message's stored plain-text body, which can be generated from the HTML part and is empty when no plain text is stored; conversation windows leave it unset. Older servers omit `body_text`, and `body` keeps its HTML fallback.
+
+Schema 3.42.0 adds an optional `sender_auth` object to message details and `GET /api/v1/cli/message` for email sources with [receiver pins](configuration.md#sender-authentication). It carries `verified`, `domain`, `authserv_id`, `spf`, `dkim`, and `dmarc`. Only `verified` is always present. Empty results carry `verified: false`. Verification covers the From domain, as reported by the pinned receiving server. List and search responses omit this field.
 
 ---
 
@@ -1773,6 +1865,16 @@ The response includes the SHA-256 `content_hash` used by the content endpoint:
   "content_hash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 }
 ```
+
+---
+
+### Docbank attachment mirror
+
+`GET /api/v1/integrations/docbank/attachments` returns `state`, `upload_consent`, `folder`, and `counts` with `delivered`, `sending`, `remaining`, `failed`, and `reasons`. Delivered, sending and failed counts are unique files per destination. `remaining` counts all distinct eligible files with no delivery record for this destination. These files have stored local bytes, including files retained after source deletion and deduplication. Files whose only messages were deleted in msgvault are excluded. `state` is `running`, `docbank_disabled`, `consent_off`, or `worker_unavailable`. Off and unavailable workers omit counts. An unavailable mirror reader returns 503. File search and list rows omit receipts. `GET /api/v1/files/{id}` includes `docbank` receipts for the file's content hash, including recovered local alias hashes.
+
+`POST /api/v1/integrations/docbank/attachments/backfill` resets discovery and requeues failed deliveries as sending intents with attempts reset in one transaction. It returns 202 with `{"status":"scheduled"}`, including when the job is already running. It requires attachment upload consent and a scheduled mirror job. Missing consent returns 409; an unavailable store or scheduler returns 503. Both routes require the API key.
+
+Attachment metadata and message details include an optional `docbank` array of receipts with `endpoint`, `folder`, `node_id`, `version_id`, `blob_hash`. Duplicate stored content hashes share receipts. For hashless Slack or Discord rows, discovery and details recover the hash from a local storage path in the `<hash[:2]>/<hash>` format with lowercase SHA-256 hex and a matching prefix. The mirror uploads these aliases from loose files or retained pack entries, verifies their SHA-256, and uploads under `<first 12 hex of hash>-<sanitized basename>`. See [configuration](configuration.md#mirror-stored-attachments-to-docbank) for consent and failure recovery.
 
 ---
 
@@ -1829,13 +1931,17 @@ Successful responses set:
 
 `GET /api/v1/media/search?q=quarterly%20numbers&mode=lexical&limit=20` finds spoken words and returns every matching live message occurrence. Results include message, conversation and attachment IDs, optional `filename`, `containing_title` and `occurred_at`, supplied or generated origin, an excerpt, and timing when Docbank recorded it. Optional `person_id` selects durable person bindings; `participant_id` selects the current identity cluster used by Explore's Person filter. They can't be combined. Repeated `direction` values select `from_person`, `to_person` or `group` relations and require either ID.
 
-The daemon searches the complete allowed population, with a ceiling of 4,096 distinct versions and source selectors. Oversized scopes return `media_search_scope_limit` before contacting Docbank; set `person_id` or `participant_id` to narrow the scope. A recording with more than 64 distinct current supplied transcript input IDs is left out of the search. Its message occurrences count in `unavailable_occurrences`, and `partial=true`. Repeated occurrences of the same input count once. Semantic and hybrid modes return `media_search_mode_unavailable`. An unconfigured or unreachable integration returns `media_search_unavailable`.
+The recording search covers the complete allowed population, with a ceiling of 4,096 distinct versions and source selectors. Oversized scopes return `media_search_scope_limit` before contacting Docbank; set `person_id` or `participant_id` to narrow the scope. A recording with more than 64 distinct current supplied transcript input IDs is left out of the search. Its message occurrences count in `unavailable_occurrences`, and `partial=true`. Repeated occurrences of the same input count once. Semantic and hybrid modes return `media_search_mode_unavailable`. An unconfigured or unreachable integration returns `media_search_unavailable`.
 
 The response has Docbank `coverage`, local `pending_occurrences` and `unavailable_occurrences`, `attribution_unavailable`, `partial`, and `truncated`. Pending counts require durable worker work; unmapped audio counts as unavailable. Coverage state `unknown` stays unknown. `partial` also reports local gaps and withheld excerpts. An empty result with complete coverage and `partial=false` means the query found no transcript match. The output limit applies after shared recordings expand into messages; `truncated` reports remaining occurrences or Docbank's retrieval limit.
 
-Selected transcript completeness must be `complete`, `partial`, or `degraded_provenance`. The latter two set `partial=true`; unsupported values reject the entire search with HTTP 503 and `media_search_unavailable`.
+Selected transcript completeness must be `complete`, `partial`, or `degraded_provenance`. The latter two set `partial=true`; unsupported values report `media_search_unavailable` for recordings.
 
-Media search requires Docbank's source-selected search contract: `media_sources` selectors, a `media_source_selection` report marker and query-independent `media_selections`, including empty results. The daemon sends each source's current supplied-input set; generated transcripts stay eligible while supplied work is queued. Docbank selects each source's current transcript before ranking and returns build and exact source associations with each plain excerpt; source selections carry origin and supplied-input identity. Pending or missing transcripts leave coverage partial while ready matches remain searchable. Older servers and remote lookup failures return `media_search_unavailable`. Supplied text requires `supplied_input_id` to match the occurrence's saved delivery; mismatches count as unavailable attribution even when the query has no hits. The daemon validates supplied transcript revisions before search and rechecks visibility, recording identity, supplied text and person scope afterward.
+Recording search requires Docbank's source-selected search contract: `media_sources` selectors, a `media_source_selection` report marker and query-independent `media_selections`, including empty results. The daemon sends each source's current supplied-input set; generated transcripts stay eligible while supplied work is queued. Docbank selects each source's current transcript before ranking and returns build and exact source associations with each plain excerpt; source selections carry origin and supplied-input identity. Pending or missing transcripts leave coverage partial while ready matches remain searchable. Older servers and remote lookup failures report `media_search_unavailable` for recordings. Supplied text requires `supplied_input_id` to match the occurrence's saved delivery; mismatches count as unavailable attribution even when the query has no hits. The daemon validates supplied transcript revisions before search and rechecks visibility, recording identity, supplied text and person scope afterward.
+
+Schema 3.27.0 adds optional `attachments` with `results`, `truncated`, and optional `error` containing `error` and `message`. Each result has `message_id`, `conversation_id`, `attachment_id`, `filename`, `containing_title`, optional `occurred_at`, and a plain `excerpt`. It searches delivered mirror versions using text Docbank has extracted, ordered by Docbank rank. A scope with more than 4096 mirrored files excluding images, audio, and video returns `media_search_scope_limit` in `attachments.error`. Add a Person filter to narrow the version scope. A Docbank result limit or occurrence limit sets `truncated`, meaning more may match. Docbank may include filename-only candidates in its limit even when all extracted-text matches fit. Visibility and Person scope apply to both lists. The limit applies independently to each list. An empty attachment list without an error means no match in extracted text and says nothing about files whose text Docbank hasn't extracted.
+
+The attachment field is omitted when attachment mirroring is off. Attachment failures leave recording results intact and set `attachments.error`. Docbank-rejected recording queries return HTTP 400 with `invalid_media_search`. Other recording failures, including oversized scopes and remote timeouts, leave attachment results intact and set `recordings_error` with `error` and `message`. The request fails when both searches fail or its context ends. Recording-only responses retain their existing error behavior.
 
 ### Message recordings {#get-apiv1messagesidrecordings}
 
@@ -1926,6 +2032,63 @@ whichever is shorter. A read that runs out of budget leaves its recording
 
 ---
 
+### Search message metadata {#get-apiv1searchfast}
+
+**Endpoint:** `GET /api/v1/search/fast`
+
+Search subject, snippet, sender and recipient metadata with the Gmail-style
+query in `q`. The response includes the page in `messages` and the full match
+count in `total_count`; no separate count request is needed. If the count is
+unavailable, `total_count` is `-1`.
+
+Use `limit` and `offset` to page through results. `limit=0` returns the count
+without fetching a page. Aggregate `stats` are omitted by default. Supply
+`view_type=senders` (or another aggregate view) to request them. The TUI
+requests these stats for its current view; MCP metadata search skips them.
+
+Disconnecting an HTTP MCP client cancels its in-flight daemon search,
+including older MCP protocol clients. Request completion and in-progress logs
+include `remote_addr` and `query_shape`. The shape records recognized operator
+and parameter names, with `text` marking free text. It excludes query values
+and unknown operator names. `remote_addr` is the connected peer address;
+forwarded-address headers do not replace it.
+
+### Find archived chats {#find-archived-chats}
+
+**Endpoint:** `GET /api/v1/conversations/search`
+
+API schema 3.25.0 adds ranked chat discovery for owner clients.
+Delegated agent tokens are denied by the existing archive-read policy.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `q` | string | required | 1–16 unique tokens, at most 256 UTF-8 bytes |
+| `limit` | integer | 20 | Maximum results, from 1 to 100 |
+| `source_id` | integer | all sources | Positive archive source ID |
+
+Invalid arguments return `400`: malformed numbers use `invalid_limit` or
+`invalid_source_id`; other invalid values use `invalid_query`. The response
+contains `results` (an array, including when empty) and `has_more` (whether
+additional matches exist beyond the limit). There is no cursor or exact count; narrow the
+query or source, or increase the limit to inspect more candidates.
+
+Each result contains `conversation_id`, `message_id`, `source_conversation_id`,
+`source_id`, `source_type`, `source_identifier`, `source_display_name`,
+`network`, `title`, `conversation_type`, `matched_tokens`, `matched_names`,
+`evidence_truncated`, and `match_kind` (`exact` or `partial`). Use the archive
+`conversation_id` to filter archived messages. `message_id` is the chat's
+newest visible message, for opening the thread; the provider ID identifies the
+original chat. Network labels come from source labels. Missing Beeper labels,
+or suffixes equal to the account ID after trimming, are `unknown`; native
+sources use their type.
+
+The [CLI discovery reference](cli-reference.md#find-chat) owns token matching,
+ranking, archive scope and scan-cost semantics. This endpoint uses that same
+Store operation. It reads metadata, never message bodies, and makes no identity
+changes.
+
+---
+
 ### Search messages {#get-apiv1search}
 
 **Endpoint:** `GET /api/v1/search`
@@ -1954,7 +2117,7 @@ to `mode=fts` instead.
 
 `message_type` uses the same values as local search: `email`,
 `calendar_event`, `meeting_transcript`, `beeper`, `chatwoot`, `teams`, `discord`, `sms`,
-`mms`, `whatsapp`, `imessage`, `fbmessenger`, `synctech_sms_call`,
+`mms`, `whatsapp`, `imessage`, `fbmessenger`, `telegram`, `synctech_sms_call`,
 `google_voice_text`, `google_voice_call`, and `google_voice_voicemail`. The
 query string can also carry `message_type:` / `message_type=` operators inside
 `q`.
@@ -2062,6 +2225,72 @@ reference and [Vector Search](/docs/usage/vector-search/) for vector /
 hybrid setup.
 
 ---
+
+### Contact route discovery {#contact-route-discovery}
+
+Find a saved person by name, then read the selected person's archived messaging
+routes. These owner-only GET routes are available in API schema 3.20.0 and later.
+Delegated agent tokens cannot use them. Discovery reads one archive
+snapshot per request and makes no provider calls or identity changes.
+
+`GET /api/v1/people/contact-candidates?query=Avery%20Example` searches saved names,
+current structured names, and the display names of explicitly bound
+participants. Names that appear only in message headers are not searched.
+Every whitespace token must match a literal substring. `%`, `_`, and
+backslash are literal; SQLite folds ASCII case only. Queries must contain
+1–256 UTF-8 bytes after trimming and at most 16 tokens. The response includes
+canonical `person_uid`, `person_id`, revision, and `match_kinds` for each
+candidate. `ambiguous` describes the whole query, even when `limit=1`. The client
+must choose a person explicitly.
+
+`GET /api/v1/people/messaging-routes?person_uid=<selected-uid>` resolves canonical
+and retired UIDs through current merge and split bindings. It returns the
+requested and canonical UID, alias reason, person and identity revisions,
+curated `contact_points`, bound `observations`, `unreviewed_suggestions`, and
+`routes`. Suggestions summarize candidate or conflicted matches and
+accepted matches awaiting application. Discovery never follows or accepts them.
+
+Each route preserves `source_id`, `source_type`, exact `account_id`, network,
+archive `conversation_id`, exact `provider_chat_id`, conversation type, bound
+participant IDs, evidence and sync times, and reasons. Its status explains the
+available proof:
+
+| Status | Meaning |
+| --- | --- |
+| `archive_verified` | A direct chat with matching account/chat/type proof, a complete matching roster whose non-self members are all bound to the selected person, and evidence and source sync no older than seven days. |
+| `unresolved` | Missing, invalid, incomplete, changed, stale, deleted, or failed evidence. Read `reasons` before using the identifiers. |
+| `group_context` | A group or channel containing the person. Membership does not prove a direct endpoint. |
+| `merged_container` | A Beeper container. Its member chat IDs require independent route evidence; `missing_member_chat_ids` identifies missing or ambiguous archived members. |
+
+For Beeper, normal sync captures authoritative `Account.bridge.type` and the
+exact roster. Bridge types that name a service with a native importer use that
+importer's source type as `network`: `discordgo` becomes `discord` and `slackgo`
+becomes `slack`. Other bridge types, such as `whatsapp` or `telegram`, are used
+as reported. Display labels, names, phone shapes, Matrix IDs, and curated
+contact points never establish WhatsApp. Older archives remain unresolved until
+normal sync captures this metadata. `network_label` is a display value.
+`freshness=archive_only` and `checked_at` describe the lookup; archive verification
+does not establish live reachability or authorize sending.
+
+Both endpoints accept `limit` (default 20, range 1–100). Candidate pages use
+`after_id`. Route sections each have `items`, `has_more`, and `next_after_id`:
+pass these IDs as `after_conversation_id`, `after_contact_point_id`,
+`after_observation_id`, and `after_suggestion_id`, respectively. The route cursor
+advances over inspected conversations, so a network-filtered page can be empty
+with `has_more=true`. Follow it until exhausted. Optional `network` accepts a
+lowercase service name such as `whatsapp` or `discord`. Native sources of other
+networks are skipped without using the page. Beeper routes are filtered after
+their route metadata is read, and unknown-network routes remain visible as
+unresolved. Optional `source_id` restricts route sources. These filters do
+not restrict the contact or suggestion sections.
+
+Paging is live between requests. Restart after a changed person or identity
+revision and reconcile the first page when observations or rosters change;
+those changes do not all advance the identity revision. Each response uses
+`Cache-Control: no-store`. Invalid input returns `400 invalid_contact_lookup`,
+unknown UIDs `404 person_not_found`, retired tombstones `410 person_uid_gone`,
+and unavailable storage or backends `503 contact_lookup_unavailable`. Failures
+never return successful empty matches.
 
 ### Accounts summary {#get-apiv1accounts}
 
@@ -2218,8 +2447,7 @@ oversized scope must be narrowed. Neither case widens the request.
 **Endpoint:** `POST /api/v1/import/muesli`
 
 The native client uses this owner-authenticated endpoint for remote Muesli sync.
-Agent-delegated credentials and read-only remote client keys are denied. It is available on `main` and is not yet
-released. Prefer the native [Muesli commands](cli-reference.md#sync-muesli);
+Agent-delegated credentials and read-only remote client keys are denied. Prefer the native [Muesli commands](cli-reference.md#sync-muesli);
 applications do not need an export script.
 
 The strict JSON contract accepts `action` (`register`, `upsert`, or `refresh`),
@@ -2462,6 +2690,24 @@ the job holding the gate, such as `activity-projection` or `attachment-pack`.
 
 ---
 
+### Participant and domain timelines
+
+`POST /api/v1/participants/{id}/timeline` and `POST /api/v1/domains/{domain}/timeline` omit drafts and unsent items. Participant timelines include events and meetings only when the archive owner participated. These rules apply to every caller, including CLI and MCP clients.
+
+### Group analytical results
+
+**Endpoint:** `POST /api/v1/explore/groups`
+
+`grouping` takes one dimension: `source`, `participant`, `domain`,
+`message_type`, `mailing_list`, `kind`, `year`, `month`, or `day`.
+`day` returns `YYYY-MM-DD` keys and counts individual messages; other
+dimensions count entries, with chats collapsed into conversations.
+`timezone` sets the IANA time zone for day grouping and defaults to `UTC`.
+Day rows include `level` for calendar shading only when the page contains every day row. It ranks each count across that complete day set; partial pages and keyed lookups omit `level`.
+`sent_only: true` excludes drafts and unsent items from the counts.
+Day grouping is request-only and cannot be stored in a saved view.
+Files grouping (`POST /api/v1/files/groups`) uses UTC days and has no `timezone` parameter.
+
 ### Preflight an analytical selection {#post-apiv1explorepreflight}
 
 **Endpoint:** `POST /api/v1/explore/preflight`
@@ -2497,7 +2743,7 @@ explore contract is in the generated OpenAPI document (`/openapi.json`).
 | Field | Description |
 |---|---|
 | `mode` | `all_matching` selects everything the predicate matches; `explicit` selects only the listed `row_keys` |
-| `predicate` | The explore request being acted on: `filters` (dimensions `source`, `participant`, `domain`, `message_type`, `after`, `before`, `deletion`), plus `query` / `search_mode` for search-backed selections. Cursors are rejected |
+| `predicate` | The explore request being acted on: `filters` (dimensions `source`, `participant`, `domain`, `message_type`, `kind`, `after`, `before`, `deletion`), plus `query` / `search_mode` for search-backed selections. Cursors are rejected |
 | `row_keys` | Explore row keys (the `key` field of explore rows) to include; required when `mode` is `explicit` |
 | `exclusions` | Row keys to exclude from an `all_matching` selection |
 | `cache_revision` | Required. The `cache_revision` from the explore response being reviewed |
@@ -2568,7 +2814,7 @@ by an agent without rebuilding its query.
 | `DELETE` | `/api/v1/saved-views/{id}` | Delete a view definition. Requires `If-Match`. Never touches archive messages. |
 | `POST` | `/api/v1/saved-views/{id}/run` | Execute a view through its canonical Explore definition. |
 
-`canonical_state` is a closed version-1 object. The daemon rejects a
+New definitions use `schema_version: 2`. The daemon reads schema 1 with pipes as literal text in full-text queries. `canonical_state` is a closed object. The daemon rejects a
 definition it could not execute, so every stored view can be opened by the
 Web UI and run by the API:
 
@@ -2576,7 +2822,7 @@ Web UI and run by the API:
 |-------|-----------------|
 | `query` | Free text. Empty means no text search. |
 | `search_mode` | `full_text`, `semantic`, `hybrid`. Defaults to `full_text` when a query is present. |
-| `filters[].field` | An Explore filter dimension: `source`, `identity`, `participant`, `domain`, `mailing_list`, `message_type`, `after`, `before`, `deletion`. The legacy aliases `source_id` and `participant_id` are accepted and executed as `source` and `participant`. |
+| `filters[].field` | An Explore filter dimension: `source`, `identity`, `participant`, `domain`, `mailing_list`, `message_type`, `kind`, `after`, `before`, `deletion`. The legacy aliases `source_id` and `participant_id` are accepted and executed as `source` and `participant`. |
 | `filters[].operator` | `eq` or `in`. |
 | `filters[].values` | One or more non-empty strings. Numeric identifiers are decimal strings so they survive JavaScript clients unchanged. |
 | `grouping` | A drill-down chain of Explore grouping dimensions: `source`, `participant`, `domain`, `message_type`, `mailing_list`, `kind`, `year`, `month`. |
@@ -2648,7 +2894,7 @@ empty object `{}` is a valid body.
       "filters": [{"field": "source", "operator": "in", "values": ["1"]}],
       "presentation": "table"
     },
-    "schema_version": 1,
+    "schema_version": 2,
     "revision": 3,
     "created_at": "2026-07-19T10:00:00Z",
     "updated_at": "2026-07-19T11:00:00Z"
@@ -2874,6 +3120,7 @@ filters by one of `pending`, `in_progress`, `completed`, `failed`, or
       "created_at": "2026-07-06T15:30:00Z",
       "created_by": "api",
       "description": "old newsletters",
+      "account": "user@example.com",
       "message_count": 1234
     }
   ]
@@ -2902,6 +3149,8 @@ already completed, failed, or cancelled.
 ## Rate Limiting
 
 The API enforces rate limiting of 10 requests per second per client IP, with a burst allowance of 20 requests. When the limit is exceeded, the server responds with HTTP 429 and includes a `Retry-After` header indicating how long to wait before retrying.
+
+Loopback requests skip this limit when they're trusted: no API key is configured, or the request carries a valid API key, remote client key, or browser session cookie. Credential-free loopback `GET /api/ping` and `GET /api/daemon/identity` requests also skip it, so local clients can find a busy daemon. Loopback requests with a wrong or missing credential, and session login, stay limited.
 
 ## CORS
 
@@ -2959,7 +3208,7 @@ The same HTTP server backs configured remote CLI access and the local background
 The server is designed for local use:
 
 - **Loopback-only by default.** The default bind address is `127.0.0.1`, restricting access to the local machine.
-- **API key required for non-loopback.** Binding to a non-loopback address requires an effective key. On unreleased `main`, `serve` creates a persisted key when no credential source is configured; a selected invalid source fails startup. See [server credentials](configuration.md#server).
+- **API key required for non-loopback.** Binding to a non-loopback address requires an effective key. `serve` creates a persisted key when no credential source is configured; a selected invalid source fails startup. See [server credentials](configuration.md#server).
 - **Opt-in for insecure binding.** To bind to a non-loopback address without an API key (not recommended), set `allow_insecure = true`.
 
 !!! warning
@@ -3015,7 +3264,7 @@ All server settings go in the `[server]` section of `config.toml`. Account sched
 | `engine` | `auto` | Aggregate engine for Web UI, TUI, and aggregate HTTP views: `auto`, `sql`, or `duckdb` |
 | `auto_build_cache` | `true` | Refresh a stale or missing cache at startup, after scheduled or manual syncs, and when a query finds it due; `false` skips automatic builds |
 | `min_rebuild_interval` | `0s` | Minimum age of a usable cache before a sync, query, or daemon restart may queue an automatic rebuild |
-| `builder_memory_limit` | `2GB` | DuckDB memory limit for cache builds, such as `4GB` or `512MiB` |
+| `builder_memory_limit` | Adaptive | DuckDB buffer-manager budget for cache builds; see [builder sizing and overrides](configuration.md#analytics) |
 | `builder_threads` | min(CPUs, 2) | DuckDB threads for cache builds; zero keeps the default |
 | `builder_temp_limit` | `32GB` | Maximum spill-to-disk size for cache builds |
 | `query_memory_limit` | `512MB` | DuckDB memory limit for daemon aggregate queries; raise it on a large archive |
@@ -3046,3 +3295,25 @@ policy and deletion visibility. Changes under
 | `enabled` | `true` | Whether scheduled sync is active |
 
 See the [Configuration](/docs/configuration/) page for the full config file reference.
+
+## Message embedding status
+
+`GET /api/v1/embeddings/status` returns the same generation and coverage shape
+used by `msgvault embeddings status --json`, plus live job and scheduler state,
+recent throughput, nullable ETA, and a bounded per-batch timing sample.
+`source_id` is an optional positive integer that filters `eligible`, `current`,
+and `pending`. Diagnostics, throughput, job state, and failures describe the
+whole run across sources; filtered responses have null ETA. Owner access is
+required because run diagnostics and scheduler state span sources outside a
+scoped agent grant.
+The endpoint is read-only and bypasses the scheduler slot. It returns `400`
+for invalid, repeated, unknown, or out-of-scope source IDs and `503` with `embeddings_status_unavailable` when vector search is disabled,
+required archive state cannot be read, or the read takes longer than five seconds.
+A diagnostics-only read or decode failure returns coverage and job state with
+`diagnostics=null`. `coverage_sampled_at` gives the count time; stale counts
+suppress ETA. `diagnostics_stale` marks an unfinished snapshot older than a
+minute, and an active run with that snapshot has phase `diagnostics_stale`.
+It never sends message content to a provider.
+See the [CLI field semantics](cli-reference.md#embeddings-status) and the
+[published OpenAPI schema](https://github.com/kenn-io/msgvault/blob/main/api/openapi.yaml).
+MCP exposes the same response through `get_embeddings_status` on API 3.21.0 or newer when vector search is enabled.

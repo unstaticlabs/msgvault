@@ -13,6 +13,81 @@ accept a context; the caller controls cancellation, scheduling, and shutdown.
 
 This package is newer than the latest release.
 
+For clients of a hosted message MCP endpoint, the
+[external credential provider](credential-providers.md) package validates access
+obtained from a trusted local helper. Hosts still own approval and scoped reads.
+
+## Run scoped MCP reads
+
+`go.kenn.io/msgvault/pkg/mcp.Reader` runs native tools against a caller-owned
+archive without a daemon or listener. It supports `get_message`,
+`list_messages`, `list_thread`, `search_metadata`, `search_message_bodies`,
+`get_stats`, and `get_attachment`. The application owns member authentication,
+current permissions, and its MCP transport.
+
+Open an archive as described below, then create one reader for its lifetime:
+
+```go
+reader, err := msgvaultmcp.NewReader(messages, msgvaultmcp.ReaderOptions{
+    AttachmentsDir: attachmentDirectory,
+})
+if err != nil {
+    return err
+}
+defer reader.Close()
+
+tool, err := msgvaultmcp.ReadTool("list_messages")
+if err != nil {
+    return err
+}
+sdkmcp.AddTool(server, tool, func(ctx context.Context, req *sdkmcp.CallToolRequest,
+    args map[string]any) (*sdkmcp.CallToolResult, any, error) {
+    // Application-owned admission returns current source IDs and a release
+    // function. Hold that authority fence through the entire operation.
+    sourceIDs, release, err := admitRead(ctx)
+    if err != nil {
+        return nil, nil, err
+    }
+    defer release()
+    return reader.Call(ctx, sourceIDs, req, args)
+})
+```
+
+Here `msgvaultmcp` is `go.kenn.io/msgvault/pkg/mcp`, and `sdkmcp` is
+`github.com/modelcontextprotocol/go-sdk/mcp`. Use the SDK's generic `AddTool`
+so it validates both arguments and output against the native schemas. The
+reader preserves native paging, body windows, search, errors and attachment
+chunk semantics. It does not accept arbitrary query engines or execute other
+tools just because they appear in the catalog.
+
+Supply current source IDs on **every call**. Nil and empty scopes permit no
+sources. Source scope is applied inside native SQL to account resolution,
+references, lists, search results, counts and attachment metadata before bytes
+are read. Arguments can narrow that scope. This API grants whole sources; it
+cannot authorize selected messages within a source.
+
+The reader also supports the PostgreSQL-only `CGO_ENABLED=0` library profile.
+Each call uses one native read snapshot. The application must keep its own
+permission/admission transaction valid until the call returns. Cached
+attachment continuations recheck the current call's source scope and content
+hash before returning bytes. A previous successful chunk grants no access to
+later chunks. An empty `AttachmentsDir` leaves attachment bytes unavailable;
+it does not discover local configuration. Stop and drain calls before closing
+the reader, then close the archive. Closing the reader releases cached bytes
+and leaves the caller-owned archive open.
+
+### Reuse other read definitions
+
+`ReadTool(name)` returns an independent copy of a native base read definition,
+including nested schemas and annotations. Schemas use `map[string]any`.
+Unknown names, writes, and tools requiring optional backends (including
+`query_sql` and `search_documents`) return an error. A definition alone does
+not register a handler, grant access or make a tool executable through Reader.
+For tools outside Reader's supported subset, the caller supplies execution.
+Do not treat `archive.WithSourceScope` as a general permission boundary for
+arbitrary query engines or handlers; its HTTP contract remains restricted to
+the operations listed below.
+
 ## Open an archive
 
 For SQLite, run schema setup before opening the archive:
@@ -96,9 +171,9 @@ Applications own authentication, browser origin checks, and CSRF policy.
 The OpenAPI document and schema routes, such as `/openapi.json`, do not pass
 through the callback; wrap or mount the handler to control them.
 
-An admitted operation acts as the archive owner and does not also require
-daemon credentials. `/api/session` reports its authentication mode as
-`caller`. Owner-only operations follow the callback alone:
+Without a source scope, an admitted operation acts as the archive owner and
+does not also require daemon credentials. `/api/session` reports its
+authentication mode as `caller`. Owner-only operations follow the callback alone:
 
 - Daemon shutdown calls the server's shutdown callback without the daemon's
   shutdown token.
@@ -117,11 +192,68 @@ transport middleware is wanted.
 
 The existing `pkg/client` works with this handler. Availability of analytics,
 attachments, scheduling, and other services follows the supplied server options
-and storage backend. The library imposes no separate feature allowlist.
+and storage backend. Unrestricted requests have no separate feature allowlist.
 Stop requests and call `Shutdown` before closing the archive.
 
 `Archive.Store()` also exposes the underlying storage operations directly for
 Go callers, without requiring HTTP.
+
+### Restrict reads to authorized sources
+
+An application that shares an archive can restrict each request to sources its
+caller may read. Resolve those source IDs through the application's own access
+policy, then attach them before calling the handler:
+
+```go
+// authorizedSourceIDs comes from the application's authorization decision.
+ctx := archive.WithSourceScope(r.Context(), authorizedSourceIDs)
+handler.ServeHTTP(w, r.WithContext(ctx))
+```
+
+These are archive `int64` source IDs, not provider account names or identifiers.
+The function copies the IDs. Passing nil or an empty slice authorizes no
+sources; omitting the scope keeps the existing unrestricted behavior. Query
+parameters and request headers cannot create or widen this scope. Account and
+collection filters narrow the authorized source set. A collection with no
+authorized member returns the same error as a missing collection.
+
+Supply the native `Archive.Store()` in `ServerOptions.Store`. Scoped reads use
+one database snapshot and the native SQL query engine. Source predicates apply
+before totals, pagination, message bodies, conversation windows, and attachment
+metadata are read. Account discovery includes only authorized sources and
+their counts. A merge target outside the scope is omitted from
+`merged_into_source_id`. Objects outside the scope return the same not-found
+response as missing objects. The archive releases its read snapshot before
+response writes, so slow response delivery does not occupy database connections.
+
+At most two scoped or agent read snapshots are open at once, which leaves
+database connections for synchronization and unrestricted reads. Additional
+scoped requests wait for a slot. A request whose context ends while waiting
+returns 503 with `source_scope_busy`.
+
+Scoped requests support these operations:
+
+| Operation | Route |
+|---|---|
+| `listMessages` | `GET /api/v1/messages` |
+| `searchMessages` | `GET /api/v1/search` with default or `mode=fts` |
+| `getMessage` | `GET /api/v1/messages/{id}` |
+| `getConversation` | `GET /api/v1/conversations/{id}` |
+| `getAttachment` | `GET /api/v1/attachments/{id}` (metadata) |
+| `listCLIAccounts` | `GET /api/v1/cli/accounts` |
+
+Other operations return 403 under a source scope. These include attachment
+downloads, inline MIME parts, and vector or hybrid search. Message bodies are
+returned, but images that reference inline parts do not load under a scope. A custom store that cannot provide native
+scoped reads returns 503. The operation callback still chooses which supported
+operations the application admits. Source scopes apply to `Handler`; they do
+not turn arbitrary `Store` or `QueryEngine` calls into an authorized API.
+
+The application owns authentication and authorization lifetime. If its decision
+uses a transaction or lock to prevent concurrent access changes, keep that
+transaction or lock until `ServeHTTP` returns. A successful authorization
+callback alone does not hold it open during the read. The archive's read
+snapshot does not replace that application-owned transaction.
 
 ## Run synchronization
 

@@ -3,7 +3,7 @@ package query
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"slices"
@@ -82,7 +82,7 @@ func (e *DuckDBEngine) materializeEmailWorkPopulation(ctx context.Context, p *em
 				// Do not introduce a JSON timestamp-range gate for the whole archive.
 				attributed := p.activities[id]
 				attributed.OccurredAt = time.Time{}
-				activity, err := json.Marshal(attributed)
+				activity, err := json.Marshal(attributed, json.Deterministic(true), json.FormatNilSliceAsNull(true))
 				if err != nil {
 					return err
 				}
@@ -101,11 +101,11 @@ func (e *DuckDBEngine) materializeEmailWorkPopulation(ctx context.Context, p *em
 			if uid == "" {
 				continue
 			}
-			summary, err := json.Marshal(emailWorkSummary(p, "email-work:"+uid))
+			summary, err := json.Marshal(emailWorkSummary(p, "email-work:"+uid), json.Deterministic(true), json.FormatNilSliceAsNull(true))
 			if err != nil {
 				return err
 			}
-			handling, err := json.Marshal(p.handling[component])
+			handling, err := json.Marshal(p.handling[component], json.Deterministic(true), json.FormatNilSliceAsNull(true))
 			if err != nil {
 				return err
 			}
@@ -134,7 +134,7 @@ func (e *DuckDBEngine) materializeEmailWorkPopulation(ctx context.Context, p *em
 	}
 	if err = insert(p.relations.actions, 3, func(emit func(...any) error) error {
 		for _, action := range p.localActions {
-			payload, err := json.Marshal(action)
+			payload, err := json.Marshal(action, json.Deterministic(true), json.FormatNilSliceAsNull(true))
 			if err != nil {
 				return err
 			}

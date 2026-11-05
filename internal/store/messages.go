@@ -5,13 +5,13 @@ import (
 	"bytes"
 	"compress/zlib"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
 	"regexp"
 	"slices"
 	"sort"
@@ -24,6 +24,8 @@ import (
 	"go.kenn.io/msgvault/internal/mime"
 	"go.kenn.io/msgvault/internal/peoplesweep"
 )
+
+const messageRawFormatMIME = "mime"
 
 // querier is satisfied by both *sql.DB and *sql.Tx, allowing
 // helpers to run inside or outside a transaction.
@@ -93,6 +95,8 @@ type MessageDeliveryEvidence struct {
 // MessagePersistData bundles everything needed to atomically
 // persist a message and its related rows in a single transaction.
 type MessagePersistData struct {
+	// Edited records a source edit atomically with the message.
+	Edited                    bool
 	Message                   *Message
 	Conversation              *ConversationPersistData
 	Delivery                  *MessageDeliveryEvidence
@@ -107,6 +111,7 @@ type MessagePersistData struct {
 	PreserveLabels            bool
 	MIMEAttachmentReplacement *[]AttachmentWrite
 	FTS                       *FTSDoc
+	SyncRunItem               *SyncRunItem
 }
 
 // MessageIdentityGuard binds repair persistence to the exact archive row that
@@ -320,7 +325,7 @@ func (s *Store) loadGmailAuditEvidenceTx(
 	}
 	item.RawMIMEPresent = rawMessageID.Valid
 	if item.RawMIMEPresent {
-		if !rawFormat.Valid || rawFormat.String != "mime" {
+		if !rawFormat.Valid || rawFormat.String != messageRawFormatMIME {
 			item.RawMIMEError = fmt.Sprintf("stored raw format %q is not MIME", rawFormat.String)
 		} else {
 			raw, _, decodeErr := decodeMessageRawBounded(
@@ -362,6 +367,10 @@ func (s *Store) loadGmailAuditEvidenceTx(
 		SELECT content_hash, source_part_key
 		FROM attachments
 		WHERE message_id = ? AND source_attachment_id IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM source_merge_preserved_attachments marker
+			WHERE marker.attachment_id = attachments.id
+		  )
 		ORDER BY id
 	`, id)
 	if err != nil {
@@ -422,6 +431,8 @@ type Message struct {
 	SenderID         sql.NullInt64
 	ReplyToMessageID sql.NullInt64
 	IsFromMe         bool
+	// IsSent is whether the message left the sender; invalid keeps the stored value.
+	IsSent sql.NullBool
 	// IdentityDerivedIsFromMe reports that IsFromMe came from a confirmed
 	// account identity rather than a source-native sent-by-me signal.
 	IdentityDerivedIsFromMe bool
@@ -874,31 +885,36 @@ func (s *Store) ListUnresolvedMessageReplies(sourceID int64, messageType string)
 func (s *Store) ListUnresolvedMessageRepliesAfter(
 	sourceID int64, messageType string, afterID int64, limit int,
 ) ([]UnresolvedMessageReply, error) {
-	return s.ListUnresolvedMessageRepliesAfterContext(context.Background(), sourceID, messageType, afterID, limit)
+	return s.ListUnresolvedMessageRepliesAfterContext(context.Background(), sourceID, messageType, afterID, limit, 0)
 }
 
 // ListUnresolvedMessageRepliesAfterContext honors cancellation during ListUnresolvedMessageRepliesAfter.
 func (s *Store) ListUnresolvedMessageRepliesAfterContext(ctx context.Context,
-	sourceID int64, messageType string, afterID int64, limit int,
+	sourceID int64, messageType string, afterID int64, limit int, conversationID int64,
 ) ([]UnresolvedMessageReply, error) {
 	if limit <= 0 {
 		return nil, errors.New("list unresolved message replies: limit must be positive")
 	}
-	return s.listUnresolvedMessageRepliesContext(ctx, sourceID, messageType, afterID, limit)
+	return s.listUnresolvedMessageRepliesContext(ctx, sourceID, messageType, afterID, limit, conversationID)
 }
 
 func (s *Store) listUnresolvedMessageReplies(
 	sourceID int64, messageType string, afterID int64, limit int,
 ) ([]UnresolvedMessageReply, error) {
-	return s.listUnresolvedMessageRepliesContext(context.Background(), sourceID, messageType, afterID, limit)
+	return s.listUnresolvedMessageRepliesContext(context.Background(), sourceID, messageType, afterID, limit, 0)
 }
 
 // listUnresolvedMessageRepliesContext honors cancellation during listUnresolvedMessageReplies.
 func (s *Store) listUnresolvedMessageRepliesContext(ctx context.Context,
-	sourceID int64, messageType string, afterID int64, limit int,
+	sourceID int64, messageType string, afterID int64, limit int, conversationID int64,
 ) ([]UnresolvedMessageReply, error) {
 	limitClause := ""
 	args := []any{sourceID, messageType, afterID}
+	conversationClause := ""
+	if conversationID != 0 {
+		conversationClause = " AND conversation_id = ?"
+		args = append(args, conversationID)
+	}
 	if limit > 0 {
 		limitClause = " LIMIT ?"
 		args = append(args, limit)
@@ -912,7 +928,7 @@ func (s *Store) listUnresolvedMessageRepliesContext(ctx context.Context,
 		  AND reply_to_message_id IS NULL
 		  AND metadata IS NOT NULL
 		  AND CAST(metadata AS TEXT) LIKE '%"referenced_message_id"%'
-		ORDER BY id`+limitClause,
+		`+conversationClause+` ORDER BY id`+limitClause,
 		args...)
 	if err != nil {
 		return nil, fmt.Errorf("list unresolved message replies: %w", err)
@@ -958,7 +974,10 @@ func (s *Store) SetMessageMetadataContext(ctx context.Context, messageID int64, 
 		if err := setMessageMetadataWith(boundQuerier{ctx: ctx, q: tx}, s.dialect, messageID, metadata); err != nil {
 			return err
 		}
-		return s.refreshMeetingProjectionWith(ctx, tx, messageID)
+		if err := s.refreshMeetingProjectionWith(ctx, tx, messageID); err != nil {
+			return err
+		}
+		return s.refreshCalendarEventProjectionWith(ctx, tx, messageID)
 	})
 }
 
@@ -1002,13 +1021,51 @@ func (s *Store) GetMessageIDByRFC822ID(
 	var id int64
 	err := s.db.QueryRow(
 		`SELECT id FROM messages
-		 WHERE source_id = ? AND rfc822_message_id = ?`,
+		 WHERE source_id = ? AND rfc822_message_id = ?
+		   AND NOT EXISTS (
+		     SELECT 1 FROM source_merge_archive_only_messages am
+		     WHERE am.message_id = messages.id
+		   )`,
 		sourceID, rfc822ID,
 	).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
 	return id, err
+}
+
+// RejectArchiveOnlyDeletionTargetsContext prevents a staged provider deletion
+// from treating a namespaced history ID as a current provider ID after source
+// merge. Unknown IDs are left to the provider's normal not-found handling.
+func (s *Store) RejectArchiveOnlyDeletionTargetsContext(
+	ctx context.Context, sourceID int64, sourceMessageIDs []string,
+) error {
+	if sourceID <= 0 || len(sourceMessageIDs) == 0 {
+		return nil
+	}
+	found := false
+	err := queryInChunksContext(ctx, s.db, sourceMessageIDs, []any{sourceID}, `
+		SELECT m.source_message_id
+		FROM messages m
+		WHERE m.source_id = ? AND m.source_message_id IN (%s)
+		  AND EXISTS (
+		    SELECT 1 FROM source_merge_archive_only_messages am
+		    WHERE am.message_id = m.id
+		  )`, func(rows *loggedRows) error {
+		var ignored string
+		if err := rows.Scan(&ignored); err != nil {
+			return err
+		}
+		found = true
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("check deletion targets against source merge history: %w", err)
+	}
+	if found {
+		return ErrArchiveOnlyDeletionTarget
+	}
+	return nil
 }
 
 // GetMessageSourceID returns the provider-specific identifier for a message.
@@ -1162,6 +1219,9 @@ func (s *Store) MigrateSourceMessageID(sourceID, conversationID int64, legacySou
 					newID, legacyID,
 				); err != nil {
 					return fmt.Errorf("repoint legacy replies: %w", err)
+				}
+				if err := s.copyLoopDecisionTx(context.Background(), tx, legacyID, newID); err != nil {
+					return fmt.Errorf("transfer legacy loop decision: %w", err)
 				}
 			}
 
@@ -1334,12 +1394,12 @@ func upsertMessageSQL(now string) string {
 		reply_to_message_id,
 		is_from_me, source_is_from_me, identity_is_from_me,
 		subject, snippet, size_estimate,
-		has_attachments, attachment_count, archived_at, last_modified
+		has_attachments, attachment_count, archived_at, last_modified, is_sent
 	)
 	SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 	       (source_is_from_me OR identity_is_from_me),
 	       source_is_from_me, identity_is_from_me,
-	       ?, ?, ?, ?, ?, %[1]s, %[1]s
+	       ?, ?, ?, ?, ?, %[1]s, %[1]s, COALESCE(CAST(? AS BOOLEAN), TRUE)
 	FROM attribution
 	WHERE TRUE
 	ON CONFLICT(source_id, source_message_id) DO UPDATE SET
@@ -1364,7 +1424,8 @@ func upsertMessageSQL(now string) string {
 		snippet = excluded.snippet,
 		size_estimate = excluded.size_estimate,
 		has_attachments = CASE WHEN ? THEN messages.has_attachments ELSE excluded.has_attachments END,
-		attachment_count = CASE WHEN ? THEN messages.attachment_count ELSE excluded.attachment_count END`, now)
+		attachment_count = CASE WHEN ? THEN messages.attachment_count ELSE excluded.attachment_count END,
+		is_sent = COALESCE(CAST(? AS BOOLEAN), messages.is_sent)`, now)
 }
 
 // UpsertMessage inserts or updates a message.
@@ -1396,6 +1457,9 @@ func (s *Store) UpsertMessageContext(ctx context.Context, msg *Message) (int64, 
 			return err
 		}
 		if err := s.refreshMeetingProjectionWith(ctx, tx, id); err != nil {
+			return err
+		}
+		if err := s.refreshCalendarEventProjectionWith(ctx, tx, id); err != nil {
 			return err
 		}
 		return s.refreshAccountAttributionAfterWriteTx(ctx, tx, id, deliveryInput{})
@@ -1456,8 +1520,8 @@ func upsertMessageWith(q querier, d Dialect, msg *Message) (int64, error) {
 		msg.SentAt, msg.ReceivedAt, msg.InternalDate, msg.SenderID,
 		msg.ReplyToMessageID,
 		msg.Subject, msg.Snippet, msg.SizeEstimate,
-		msg.HasAttachments, msg.AttachmentCount,
-		msg.PreserveAttachmentStats, msg.PreserveAttachmentStats,
+		msg.HasAttachments, msg.AttachmentCount, msg.IsSent,
+		msg.PreserveAttachmentStats, msg.PreserveAttachmentStats, msg.IsSent,
 	}
 
 	// Use RETURNING to avoid an extra SELECT per message when supported.
@@ -1496,6 +1560,9 @@ func upsertMessageWith(q querier, d Dialect, msg *Message) (int64, error) {
 	// (which has already advanced an existing row) and with archives that still
 	// carry the old INSERT trigger during migration.
 	if err := enqueueActivityProjectionMessage(q, d, id); err != nil {
+		return 0, err
+	}
+	if err := enqueueChatMembers(q, msg.ConversationID); err != nil {
 		return 0, err
 	}
 	if journalCandidate && !prior.found && d.DriverName() != postgresDriverName {
@@ -1595,6 +1662,14 @@ func nullTimeEqual(left, right sql.NullTime) bool {
 	return left.Valid == right.Valid && (!left.Valid || left.Time.Equal(right.Time))
 }
 
+func requeueActivityProjectionSQL(selectIDs string) string {
+	return `INSERT INTO activity_projection_queue (message_id, revision, queued_at)
+		` + selectIDs + `
+		ON CONFLICT(message_id) DO UPDATE SET
+			revision = activity_projection_queue.revision + 1,
+			queued_at = CURRENT_TIMESTAMP`
+}
+
 func enqueueActivityProjectionMessage(q querier, d Dialect, messageID int64) error {
 	statement := d.InsertOrIgnore(`
 		INSERT OR IGNORE INTO activity_projection_queue
@@ -1661,6 +1736,11 @@ func upsertMessageBody(
 	if err != nil {
 		return err
 	}
+	hiddenTextPresent := bodyHTML.Valid && mime.HTMLHasHiddenText(bodyHTML.String)
+	if _, err := q.Exec(`UPDATE messages SET hidden_text_present = ? WHERE id = ? AND hidden_text_present <> ?`,
+		hiddenTextPresent, messageID, hiddenTextPresent); err != nil {
+		return fmt.Errorf("update message hidden text flag: %w", err)
+	}
 	if !embeddingChanged {
 		return nil
 	}
@@ -1706,7 +1786,7 @@ func nullStringValue(ns sql.NullString) string {
 
 // UpsertMessageRaw stores the compressed raw MIME data for a message.
 func (s *Store) UpsertMessageRaw(messageID int64, rawData []byte) error {
-	return s.UpsertMessageRawWithFormat(messageID, rawData, "mime")
+	return s.UpsertMessageRawWithFormat(messageID, rawData, messageRawFormatMIME)
 }
 
 func upsertMessageRawWithFormat(q querier, messageID int64, rawData []byte, format string) error {
@@ -1800,8 +1880,13 @@ func (s *Store) GetMessageBodyAndRawContext(ctx context.Context, messageID int64
 // GetMessageBodyText returns the archived plain-text body for one message.
 // A message without a body returns an empty string.
 func (s *Store) GetMessageBodyText(messageID int64) (string, error) {
+	return s.GetMessageBodyTextContext(context.Background(), messageID)
+}
+
+// GetMessageBodyTextContext is GetMessageBodyText with a context.
+func (s *Store) GetMessageBodyTextContext(ctx context.Context, messageID int64) (string, error) {
 	var body sql.NullString
-	err := s.db.QueryRow(`
+	err := s.db.QueryRowContext(ctx, `
 		SELECT body_text FROM message_bodies WHERE message_id = ?
 	`, messageID).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2056,8 +2141,30 @@ func (s *Store) PersistMessageContext(ctx context.Context, data *MessagePersistD
 	}
 	return s.persistMessageWithParticipantsTransaction(
 		ctx, attributionLockForMessage(data.Message.SourceID, data.Message.MessageType),
-		nil, nil, func([]int64) *MessagePersistData { return data }, nil, nil,
+		nil, nil, func([]int64) *MessagePersistData { return data }, nil,
+		func(ctx context.Context, tx *loggedTx, data *MessagePersistData, id int64) error {
+			q := boundQuerier{ctx: ctx, q: tx}
+			if data.MIMEAttachmentReplacement != nil {
+				if err := s.persistAttachmentSnapshotWith(q, id, data.MIMEAttachmentReplacement); err != nil {
+					return err
+				}
+			}
+			if data.Edited {
+				return setMessageEditedStateWith(q, id, true)
+			}
+			return nil
+		},
 	)
+}
+
+func (s *Store) persistAttachmentSnapshotWith(q querier, messageID int64, replacement *[]AttachmentWrite) error {
+	if err := s.replaceMIMEAttachmentsWith(q, messageID, replacement); err != nil {
+		return fmt.Errorf("persist attachments: %w", err)
+	}
+	if err := recomputeMessageAttachmentStatsWith(q, messageID); err != nil {
+		return fmt.Errorf("recompute attachment stats: %w", err)
+	}
+	return nil
 }
 
 // PersistMessageWithParticipantsContext resolves participants and persists the
@@ -2148,13 +2255,7 @@ func (s *Store) PersistRepairMessageWithParticipantsContext(
 			data.Message.RFC822MessageID, messageID); err != nil {
 			return fmt.Errorf("replace repair message RFC Message-ID: %w", err)
 		}
-		if err := s.replaceMIMEAttachmentsWith(q, messageID, data.MIMEAttachmentReplacement); err != nil {
-			return fmt.Errorf("replace repair message attachments: %w", err)
-		}
-		if err := recomputeMessageAttachmentStatsWith(q, messageID); err != nil {
-			return fmt.Errorf("recompute repair message attachment stats: %w", err)
-		}
-		return nil
+		return s.persistAttachmentSnapshotWith(q, messageID, data.MIMEAttachmentReplacement)
 	}
 	messageID, err := s.persistMessageWithParticipantsTransaction(
 		ctx, attributionLock{Sources: []int64{expected.SourceID}},
@@ -2308,6 +2409,11 @@ func (s *Store) persistMessageWithParticipantsTx(
 	if err != nil {
 		return 0, err
 	}
+	if data.SyncRunItem != nil {
+		if err := s.recordSyncRunItemWith(ctx, tx, *data.SyncRunItem); err != nil {
+			return 0, err
+		}
+	}
 	if afterPersist != nil {
 		if err := afterPersist(ctx, tx, data, id); err != nil {
 			return 0, err
@@ -2387,7 +2493,7 @@ func (s *Store) persistMessageWith(
 		}
 		rawFormat := data.RawFormat
 		if rawFormat == "" {
-			rawFormat = "mime"
+			rawFormat = messageRawFormatMIME
 		}
 		if err := upsertMessageRawWithFormat(q, messageID, data.RawMIME, rawFormat); err != nil {
 			return 0, fmt.Errorf("upsert raw: %w", err)
@@ -2414,6 +2520,9 @@ func (s *Store) persistMessageWith(
 	if err := s.refreshMeetingProjectionWith(ctx, tx, messageID); err != nil {
 		return 0, err
 	}
+	if err := s.refreshCalendarEventProjectionWith(ctx, tx, messageID); err != nil {
+		return 0, err
+	}
 
 	if !data.PreserveLabels {
 		if err := replaceMessageLabelsTx(q, messageID, data.LabelIDs); err != nil {
@@ -2422,7 +2531,7 @@ func (s *Store) persistMessageWith(
 	}
 	delivery := deliveryInput{}
 	switch {
-	case len(data.RawMIME) > 0 && (data.RawFormat == "" || data.RawFormat == "mime"):
+	case len(data.RawMIME) > 0 && (data.RawFormat == "" || data.RawFormat == messageRawFormatMIME):
 		delivery = deliveryFromMIME(data.RawMIME)
 	case len(data.RawMIME) > 0:
 		// A non-MIME payload replaced any stored MIME, so its delivery
@@ -2514,6 +2623,12 @@ func ensureParticipantWith(
 	domain string,
 	onInsert func() error,
 ) (int64, error) {
+	// Keep the resolved parent alive until message persistence commits,
+	// without blocking the foreign-key checks of a concurrent chat refresh.
+	lockClause := ""
+	if dialect.DriverName() == postgresDriverName {
+		lockClause = " FOR KEY SHARE"
+	}
 	// ON CONFLICT must mirror the partial unique index on
 	// participants(email_address) WHERE email_address IS NOT NULL — both
 	// PG and SQLite require the WHERE clause on the conflict target to
@@ -2540,7 +2655,7 @@ func ensureParticipantWith(
 		}
 		var id int64
 		err = q.QueryRow(
-			`SELECT id FROM participants WHERE email_address = ?`+dialect.SelectForUpdate(),
+			`SELECT id FROM participants WHERE email_address = ?`+lockClause,
 			email,
 		).Scan(&id)
 		if err == nil {
@@ -2674,6 +2789,9 @@ func replaceMessageRecipientsTx(tx querier, messageID int64, rs RecipientSet) er
 
 	if len(rs.ParticipantIDs) == 0 {
 		return nil
+	}
+	if err := enqueueChatMembersForMessage(tx, messageID); err != nil {
+		return err
 	}
 
 	recipients := normalizedMessageRecipients(rs)
@@ -2832,6 +2950,9 @@ func ensureLabelWith(
 			resultErr = bumpDerivedDataRevisionWith(q)
 		}
 	}()
+	if err := preserveArchivedLabelName(q, sourceID, name); err != nil {
+		return 0, err
+	}
 	// Look up by canonical identifier (Gmail label ID).
 	var id int64
 	var existingName string
@@ -2934,6 +3055,37 @@ func ensureLabelWith(
 		return 0, err
 	}
 	return id, nil
+}
+
+// preserveArchivedLabelName keeps merged role evidence separate when a live
+// provider creates or renames a label to the same name. The marker, not the
+// generated name, prevents later provider snapshots from adopting the row.
+func preserveArchivedLabelName(q querier, sourceID int64, name string) error {
+	var id int64
+	err := q.QueryRow(`SELECT l.id FROM labels l
+ WHERE l.source_id = ? AND l.name = ?
+ AND EXISTS (SELECT 1 FROM source_merge_preserved_labels p WHERE p.label_id = l.id)`, sourceID, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("find archived label name: %w", err)
+	}
+	archiveName := fmt.Sprintf("msgvault-archive:%d:label:%d", sourceID, id)
+	for {
+		var used bool
+		if err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM labels WHERE source_id = ? AND name = ?)`, sourceID, archiveName).Scan(&used); err != nil {
+			return fmt.Errorf("check archived label name: %w", err)
+		}
+		if !used {
+			break
+		}
+		archiveName += ":archive"
+	}
+	if _, err := q.Exec(`UPDATE labels SET name = ? WHERE id = ?`, archiveName, id); err != nil {
+		return fmt.Errorf("preserve archived label name: %w", err)
+	}
+	return nil
 }
 
 func labelSystemRoleValue(systemRole string) any {
@@ -3067,7 +3219,8 @@ func ensureLabelsBatchWith(
 	}
 
 	// Phase 2: Apply final descriptors. Any remaining name conflict belongs to
-	// a label outside this snapshot and is safe for ensureLabelWith to merge.
+	// a label outside this snapshot. ensureLabelWith preserves archived roles
+	// before reconciling ordinary provider name conflicts.
 	for sourceLabelID, info := range labels {
 		id, err := ensureLabelWith(
 			q, sourceID, sourceLabelID, info.Name, info.Type, &info.SystemRole,
@@ -3364,6 +3517,32 @@ func (s *Store) SetMessageSizeEstimate(messageID, sizeEstimate int64) error {
 	})
 }
 
+// ReplaceMessageTextContext replaces a message's displayed text after a
+// provider edit or the redaction of one. The text, size, edited flag and
+// metadata commit together, so the metadata always names the edit shown.
+func (s *Store) ReplaceMessageTextContext(ctx context.Context, messageID int64, body, snippet string, edited bool, metadata sql.NullString) error {
+	return s.withTxContext(ctx, func(tx *loggedTx) error {
+		if err := s.lockMeetingEvidenceWith(ctx, tx, messageID); err != nil {
+			return err
+		}
+		q := boundQuerier{ctx: ctx, q: tx}
+		if err := s.requireSyncMessageSourceTx(q, messageID); err != nil {
+			return err
+		}
+		if err := s.updateMessageDerivedText(q, messageID, sql.NullString{String: body, Valid: body != ""}, sql.NullString{},
+			sql.NullString{String: snippet, Valid: snippet != ""}, FTSDoc{MessageID: messageID, Body: body}, s.dialect.FTSUpsert); err != nil {
+			return err
+		}
+		if _, err := q.Exec(`UPDATE messages SET size_estimate = ?, is_edited = ? WHERE id = ?`, int64(len(body)), edited, messageID); err != nil {
+			return err
+		}
+		if err := setMessageMetadataWith(q, s.dialect, messageID, metadata); err != nil {
+			return err
+		}
+		return s.refreshMeetingProjectionWith(ctx, tx, messageID)
+	})
+}
+
 // SetMessageEditedState records whether the source's currently selected
 // message version is an edit.
 func (s *Store) SetMessageEditedState(messageID int64, edited bool) error {
@@ -3373,9 +3552,13 @@ func (s *Store) SetMessageEditedState(messageID int64, edited bool) error {
 // SetMessageEditedStateContext honors cancellation during SetMessageEditedState.
 func (s *Store) SetMessageEditedStateContext(ctx context.Context, messageID int64, edited bool) error {
 	return s.withSyncMessageWriteContext(ctx, messageID, func(q querier) error {
-		_, err := q.Exec(`UPDATE messages SET is_edited = ? WHERE id = ?`, edited, messageID)
-		return err
+		return setMessageEditedStateWith(q, messageID, edited)
 	})
+}
+
+func setMessageEditedStateWith(q querier, messageID int64, edited bool) error {
+	_, err := q.Exec(`UPDATE messages SET is_edited = ? WHERE id = ?`, edited, messageID)
+	return err
 }
 
 // SetMessageReplyContext links a message to the message it replies to while
@@ -3493,6 +3676,10 @@ func (s *Store) ReconcileSourceMessageSnapshot(
 			WHERE source_id = ?
 			  AND deleted_at IS NULL
 			  AND deleted_from_source_at IS NULL
+			  AND NOT EXISTS (
+			    SELECT 1 FROM source_merge_archive_only_messages am
+			    WHERE am.message_id = messages.id
+			  )
 		`, sourceID)
 		if err != nil {
 			return fmt.Errorf("reconcile source message snapshot: list live messages: %w", err)
@@ -3730,103 +3917,39 @@ func (s *Store) CountMessagesPerMailbox(sourceID int64) (map[string]int64, error
 }
 
 // GetRandomMessageIDs returns a random sample of message IDs for a source.
-// Uses reservoir sampling with random offsets for O(limit) performance on large tables,
-// falling back to ORDER BY RANDOM() for small tables where the overhead isn't significant.
 func (s *Store) GetRandomMessageIDs(sourceID int64, limit int) ([]int64, error) {
 	live := LiveMessagesWhere("", true)
-	// Get total count first
-	var total int64
-	err := s.db.QueryRow(fmt.Sprintf(`
-		SELECT COUNT(*) FROM messages
+	rows, err := s.db.Query(fmt.Sprintf(`
+		SELECT id FROM messages
 		WHERE source_id = ? AND %s
-	`, live), sourceID).Scan(&total)
+		ORDER BY RANDOM()
+		LIMIT ?
+	`, live), sourceID, limit)
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 
-	if total == 0 {
-		return nil, nil
-	}
-
-	// For small tables or when limit >= total, use simple ORDER BY RANDOM()
-	// The threshold of 10000 balances query overhead vs. scan cost
-	if total < 10000 || int64(limit) >= total {
-		rows, err := s.db.Query(fmt.Sprintf(`
-			SELECT id FROM messages
-			WHERE source_id = ? AND %s
-			ORDER BY RANDOM()
-			LIMIT ?
-		`, live), sourceID, limit)
-		if err != nil {
-			return nil, err
-		}
-		defer func() { _ = rows.Close() }()
-
-		var ids []int64
-		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				return nil, err
-			}
-			ids = append(ids, id)
-		}
-		return ids, rows.Err()
-	}
-
-	// For large tables, use random offset sampling
-	// This is O(limit) instead of O(n) for ORDER BY RANDOM()
-	// Generate random offsets in Go for dialect portability (SQLite vs Postgres)
-	// Use explicitly seeded RNG for true randomness across process runs.
-	// math/rand is fine — this picks rows for sampling, not authentication.
-	rng := rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // sampling RNG, not security
-
-	ids := make([]int64, 0, limit)
-	seen := make(map[int64]bool)
-
-	for len(ids) < limit {
-		// Generate random offset in Go (portable across SQLite/Postgres)
-		offset := rng.Int63n(total)
-
+	var ids []int64
+	for rows.Next() {
 		var id int64
-		err := s.db.QueryRow(fmt.Sprintf(`
-			SELECT id FROM messages
-			WHERE source_id = ? AND %s
-			ORDER BY id
-			LIMIT 1 OFFSET ?
-		`, live), sourceID, offset).Scan(&id)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				continue // Race condition with deletions, retry
-			}
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-
-		if !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
+		ids = append(ids, id)
 	}
-
-	return ids, nil
+	return ids, rows.Err()
 }
 
 // UpsertFTS inserts or updates the FTS index for a message.
-// Indexing is a no-op if FTS is not available.
-//
-// A sync-scoped view takes its generation fence before consulting
-// availability, as UpsertMessageBody does: an archive with no FTS index must
-// not be the one configuration where a superseded importer is told its write
-// landed. Skipping the index write is a decision about what to index, not
-// about whether this generation may still write at all.
+// Indexing is a no-op if FTS is not available, but sync-scoped views still
+// enforce the generation fence and message ownership before skipping the write.
 func (s *Store) UpsertFTS(messageID int64, subject, bodyText, fromAddr, toAddrs, ccAddrs string) error {
 	return s.UpsertFTSContext(context.Background(), messageID, subject, bodyText, fromAddr, toAddrs, ccAddrs)
 }
 
 // UpsertFTSContext honors cancellation during UpsertFTS.
 func (s *Store) UpsertFTSContext(ctx context.Context, messageID int64, subject, bodyText, fromAddr, toAddrs, ccAddrs string) error {
-	if !s.fts5Available && s.syncGeneration == nil {
-		return nil
-	}
 	doc := FTSDoc{
 		MessageID: messageID,
 		Subject:   subject,
@@ -3835,31 +3958,47 @@ func (s *Store) UpsertFTSContext(ctx context.Context, messageID int64, subject, 
 		ToAddrs:   toAddrs,
 		CcAddrs:   ccAddrs,
 	}
-	if s.syncGeneration != nil {
-		return s.withTxContext(ctx, func(tx *loggedTx) error {
-			if err := s.requireSyncMessageSourceTx(boundQuerier{ctx: ctx, q: tx}, messageID); err != nil {
-				return err
-			}
-			if !s.fts5Available {
-				return nil
-			}
-			return s.dialect.FTSUpsert(boundQuerier{ctx: ctx, q: tx}, doc)
-		})
-	}
-	return s.dialect.FTSUpsert(boundQuerier{ctx: ctx, q: s.db}, doc)
+	return s.withSyncMessageWriteContext(ctx, messageID, func(q querier) error {
+		if !s.fts5Available {
+			return nil
+		}
+		return s.dialect.FTSUpsert(q, doc)
+	})
 }
 
-// BackfillFTS populates the FTS table from existing message data.
+// IndexStoredMessageContext fills or refreshes a message's search entry from stored
+// rows. Unchanged entries are left alone, and unavailable FTS is a no-op.
+func (s *Store) IndexStoredMessageContext(ctx context.Context, messageID int64) error {
+	return s.withSyncMessageWriteContext(ctx, messageID, func(q querier) error {
+		if !s.fts5Available {
+			return nil
+		}
+		row, err := s.loadDerivedEmailText(q, messageID)
+		if err != nil {
+			return fmt.Errorf("load stored message for search: %w", err)
+		}
+		row.fts.Body = row.body
+		matches, err := s.dialect.FTSMatches(q, row.fts)
+		if err != nil {
+			return fmt.Errorf("compare stored search entry: %w", err)
+		}
+		if matches {
+			return nil
+		}
+		return s.dialect.FTSUpsert(q, row.fts)
+	})
+}
+
+// BackfillFTS fills missing search entries from existing message data on SQLite.
+// PostgreSQL also refreshes entries with an old indexing version.
 // Processes in batches to avoid blocking for minutes on large archives.
 // The progress callback (if non-nil) is called after each batch with
 // (position in ID range, total ID range). Each batch is committed
 // independently so partial progress is preserved if interrupted.
 // Returns the number of rows inserted. No-op if FTS5 is not available.
 //
-// BackfillFTS clears FTS rows with DELETE before inserting. If the FTS5
-// shadow tables are themselves malformed, that DELETE will either fail or
-// leave corruption in place — callers recovering from shadow-table
-// corruption should use RebuildFTS instead.
+// Existing entries remain searchable while missing entries are filled. Callers
+// recovering from malformed FTS5 shadow tables should use RebuildFTS instead.
 func (s *Store) BackfillFTS(progress func(done, total int64)) (int64, error) {
 	return s.BackfillFTSContext(context.Background(), progress)
 }
@@ -3881,21 +4020,15 @@ func (s *Store) BackfillFTSContext(
 		return 0, nil
 	}
 
-	// runMaintenance disables the pool-wide 30s statement_timeout for the
-	// clear: FTSClearSQL is a full-table tsvector rewrite that exceeds 30s on
-	// a large archive (finding S1). No-op timeout reset on SQLite.
-	if err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		_, err := tx.ExecContext(ctx, s.dialect.FTSClearSQL())
-		return err
-	}); err != nil {
-		return 0, fmt.Errorf("clear FTS: %w", err)
+	batchSQL, err := s.dialect.FTSBackfillMissingBatchSQL(ctx, s.db.DB)
+	if err != nil {
+		return 0, err
 	}
-
-	return s.backfillFTSRangeContext(ctx, minID, maxID, progress)
+	return s.backfillFTSRangeContext(ctx, batchSQL, minID, maxID, progress)
 }
 
 // RebuildFTS fully recreates the FTS index from the underlying message
-// tables. Unlike BackfillFTS (DELETE + INSERT), this drops and recreates
+// tables. Unlike BackfillFTS, this drops and recreates
 // the FTS table itself so malformed FTS5 shadow tables are fully replaced.
 //
 // Ignores the cached fts5Available flag: a corrupt shadow table causes the
@@ -3913,8 +4046,8 @@ func (s *Store) RebuildFTSContext(
 ) (int64, error) {
 	// runMaintenance disables the pool-wide 30s statement_timeout for the
 	// schema teardown/rebuild. On PG, FTSRebuildSchema runs a full-table
-	// `UPDATE messages SET search_fts = NULL` (identical cost to the hatched
-	// FTSClearSQL) plus a GIN rebuild over a populated table — both can exceed
+	// `UPDATE messages SET search_fts = NULL` plus a GIN rebuild over a
+	// populated table — both can exceed
 	// 30s on a large archive and would cancel the rebuild-fts recovery command
 	// with SQLSTATE 57014 (finding S1). On SQLite the reset SQL is "" so this
 	// is an ordinary transaction around the DROP/CREATE of messages_fts.
@@ -3933,7 +4066,7 @@ func (s *Store) RebuildFTSContext(
 		return 0, nil
 	}
 
-	indexed, err := s.backfillFTSRangeContext(ctx, minID, maxID, progress)
+	indexed, err := s.backfillFTSRangeContext(ctx, s.dialect.FTSBackfillBatchSQL(), minID, maxID, progress)
 	if err != nil {
 		return indexed, err
 	}
@@ -3954,12 +4087,12 @@ func (s *Store) messageIDRangeContext(ctx context.Context) (int64, int64, error)
 	return minID, maxID, nil
 }
 
-// backfillFTSRange inserts FTS rows for all messages with id in [minID, maxID],
-// in batches. Shared between BackfillFTS (DELETE+fill) and RebuildFTS
-// (DROP+CREATE+fill). Each batch is committed independently so partial
-// progress is preserved if interrupted.
+// backfillFTSRangeContext indexes messages with id in [minID, maxID] in batches
+// using the supplied full or missing-only query. Each batch is committed
+// independently so partial progress is preserved if interrupted.
 func (s *Store) backfillFTSRangeContext(
 	ctx context.Context,
+	batchSQL string,
 	minID, maxID int64,
 	progress func(done, total int64),
 ) (int64, error) {
@@ -3970,19 +4103,19 @@ func (s *Store) backfillFTSRangeContext(
 
 	for cursor <= maxID {
 		batchEnd := cursor + batchSize
-		n, err := s.backfillFTSBatchContext(ctx, cursor, batchEnd)
+		n, err := s.backfillFTSBatchContext(ctx, batchSQL, cursor, batchEnd)
 		if err != nil {
 			// Only the specific PG tsvector-overflow error (a single
 			// pathological row whose body exceeds PostgreSQL's tsvector
 			// limit) is recoverable by retrying the batch row by row and
 			// skipping the offending row(s). EVERY OTHER error (dead
 			// connection, a non-size SQLSTATE, etc.) is systemic — it would
-			// hit every row and silently clear-then-skip the whole archive —
+			// hit every row and silently skip the whole archive —
 			// so it must ABORT and propagate, not be masked as success.
 			if !s.dialect.IsFTSValueTooLargeError(err) {
 				return indexed, err
 			}
-			n, err = s.backfillFTSRowByRowContext(ctx, cursor, batchEnd)
+			n, err = s.backfillFTSRowByRowContext(ctx, batchSQL, cursor, batchEnd)
 			if err != nil {
 				return indexed, err
 			}
@@ -4015,11 +4148,12 @@ func (s *Store) backfillFTSRangeContext(
 // SQLite), so the PG-syntax empty-tsvector literal is safe.
 func (s *Store) backfillFTSRowByRowContext(
 	ctx context.Context,
+	batchSQL string,
 	fromID, toID int64,
 ) (int64, error) {
 	var indexed int64
 	for id := fromID; id < toID; id++ {
-		n, err := s.backfillFTSBatchContext(ctx, id, id+1)
+		n, err := s.backfillFTSBatchContext(ctx, batchSQL, id, id+1)
 		if err != nil {
 			if !s.dialect.IsFTSValueTooLargeError(err) {
 				return indexed, err
@@ -4030,10 +4164,7 @@ func (s *Store) backfillFTSRowByRowContext(
 			slog.Warn("skipping message in FTS backfill",
 				slog.Int64("message_id", id),
 				slog.Any("error", err))
-			if _, uerr := s.db.ExecContext(ctx,
-				`UPDATE messages SET search_fts = ''::tsvector, indexing_version = ? WHERE id = ?`,
-				CurrentFTSIndexingVersion, id,
-			); uerr != nil {
+			if uerr := markFTSMessageUnsearchable(boundQuerier{ctx: ctx, q: s.db}, id); uerr != nil {
 				return indexed, fmt.Errorf("mark FTS-overflow row %d terminal: %w", id, uerr)
 			}
 			continue
@@ -4060,6 +4191,7 @@ func (s *Store) backfillFTSRowByRowContext(
 // semantics. No-op timeout reset on SQLite.
 func (s *Store) backfillFTSBatchContext(
 	ctx context.Context,
+	batchSQL string,
 	fromID, toID int64,
 ) (int64, error) {
 	if s.backfillFTSBatchErrHook != nil {
@@ -4069,7 +4201,7 @@ func (s *Store) backfillFTSBatchContext(
 	}
 	var affected int64
 	err := s.runMaintenance(ctx, func(ctx context.Context, tx *loggedTx) error {
-		result, err := tx.ExecContext(ctx, s.dialect.FTSBackfillBatchSQL(), fromID, toID)
+		result, err := tx.ExecContext(ctx, batchSQL, fromID, toID)
 		if err != nil {
 			return err
 		}
@@ -4081,6 +4213,7 @@ func (s *Store) backfillFTSBatchContext(
 
 const latestConversationPreviewSubquery = `(SELECT snippet FROM messages
 	WHERE conversation_id = conversations.id
+	  AND deleted_at IS NULL
 	ORDER BY COALESCE(sent_at, received_at, internal_date) DESC, id DESC
 	LIMIT 1)`
 
@@ -4157,6 +4290,7 @@ func (s *Store) recomputeConversationStatsWith(q querier, whereClause string, ar
 			message_count = (
 				SELECT COUNT(*) FROM messages
 				WHERE conversation_id = conversations.id
+				  AND deleted_at IS NULL
 			),
 			participant_count = (
 				SELECT COUNT(*) FROM conversation_participants
@@ -4166,6 +4300,7 @@ func (s *Store) recomputeConversationStatsWith(q querier, whereClause string, ar
 				SELECT MAX(COALESCE(sent_at, received_at, internal_date))
 				FROM messages
 				WHERE conversation_id = conversations.id
+				  AND deleted_at IS NULL
 			),
 			last_message_preview = %s
 		WHERE %s
@@ -4202,7 +4337,9 @@ func (s *Store) ForEachTeamsHostedContentBody(sourceID int64, fn func(messageID 
 		SELECT mb.message_id, mb.body_html
 		FROM message_bodies mb
 		JOIN messages m ON m.id = mb.message_id
-		WHERE m.source_id = ? AND mb.body_html LIKE '%hostedContents%'
+		WHERE m.source_id = ?
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		  AND mb.body_html LIKE '%hostedContents%'
 	`, sourceID, fn)
 }
 
@@ -4232,17 +4369,21 @@ func (s *Store) ForEachTeamsIncompleteHostedContentBody(
 		SELECT mb.message_id, mb.body_html,
 		       (SELECT COUNT(*) FROM attachments a
 		        WHERE a.message_id = mb.message_id
+		          AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
 		          AND a.storage_path NOT LIKE 'http%' AND a.storage_path != ''
 		          AND a.content_hash != ''),
 		       EXISTS (
 		         SELECT 1 FROM attachments a
 		         WHERE a.message_id = mb.message_id
+		           AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
 		           AND a.source_attachment_id LIKE 'teams:inline:%'
 		           AND COALESCE(a.content_hash, '') = ''
 		       )
 		FROM message_bodies mb
 		JOIN messages m ON m.id = mb.message_id
-		WHERE m.source_id = ? AND mb.body_html LIKE '%hostedContents%'
+		WHERE m.source_id = ?
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		  AND mb.body_html LIKE '%hostedContents%'
 	`, sourceID)
 	if err != nil {
 		return err
@@ -4521,10 +4662,7 @@ func (s *Store) EnsureParticipantByPhone(phone, displayName, identifierType stri
 // phone observed without a messaging service, such as a meeting attendee.
 func (s *Store) EnsurePhoneParticipantContext(ctx context.Context, phone, displayName string) (int64, error) {
 	var id int64
-	err := s.withTxContext(ctx, func(tx *loggedTx) error {
-		if err := s.lockIdentityMutationTxContext(ctx, tx); err != nil {
-			return err
-		}
+	err := s.withAttributionTxContext(ctx, attributionLock{Exclusive: true}, func(tx *loggedTx) error {
 		var err error
 		id, err = s.ensureParticipantByPhoneTx(ctx, tx, phone, displayName, PhoneIdentifierType)
 		return err
@@ -4742,7 +4880,7 @@ func (s *Store) MergeParticipantsContext(ctx context.Context, oldID, newID int64
 		if err := s.verifyParticipantsExistTxContext(ctx, tx, oldID, newID); err != nil {
 			return err
 		}
-		edges, err := s.loadLinkEdgesTxContext(ctx, tx)
+		edges, err := s.loadComponentEdgesTxContext(ctx, tx, oldID, newID)
 		if err != nil {
 			return err
 		}
@@ -4863,8 +5001,8 @@ func (s *Store) MergeParticipantsContext(ctx context.Context, oldID, newID int64
 		// Candidate and link endpoints must both reference the survivor before
 		// unsupported generated matches are withdrawn. Otherwise an owned link
 		// can evade cleanup because it still names the absorbed participant.
-		if err := s.reconcileCurrentObservationIdentityMatchesTxContext(
-			ctx, tx,
+		if err := s.reconcileObservationIdentityMatchesForParticipantTxContext(
+			ctx, tx, newID,
 		); err != nil {
 			return err
 		}
@@ -6073,7 +6211,7 @@ func (s *Store) ReplaceReactionsContext(ctx context.Context, messageID int64, re
 				continue
 			}
 			if _, err := tx.ExecContext(ctx, s.dialect.InsertOrIgnore(`INSERT OR IGNORE INTO reactions (message_id, participant_id, reaction_type, reaction_value, created_at)
-				VALUES (?, ?, ?, ?, ?)`), messageID, r.ParticipantID, r.Type, r.Value, r.CreatedAt); err != nil {
+				VALUES (?, ?, ?, ?, ?)`), messageID, r.ParticipantID, r.Type, r.Value, sql.NullTime{Time: r.CreatedAt, Valid: !r.CreatedAt.IsZero()}); err != nil {
 				return err
 			}
 		}
@@ -6102,7 +6240,7 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 			return err
 		}
 		replacesMIME := false
-		if format != "mime" {
+		if format != messageRawFormatMIME {
 			var stored int
 			err := tx.QueryRowContext(ctx,
 				`SELECT 1 FROM message_raw WHERE message_id = ? AND raw_format = 'mime'`, messageID).Scan(&stored)
@@ -6125,8 +6263,11 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 		if err := s.refreshMeetingProjectionWith(ctx, tx, messageID); err != nil {
 			return err
 		}
+		if err := s.refreshCalendarEventProjectionWith(ctx, tx, messageID); err != nil {
+			return err
+		}
 		switch {
-		case format == "mime":
+		case format == messageRawFormatMIME:
 			return s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID, deliveryFromMIME(rawData))
 		case replacesMIME:
 			return s.refreshAccountAttributionAfterWriteTx(ctx, tx, messageID,
@@ -6134,7 +6275,7 @@ func (s *Store) UpsertMessageRawWithFormatContext(ctx context.Context, messageID
 		}
 		return nil
 	}
-	if format != "mime" {
+	if format != messageRawFormatMIME {
 		// Delivery evidence comes only from MIME, so a write that neither
 		// stores MIME nor replaces it takes no attribution lock. One that
 		// finds MIME to replace rolls back and retries holding the lock.
@@ -6297,12 +6438,12 @@ type AttachmentRef struct {
 // replaceMessageAttachmentsWhereContext atomically reconciles a message's attachment
 // rows matching deleteWhere with refs. Retained source-part keys keep their row
 // IDs so resync does not invalidate cached file listings. Refs with an empty
-// StoragePath (and, when requireHash is set, an empty ContentHash) are skipped.
+// StoragePath are skipped.
 func (s *Store) replaceMessageAttachmentsWhereContext(ctx context.Context,
-	messageID int64, deleteWhere string, requireHash bool, refs []AttachmentRef, deleteArgs ...any,
+	messageID int64, deleteWhere string, refs []AttachmentRef, deleteArgs ...any,
 ) error {
 	return s.withTxContext(ctx, func(tx *loggedTx) error {
-		return s.replaceMessageAttachmentsWhereTxContext(ctx, tx, messageID, deleteWhere, requireHash, refs, deleteArgs...)
+		return s.replaceMessageAttachmentsWhereTxContext(ctx, tx, messageID, deleteWhere, refs, deleteArgs...)
 	})
 }
 
@@ -6310,18 +6451,18 @@ func (s *Store) replaceMessageAttachmentsWhereTx(
 	tx *loggedTx, messageID int64, deleteWhere string,
 	refs []AttachmentRef, deleteArgs ...any,
 ) error {
-	return s.replaceMessageAttachmentsWhereTxContext(context.Background(), tx, messageID, deleteWhere, false, refs, deleteArgs...)
+	return s.replaceMessageAttachmentsWhereTxContext(context.Background(), tx, messageID, deleteWhere, refs, deleteArgs...)
 }
 
 // replaceMessageAttachmentsWhereTxContext honors cancellation during replaceMessageAttachmentsWhereTx.
 func (s *Store) replaceMessageAttachmentsWhereTxContext(ctx context.Context,
-	tx *loggedTx, messageID int64, deleteWhere string, requireHash bool,
+	tx *loggedTx, messageID int64, deleteWhere string,
 	refs []AttachmentRef, deleteArgs ...any,
 ) error {
 	writes := make([]AttachmentWrite, 0, len(refs))
 	keys := make([]any, 0, len(refs))
 	for _, ref := range refs {
-		if ref.StoragePath == "" || (requireHash && ref.ContentHash == "") {
+		if ref.StoragePath == "" {
 			continue
 		}
 		write := AttachmentWrite{
@@ -6360,6 +6501,7 @@ func (s *Store) replaceMessageAttachmentsWhereTxContext(ctx context.Context,
 			if _, err := tx.ExecContext(ctx, `
 				UPDATE attachments SET source_part_key = ?
 				WHERE message_id = ? AND source_attachment_id = ? AND source_part_key IS NULL
+				  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = attachments.id)
 			`, write.SourcePartKey, messageID, write.SourceAttachmentID); err != nil {
 				return fmt.Errorf("assign provider attachment source-part key: %w", err)
 			}
@@ -6369,7 +6511,8 @@ func (s *Store) replaceMessageAttachmentsWhereTxContext(ctx context.Context,
 			keys = append(keys, write.SourcePartKey)
 		}
 	}
-	deleteQuery := `DELETE FROM attachments WHERE message_id = ? AND (` + deleteWhere + `)`
+	deleteQuery := `DELETE FROM attachments WHERE message_id = ? AND (` + deleteWhere + `)
+		AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = attachments.id)`
 	args := append([]any{messageID}, deleteArgs...)
 	if len(keys) > 0 {
 		deleteQuery += ` AND (source_part_key IS NULL OR source_part_key NOT IN (?` +
@@ -6583,15 +6726,87 @@ func (s *Store) EndWaitingProviderAttachments(ctx context.Context, sourceID int6
 	return ended, nil
 }
 
+// markFTSMessageUnsearchable shares the terminal PostgreSQL overflow policy.
+func markFTSMessageUnsearchable(q querier, messageID int64) error {
+	_, err := q.Exec(`UPDATE messages SET search_fts = ''::tsvector, indexing_version = ? WHERE id = ?`, CurrentFTSIndexingVersion, messageID)
+	return err
+}
+
+// ftsMessageUnsearchable reports whether the PostgreSQL overflow policy
+// already marked messageID.
+func ftsMessageUnsearchable(q querier, messageID int64) (bool, error) {
+	var terminal bool
+	err := q.QueryRow(`SELECT COALESCE(search_fts = ''::tsvector AND indexing_version = ?, FALSE) FROM messages WHERE id = ?`, CurrentFTSIndexingVersion, messageID).Scan(&terminal)
+	return terminal, err
+}
+
 // ArchivedRawMessage is one archived message paired with the verbatim provider
 // payload stored for it, decompressed.
 type ArchivedRawMessage struct {
 	MessageID      int64
 	ConversationID int64
 	RawData        []byte
+	// RawDecodeError reports a corrupt compressed payload separately from SQL errors.
+	RawDecodeError error
 	// BodyText is the currently stored plain-text body, so a caller
 	// re-deriving it can skip rows that would not change.
 	BodyText string
+	Snippet  string
+	// stored is the stored text and search envelope read with the payload.
+	stored derivedEmailText
+	// rawFingerprint binds a scanned repair to its retained encoded MIME.
+	rawFingerprint *[sha256.Size]byte
+}
+
+// decompressArchivedRaw inflates a zlib-compressed archived payload.
+func decompressArchivedRaw(messageID int64, raw []byte, compression sql.NullString) ([]byte, error) {
+	if !compression.Valid || compression.String != "zlib" {
+		return raw, nil
+	}
+	r, err := zlib.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("zlib reader for message %d: %w", messageID, err)
+	}
+	defer func() { _ = r.Close() }()
+	raw, err = io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("decompress message %d: %w", messageID, err)
+	}
+	return raw, nil
+}
+
+// ScanArchivedEmailContext returns a source's first retained MIME message with
+// afterID < id <= throughID, read with its stored text and search envelope, or
+// nil when none remains. Reading one row bounds memory for very large messages.
+// An undecodable payload sets RawDecodeError; query failures return an error.
+func (s *Store) ScanArchivedEmailContext(ctx context.Context, sourceID, afterID, throughID int64) (*ArchivedRawMessage, error) {
+	item := &ArchivedRawMessage{}
+	var raw []byte
+	var compression sql.NullString
+	dest := append([]any{&item.MessageID, &item.ConversationID, &raw, &compression}, item.stored.scanDest()...)
+	err := s.db.QueryRowContext(ctx, `SELECT m.id, m.conversation_id, r.raw_data, r.compression, `+s.derivedEmailTextColumns()+`
+		FROM messages m
+		JOIN message_raw r ON r.message_id = m.id
+		LEFT JOIN message_bodies b ON b.message_id = m.id
+		WHERE m.source_id = ? AND r.raw_format = 'mime' AND m.id > ? AND m.id <= ?
+		ORDER BY m.id
+		LIMIT 1`, sourceID, afterID, throughID).Scan(dest...)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil //nolint:nilnil // An exhausted archive scan has no row and no error.
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan archived email: %w", err)
+	}
+	item.stored.fts.MessageID = item.MessageID
+	item.BodyText, item.Snippet = item.stored.body, item.stored.snippet
+	item.decodeArchivedEmail(raw, compression)
+	return item, nil
+}
+
+func (item *ArchivedRawMessage) decodeArchivedEmail(raw []byte, compression sql.NullString) {
+	fingerprint := rawMIMEFingerprint(raw, compression)
+	item.rawFingerprint = &fingerprint
+	item.RawData, item.RawDecodeError = decodeMessageRaw(raw, compression)
 }
 
 // ScanArchivedRawMessages returns up to limit archived messages for a source
@@ -6605,7 +6820,7 @@ func (s *Store) ScanArchivedRawMessages(sourceID int64, format string, afterID i
 // ScanArchivedRawMessagesContext honors cancellation during ScanArchivedRawMessages.
 func (s *Store) ScanArchivedRawMessagesContext(ctx context.Context, sourceID int64, format string, afterID int64, limit int) ([]ArchivedRawMessage, error) {
 	rows, err := s.db.QueryContext(ctx, s.Rebind(`
-		SELECT m.id, m.conversation_id, r.raw_data, r.compression, COALESCE(b.body_text, '')
+		SELECT m.id, m.conversation_id, r.raw_data, r.compression, COALESCE(b.body_text, ''), COALESCE(m.snippet, '')
 		FROM messages m
 		JOIN message_raw r ON r.message_id = m.id
 		LEFT JOIN message_bodies b ON b.message_id = m.id
@@ -6622,21 +6837,12 @@ func (s *Store) ScanArchivedRawMessagesContext(ctx context.Context, sourceID int
 		var item ArchivedRawMessage
 		var raw []byte
 		var compression sql.NullString
-		if err := rows.Scan(&item.MessageID, &item.ConversationID, &raw, &compression, &item.BodyText); err != nil {
+		if err := rows.Scan(&item.MessageID, &item.ConversationID, &raw, &compression, &item.BodyText, &item.Snippet); err != nil {
 			return nil, err
 		}
-		if compression.Valid && compression.String == "zlib" {
-			r, zerr := zlib.NewReader(bytes.NewReader(raw))
-			if zerr != nil {
-				return nil, fmt.Errorf("zlib reader for message %d: %w", item.MessageID, zerr)
-			}
-			raw, err = io.ReadAll(r)
-			_ = r.Close()
-			if err != nil {
-				return nil, fmt.Errorf("decompress message %d: %w", item.MessageID, err)
-			}
+		if item.RawData, err = decompressArchivedRaw(item.MessageID, raw, compression); err != nil {
+			return nil, err
 		}
-		item.RawData = raw
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -6671,18 +6877,9 @@ func (s *Store) ScanArchivedRawMessagesForConversation(
 		if err := rows.Scan(&item.MessageID, &item.ConversationID, &raw, &compression); err != nil {
 			return nil, err
 		}
-		if compression.Valid && compression.String == "zlib" {
-			r, zerr := zlib.NewReader(bytes.NewReader(raw))
-			if zerr != nil {
-				return nil, fmt.Errorf("zlib reader for message %d: %w", item.MessageID, zerr)
-			}
-			raw, err = io.ReadAll(r)
-			_ = r.Close()
-			if err != nil {
-				return nil, fmt.Errorf("decompress message %d: %w", item.MessageID, err)
-			}
+		if item.RawData, err = decompressArchivedRaw(item.MessageID, raw, compression); err != nil {
+			return nil, err
 		}
-		item.RawData = raw
 		out = append(out, item)
 	}
 	return out, rows.Err()
@@ -6696,19 +6893,189 @@ func (s *Store) UpdateMessageDerivedText(
 ) error {
 	fts.MessageID = messageID
 	return s.withTx(func(tx *loggedTx) error {
-		if err := upsertMessageBody(tx, s.dialect, s.fts5Available, messageID, bodyText, bodyHTML); err != nil {
-			return fmt.Errorf("update derived message body: %w", err)
-		}
-		if _, err := tx.Exec(`UPDATE messages SET snippet = ? WHERE id = ?`, snippet, messageID); err != nil {
-			return fmt.Errorf("update derived message snippet: %w", err)
-		}
-		if s.fts5Available {
-			if err := s.dialect.FTSUpsert(tx, fts); err != nil {
-				return fmt.Errorf("update derived message FTS: %w", err)
-			}
-		}
-		return nil
+		return s.updateMessageDerivedText(tx, messageID, bodyText, bodyHTML, snippet, fts, s.dialect.FTSUpsert)
 	})
+}
+
+// UpdateArchivedEmailTextContext atomically repairs body, snippet, and search
+// for a row from ScanArchivedEmailContext while preserving its current envelope.
+func (s *Store) UpdateArchivedEmailTextContext(ctx context.Context, item *ArchivedRawMessage, bodyText, bodyHTML, snippet sql.NullString) (bool, error) {
+	matches, err := s.archivedEmailTextMatchesContext(ctx, item, bodyText, bodyHTML, snippet)
+	if err != nil || matches {
+		return false, err
+	}
+	var changed bool
+	err = s.withTxContext(ctx, func(tx *loggedTx) (err error) {
+		changed, err = s.writeDerivedEmailTextPendingRevision(ctx, tx, item, bodyText, bodyHTML, snippet)
+		return err
+	})
+	return changed, err
+}
+
+func (s *Store) writeDerivedEmailTextPendingRevision(ctx context.Context, tx *loggedTx, item *ArchivedRawMessage, bodyText, bodyHTML, snippet sql.NullString) (bool, error) {
+	changed, err := s.writeDerivedEmailText(ctx, tx, item, bodyText, bodyHTML, snippet)
+	if err != nil || !changed {
+		return changed, err
+	}
+	return changed, setArchiveMetadataValueTx(ctx, tx, pendingDerivedEmailRevisionKey, "1")
+}
+
+// derivedEmailText is a retained email's stored text and the search document
+// FTSUpsert would write for its stored envelope.
+type derivedEmailText struct {
+	body, html, snippet string
+	fts                 FTSDoc
+}
+
+func (row *derivedEmailText) matches(bodyText, bodyHTML, snippet sql.NullString) bool {
+	return row.body == bodyText.String && row.html == bodyHTML.String && row.snippet == snippet.String
+}
+
+// derivedEmailTextColumns selects the columns scanned by derivedEmailText.scanDest
+// from messages m joined to message_bodies b.
+func (s *Store) derivedEmailTextColumns() string {
+	aggregate := "GROUP_CONCAT"
+	if s.IsPostgreSQL() {
+		aggregate = "STRING_AGG"
+	}
+	envelope := storedFTSEnvelopeSQL(aggregate)
+	return `COALESCE(b.body_text, ''), COALESCE(b.body_html, ''), COALESCE(m.snippet, ''), ` +
+		envelope.subject + `, ` + envelope.fromAddr + `, ` + envelope.toAddrs + `, ` + envelope.ccAddrs
+}
+
+func (row *derivedEmailText) scanDest() []any {
+	return []any{&row.body, &row.html, &row.snippet, &row.fts.Subject, &row.fts.FromAddr, &row.fts.ToAddrs, &row.fts.CcAddrs}
+}
+
+func (s *Store) loadDerivedEmailText(q querier, messageID int64) (derivedEmailText, error) {
+	row := derivedEmailText{fts: FTSDoc{MessageID: messageID}}
+	err := q.QueryRow(`SELECT `+s.derivedEmailTextColumns()+`
+		FROM messages m LEFT JOIN message_bodies b ON b.message_id = m.id WHERE m.id = ?`, messageID).
+		Scan(row.scanDest()...)
+	return row, err
+}
+
+func (s *Store) archivedEmailTextMatchesContext(ctx context.Context, item *ArchivedRawMessage, bodyText, bodyHTML, snippet sql.NullString) (bool, error) {
+	if item.rawFingerprint == nil {
+		return false, errors.New("email repair requires a scanned MIME fingerprint")
+	}
+	return s.derivedEmailTextMatchesContext(ctx, item.stored, bodyText, bodyHTML, snippet)
+}
+
+func (s *Store) derivedEmailTextMatchesContext(ctx context.Context, row derivedEmailText, bodyText, bodyHTML, snippet sql.NullString) (bool, error) {
+	if !row.matches(bodyText, bodyHTML, snippet) {
+		return false, nil
+	}
+	if !s.fts5Available {
+		return true, nil
+	}
+	q := boundQuerier{ctx: ctx, q: s.db}
+	row.fts.Body = bodyText.String
+	matches, err := s.dialect.FTSMatches(q, row.fts)
+	if s.dialect.IsFTSValueTooLargeError(err) {
+		return ftsMessageUnsearchable(q, row.fts.MessageID)
+	}
+	return matches, err
+}
+
+// writeDerivedEmailText indexes the new body with the envelope read under the
+// message lock. Current text is not rewritten, and an overflow that is already
+// terminal reports no change.
+func (s *Store) writeDerivedEmailText(ctx context.Context, tx *loggedTx, item *ArchivedRawMessage, bodyText, bodyHTML, snippet sql.NullString) (bool, error) {
+	if err := s.lockArchivedEmailTextContext(ctx, tx, item); err != nil {
+		return false, fmt.Errorf("lock derived email write: %w", err)
+	}
+	q := boundQuerier{ctx: ctx, q: tx}
+	row, err := s.loadArchivedEmailTextForWrite(q, item)
+	if err != nil {
+		return false, fmt.Errorf("load derived email envelope: %w", err)
+	}
+	row.fts.Body = bodyText.String
+	if row.matches(bodyText, bodyHTML, snippet) {
+		return s.upsertFTSOrUnsearchable(q, row.fts)
+	}
+	upsert := func(q querier, doc FTSDoc) error { _, err := s.upsertFTSOrUnsearchable(q, doc); return err }
+	return true, s.updateMessageDerivedText(q, item.MessageID, bodyText, bodyHTML, snippet, row.fts, upsert)
+}
+
+// ErrArchivedEmailSnippetChanged requires a fresh scan before retrying a repair.
+var ErrArchivedEmailSnippetChanged = errors.New("archived email snippet changed")
+
+// loadArchivedEmailTextForWrite preserves provider snippets changed since the
+// scan. The caller holds the message lock through this check and the writes.
+func (s *Store) loadArchivedEmailTextForWrite(q querier, item *ArchivedRawMessage) (derivedEmailText, error) {
+	row, err := s.loadDerivedEmailText(q, item.MessageID)
+	if err != nil {
+		return row, err
+	}
+	if row.snippet != item.stored.snippet {
+		return row, fmt.Errorf("%w after repair scan: message %d", ErrArchivedEmailSnippetChanged, item.MessageID)
+	}
+	return row, nil
+}
+
+// lockArchivedEmailTextContext orders writes with sync and rejects stale MIME
+// before any body, snippet, or search correction can replace the sync snapshot.
+func (s *Store) lockArchivedEmailTextContext(ctx context.Context, tx *loggedTx, item *ArchivedRawMessage) error {
+	if err := s.lockMeetingEvidenceWith(ctx, tx, item.MessageID); err != nil {
+		return err
+	}
+	var raw []byte
+	var compression sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT raw_data, compression FROM message_raw
+		WHERE message_id = ? AND raw_format = 'mime'`+s.dialect.SelectForUpdate(), item.MessageID).Scan(&raw, &compression)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if errors.Is(err, sql.ErrNoRows) || rawMIMEFingerprint(raw, compression) != *item.rawFingerprint {
+		return fmt.Errorf("message %d MIME changed after email repair scan", item.MessageID)
+	}
+	return nil
+}
+
+func (s *Store) updateMessageDerivedText(q querier, messageID int64, bodyText, bodyHTML, snippet sql.NullString, fts FTSDoc, upsertFTS func(querier, FTSDoc) error) error {
+	if err := upsertMessageBody(q, s.dialect, s.fts5Available, messageID, bodyText, bodyHTML); err != nil {
+		return fmt.Errorf("update derived message body: %w", err)
+	}
+	if _, err := q.Exec(`UPDATE messages SET snippet = ? WHERE id = ?`, snippet, messageID); err != nil {
+		return fmt.Errorf("update derived message snippet: %w", err)
+	}
+	if s.fts5Available {
+		if err := upsertFTS(q, fts); err != nil {
+			return fmt.Errorf("update derived message FTS: %w", err)
+		}
+	}
+	return nil
+}
+
+// upsertFTSOrUnsearchable applies the backfill's terminal policy when
+// PostgreSQL rejects the bounded search vector, keeping the caller's other
+// writes. It reports false when the row was already terminal.
+func (s *Store) upsertFTSOrUnsearchable(q querier, doc FTSDoc) (bool, error) {
+	if _, err := q.Exec("SAVEPOINT derived_fts"); err != nil {
+		return false, err
+	}
+	changed, err := true, s.dialect.FTSUpsert(q, doc)
+	if s.dialect.IsFTSValueTooLargeError(err) {
+		slog.Warn("marking message unsearchable after FTS overflow", "message_id", doc.MessageID, "error", err)
+		changed, err = markFTSOverflowUnsearchable(q, doc.MessageID)
+	}
+	if err != nil {
+		return false, err
+	}
+	_, err = q.Exec("RELEASE SAVEPOINT derived_fts")
+	return changed, err
+}
+
+func markFTSOverflowUnsearchable(q querier, messageID int64) (bool, error) {
+	if _, err := q.Exec("ROLLBACK TO SAVEPOINT derived_fts"); err != nil {
+		return false, err
+	}
+	terminal, err := ftsMessageUnsearchable(q, messageID)
+	if err != nil || terminal {
+		return false, err
+	}
+	return true, markFTSMessageUnsearchable(q, messageID)
 }
 
 // ArchivedSourceMessageIDs returns the subset of sourceMessageIDs already
@@ -6760,6 +7127,8 @@ func (s *Store) ListRecentMessagesForSource(sourceID int64, limit int) ([]Source
 		FROM messages m
 		JOIN conversations c ON c.id = m.conversation_id
 		WHERE m.source_id = ? AND m.sent_at IS NOT NULL AND m.deleted_from_source_at IS NULL
+ AND m.deleted_at IS NULL
+ AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
 		ORDER BY m.sent_at DESC, m.id DESC
 		LIMIT ?
 	`, sourceID, limit)
@@ -6831,7 +7200,7 @@ func (s *Store) ListSlackRecentReplyThreadRootsContext(ctx context.Context, sour
 // downloaded (see normalizeSlackAttachmentRefs) — neither is pending work.
 func (s *Store) ListSlackPendingAttachmentMessages(sourceID int64) ([]PendingAttachmentMessage, error) {
 	rows, err := s.db.Query(`
-		SELECT m.id, m.source_message_id, c.source_conversation_id,
+		SELECT m.id, c.id, m.source_message_id, c.source_conversation_id,
 		       a.storage_path, COALESCE(a.content_hash, ''), COALESCE(a.media_type, ''),
 		       COALESCE(a.attachment_state, '')
 		FROM messages m
@@ -6839,6 +7208,8 @@ func (s *Store) ListSlackPendingAttachmentMessages(sourceID int64) ([]PendingAtt
 		JOIN attachments a ON a.message_id = m.id
 		WHERE m.source_id = ?
 		  AND a.source_attachment_id LIKE ?
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_archive_only_messages am WHERE am.message_id = m.id)
+		  AND NOT EXISTS (SELECT 1 FROM source_merge_preserved_attachments spa WHERE spa.attachment_id = a.id)
 		ORDER BY m.id, a.id
 	`, sourceID, "slack:%")
 	if err != nil {
@@ -6858,7 +7229,7 @@ func (s *Store) ListSlackPendingAttachmentMessages(sourceID int64) ([]PendingAtt
 		var item PendingAttachmentMessage
 		var ref AttachmentRef
 		if err := rows.Scan(
-			&item.MessageID, &item.SourceMessageID, &item.ChatID,
+			&item.MessageID, &item.ConversationID, &item.SourceMessageID, &item.ChatID,
 			&ref.StoragePath, &ref.ContentHash, &ref.MediaType, &ref.State,
 		); err != nil {
 			return nil, err
@@ -6960,7 +7331,11 @@ func (s *Store) MessageIDsWithLabelContext(ctx context.Context, sourceID, labelI
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT m.source_message_id, m.id FROM messages m
 		JOIN message_labels ml ON ml.message_id = m.id
-		WHERE m.source_id = ? AND ml.label_id = ? AND m.deleted_from_source_at IS NULL`, sourceID, labelID)
+		WHERE m.source_id = ? AND ml.label_id = ? AND m.deleted_from_source_at IS NULL
+		AND NOT EXISTS (
+			SELECT 1 FROM source_merge_archive_only_messages marker
+			WHERE marker.message_id = m.id
+		)`, sourceID, labelID)
 	if err != nil {
 		return nil, fmt.Errorf("list messages in label: %w", err)
 	}
@@ -7027,4 +7402,35 @@ func (s *Store) soleAddressParticipantContext(ctx context.Context, query, addres
 		return 0, nil
 	}
 	return ids[0], nil
+}
+
+// ResolveDeferredMessageRepliesContext links archived replies whose metadata
+// contains referenced_message_id once their parent is available.
+func (s *Store) ResolveDeferredMessageRepliesContext(ctx context.Context, sourceID int64, messageType string, pageSize int) error {
+	afterID := int64(0)
+	for {
+		unresolved, err := s.ListUnresolvedMessageRepliesAfterContext(ctx,
+			sourceID, messageType, afterID, pageSize, 0,
+		)
+		if err != nil {
+			return err
+		}
+		for _, reply := range unresolved {
+			var metadata struct {
+				ReferencedMessageID string `json:"referenced_message_id"`
+			}
+			if err := json.Unmarshal([]byte(reply.Metadata), &metadata); err != nil {
+				return fmt.Errorf("decode reply metadata for %s: %w", reply.SourceMessageID, err)
+			}
+			if metadata.ReferencedMessageID != "" {
+				if err := s.SetReplyToContext(ctx, sourceID, reply.SourceMessageID, metadata.ReferencedMessageID); err != nil {
+					return fmt.Errorf("resolve deferred reply %s: %w", reply.SourceMessageID, err)
+				}
+			}
+			afterID = reply.MessageID
+		}
+		if len(unresolved) < pageSize {
+			return nil
+		}
+	}
 }

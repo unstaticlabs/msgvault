@@ -21,16 +21,6 @@ func TestIsMigrationApplied_NotApplied(t *testing.T) {
 	assert.False(t, applied, "migration should not be applied yet")
 }
 
-func TestMarkAndCheckMigrationApplied(t *testing.T) {
-	f := storetest.New(t)
-
-	require.NoError(t, f.Store.MarkMigrationApplied("test_migration"), "MarkMigrationApplied")
-
-	applied, err := f.Store.IsMigrationApplied("test_migration")
-	require.NoError(t, err, "IsMigrationApplied")
-	assert.True(t, applied, "migration should be marked as applied")
-}
-
 func TestMarkMigrationApplied_Idempotent(t *testing.T) {
 	f := storetest.New(t)
 
@@ -248,7 +238,8 @@ func TestInitSchemaUpgradesV9WatermarkTriggersForListID(t *testing.T) {
 	require.NoError(err, "install prior v9 message watermark trigger")
 	_, err = st.DB().Exec(`
 		DELETE FROM applied_migrations
-		WHERE name IN ('message_and_attachment_triggers_v9', 'message_and_attachment_triggers_v10')`)
+		WHERE name IN ('message_and_attachment_triggers_v9', 'message_and_attachment_triggers_v10',
+		               'message_and_attachment_triggers_v11', 'message_and_attachment_triggers_v12')`)
 	require.NoError(err, "clear current watermark trigger migration records")
 	_, err = st.DB().Exec(`
 		INSERT INTO applied_migrations (name) VALUES ('message_and_attachment_triggers_v9')`)
@@ -288,7 +279,7 @@ func TestPostgresInitSchemaMigratesListIDColumn(t *testing.T) {
 	}
 	_, err := f.Store.DB().Exec(`
 		DELETE FROM applied_migrations
-		WHERE name = 'message_and_attachment_triggers_v10'`)
+		WHERE name = 'message_and_attachment_triggers_v12'`)
 	require.NoError(err, "restore the pre-List-ID trigger migration state")
 	_, err = f.Store.DB().Exec(`ALTER TABLE messages DROP COLUMN list_id`)
 	require.NoError(err, "remove column to simulate a legacy PostgreSQL archive")

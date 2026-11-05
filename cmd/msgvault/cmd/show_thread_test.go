@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -15,10 +17,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/kit/telemetry/posthog"
 	"go.kenn.io/msgvault/internal/api"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/daemonclient"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/telemetry"
 )
 
 func TestLoadThreadMessagesBeyondRateLimitBurst(t *testing.T) {
@@ -59,6 +63,24 @@ func TestLoadThreadMessagesBeyondRateLimitBurst(t *testing.T) {
 }
 
 func TestShowThreadPaginationAndIdentity(t *testing.T) {
+	// Serving tests permanently disable telemetry in their process.
+	// Keep the successful-read assertions in a fresh process.
+	const subprocessEnv = "MSGVAULT_SHOW_THREAD_TEST"
+	if os.Getenv(subprocessEnv) != "1" {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestShowThreadPaginationAndIdentity$", "-test.count=1") //nolint:gosec // os.Args[0] is the test binary; args are fixed test flags.
+		cmd.Env = append(os.Environ(), subprocessEnv+"=1")
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		return
+	}
+	t.Setenv("CODEX_THREAD_ID", "")
+	t.Setenv("CLAUDECODE", "")
+	t.Setenv(telemetry.EnabledEnv, "1")
+	t.Setenv(posthog.GenericEnabledEnv, "")
+	clearTelemetryVetoEnvironment(t)
+	terminal := cliActionTerminal
+	cliActionTerminal = func(uintptr) bool { return true }
+	t.Cleanup(func() { cliActionTerminal = terminal })
 	for _, tc := range []struct {
 		name                         string
 		offset                       int
@@ -78,10 +100,16 @@ func TestShowThreadPaginationAndIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			require := require.New(t)
 			assert := assert.New(t)
+			var events []map[string]any
 
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
+				case "/api/v1/telemetry/events":
+					var event map[string]any
+					assert.NoError(json.NewDecoder(r.Body).Decode(&event))
+					events = append(events, event)
+					w.WriteHeader(http.StatusAccepted)
 				case "/api/v1/health":
 					assert.NoError(json.NewEncoder(w).Encode(map[string]any{"status": "ok", "api_schema_version": "3.3.0"}))
 				case "/api/v1/cli/message/thread":
@@ -116,7 +144,13 @@ func TestShowThreadPaginationAndIdentity(t *testing.T) {
 			root.SetErr(&stderr)
 			done := captureStdout(t)
 			err := root.Execute()
+			invocationFromCommand(root).sends.Wait(time.Second)
 			out := done()
+			if tc.wantError != "" || tc.offset > 0 {
+				assert.Empty(events)
+			} else {
+				assert.Equal([]map[string]any{{"event": "message_opened", "properties": map[string]any{"surface": "cli"}}}, events)
+			}
 			if tc.wantError != "" {
 				require.ErrorContains(err, tc.wantError)
 				assert.NotContains(stderr.String(), "More messages:")
@@ -162,6 +196,82 @@ func TestShowThreadPaginationAndIdentity(t *testing.T) {
 				}
 			} else {
 				assert.Empty(page.Messages)
+			}
+		})
+	}
+}
+
+func TestShowThreadHiddenHTMLText(t *testing.T) {
+	for _, tc := range []struct {
+		name, html     string
+		asJSON, hidden bool
+	}{
+		{"hidden text warning once", `<div hidden>Hidden text</div>`, false, true},
+		{"visible text", `<p>Visible text</p>`, false, false},
+		{"hidden JSON", `<div hidden>Hidden text</div>`, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert, require := assert.New(t), require.New(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/v1/health":
+					assert.NoError(json.NewEncoder(w).Encode(map[string]any{"status": "ok", "api_schema_version": "3.3.0"}))
+				case "/api/v1/cli/message/thread":
+					assert.NoError(json.NewEncoder(w).Encode(map[string]any{
+						"conversation_id": 7, "total": 3, "messages": []map[string]any{{"id": 1}, {"id": 2}, {"id": 3}},
+					}))
+				case "/api/v1/cli/message":
+					id, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+					assert.NoError(err)
+					bodyHTML := tc.html
+					if id == 1 {
+						bodyHTML = "<p>Visible text</p>"
+					}
+					assert.NoError(json.NewEncoder(w).Encode(map[string]any{
+						"id": id, "conversation_id": 7, "body_text": "Archived text", "body_html": bodyHTML,
+						"hidden_text_present": id != 1 && tc.hidden,
+					}))
+				case "/api/v1/telemetry/events":
+					w.WriteHeader(http.StatusAccepted)
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(srv.Close)
+			cfg := &config.Config{}
+			cfg.Remote.URL = srv.URL
+			cfg.Remote.AllowInsecure = true
+			root := newTestRootCmd()
+			root.SetContext(testInvocationContext(t.Context(), cfg, invocationOptions{}))
+			root.AddCommand(newShowThreadCmd())
+			args := []string{"show-thread", "1"}
+			if tc.asJSON {
+				args = append(args, "--json")
+			}
+			root.SetArgs(args)
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			require.NoError(root.Execute())
+			if tc.asJSON {
+				var page struct {
+					Messages []map[string]any `json:"messages"`
+				}
+				require.NoError(json.Unmarshal(stdout.Bytes(), &page))
+				require.Len(page.Messages, 3)
+				assert.Equal(false, page.Messages[0]["hidden_text_present"])
+				for _, msg := range page.Messages[1:] {
+					assert.Equal(tc.hidden, msg["hidden_text_present"])
+				}
+			} else {
+				assert.Contains(stdout.String(), "Archived text")
+				assert.NotContains(stdout.String(), "Warning:")
+			}
+			if tc.hidden && !tc.asJSON {
+				assert.Equal("Warning: this message's HTML may hide text.\n", stderr.String())
+			} else {
+				assert.Empty(stderr.String())
 			}
 		})
 	}

@@ -79,6 +79,7 @@ messages attributed to that address.
 List-Id values are matched as case-insensitive literal substrings. Quote values
 that contain spaces. Repeating list: or list-id: requires every value to match.
 Bare words and "quoted phrases" perform full-text search in the default mode.
+Use | between alternatives, for example invoice from:alice | receipt from:bob.
 filename: values use case-insensitive literal substring matching, including
 %, _, and backslashes. Repeat filename: to require every value to match.
 The filename operator requires daemon API schema 3.14.0 or newer.
@@ -145,17 +146,20 @@ Examples:
 		// rather than silently dropping the filter and running a wider query.
 		// Checked before the empty-query test so the user sees the offending
 		// value instead of a misleading "empty search query".
-		if err := search.Parse(queryStr).Err(); err != nil {
+		if err := search.ParseWithOR(queryStr, searchMode == "fts").Err(); err != nil {
 			return usageErr(cmd, err)
 		}
 		if searchMode == "fts" {
-			parsed := search.Parse(queryStr)
+			parsed := search.ParseOR(queryStr)
+			for _, warning := range search.LiteralORWarnings(queryStr) {
+				if _, err := fmt.Fprintln(cmd.ErrOrStderr(), "Warning:", warning); err != nil {
+					return fmt.Errorf("write search warning: %w", err)
+				}
+			}
 			parsed.MessageTypes = append(parsed.MessageTypes, searchMessageTypes...)
 			if parsed.IsEmpty() && searchAccount == "" && searchCollection == "" {
 				return errors.New("empty search query")
 			}
-		}
-		if searchMode == "fts" {
 			return runHTTPSearch(cmd, queryStr)
 		}
 		if searchMode != "fts" && searchOffset > 0 {
@@ -179,7 +183,7 @@ Examples:
 	},
 }
 
-func runHTTPSearch(cmd *cobra.Command, queryStr string) error {
+func runHTTPSearch(cmd *cobra.Command, queryStr string) (result error) {
 	state := invocationFromCommand(cmd)
 	if state == nil || state.logger == nil {
 		return errors.New("invocation state is unavailable")
@@ -190,6 +194,9 @@ func runHTTPSearch(cmd *cobra.Command, queryStr string) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 	defer func() { _ = s.Close() }()
+	if searchOffset == 0 && strings.TrimSpace(queryStr) != "" {
+		defer reportSuccessfulCLIAction(cmd, s, "search_run", "search_type", "text", &result)
+	}
 
 	prefix := "Searching..."
 	if info.Kind == HTTPStoreConfiguredRemote || info.Kind == HTTPStoreAgentDelegated {
@@ -238,6 +245,10 @@ func runHTTPSearch(cmd *cobra.Command, queryStr string) error {
 		)
 		return query.HintRepairEncoding(fmt.Errorf("search: %w", err))
 	}
+	if searchOffset == 0 && strings.TrimSpace(queryStr) != "" && len(resp.Results) == 0 && resp.IndexState == "" {
+		defer reportSuccessfulCLIAction(cmd, s, "search_empty", "search_type", "text", &result)
+	}
+
 	if resp.IndexBuilt {
 		// Pre-0.18 daemons built the index synchronously inside the request.
 		fmt.Fprintf(os.Stderr, "Built search index (%d messages indexed).\n", resp.IndexedMessages)
@@ -370,6 +381,7 @@ func outputSearchResultsJSON(results []query.MessageSummary) error {
 			"source_conversation_id": msg.SourceConversationID,
 			"subject":                msg.Subject,
 			"snippet":                msg.Snippet,
+			"hidden_text_present":    msg.HiddenTextPresent,
 			"from_email":             msg.FromEmail,
 			"from_name":              msg.FromName,
 			"sent_at":                msg.SentAt.Format(time.RFC3339),

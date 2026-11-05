@@ -132,7 +132,7 @@ func CORSMiddleware(cfg CORSConfig) func(http.Handler) http.Handler {
 // routes (SPA shell, static assets) keep the web handler's own caching policy.
 func apiCacheControlMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || isNativeMCPPath(r.URL.Path) {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		next.ServeHTTP(w, r)
@@ -251,6 +251,12 @@ func (s *Server) requestAuthentication(r *http.Request) requestAuthentication {
 }
 
 func (s *Server) classifyAPIRequestDirect(r *http.Request) requestAuthentication {
+	// Native MCP dispatches nested calls in process. The outer request has
+	// already resolved its principal; the private client must not replace it
+	// with the daemon owner credential. No HTTP header can set this context.
+	if principal, ok := authz.PrincipalFromContext(r.Context()); ok {
+		return requestAuthentication{Mode: AuthModeAPIKey, Principal: principal, trustedForCLIDuration: principal.Role == authz.RoleAdmin}
+	}
 	// Agent token takes priority: if the header is present, the request must
 	// authenticate as a delegated caller; we never fall through to other modes.
 	if agentVal, agentPresent := agentTokenHeaderValue(r); agentPresent {
@@ -280,6 +286,9 @@ func (s *Server) classifyAPIRequestDirect(r *http.Request) requestAuthentication
 	}
 	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
 		authHeader = authHeader[7:]
+	}
+	if credential, ok := apiprotocol.BearerAuthorization(r); ok {
+		authHeader = credential
 	}
 	if principal, onBehalfOf, ok := s.keyPrincipal(authHeader); ok {
 		return s.finishAuthentication(r, requestAuthentication{
@@ -389,7 +398,8 @@ func (s *Server) requestGateEligible(r *http.Request) bool {
 // reverse proxy, SSH tunnel, or TLS terminator forwarding to loopback, remote
 // traffic arrives as 127.0.0.1 and could brute-force the API key unthrottled.
 // The predicate (see Server.loopbackRateLimitExempt) therefore also requires
-// that the request be authenticated or that no API key be configured. The
+// that the request be authenticated or that no API key be configured, except
+// for credential-free discovery GETs to ping and daemon identity. The
 // loopback check inside it uses r.RemoteAddr, never forwarded-for headers, so
 // it cannot be spoofed remotely.
 func RateLimitMiddleware(

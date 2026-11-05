@@ -116,7 +116,10 @@ func runSyncIncrementalLocal(cmd *cobra.Command, args []string) error {
 		if lookupErr != nil {
 			return lookupErr
 		}
-		for _, src := range allMatches {
+		if err := rejectExplicitlyRetiredSyncSources(allMatches, selector, isIncrementalSyncableSource); err != nil {
+			return err
+		}
+		for _, src := range activeSyncSources(allMatches) {
 			switch src.SourceType {
 			case sourceTypeGmail:
 				gmailTargets = append(gmailTargets, syncTarget{source: src, email: src.Identifier})
@@ -144,6 +147,7 @@ func runSyncIncrementalLocal(cmd *cobra.Command, args []string) error {
 		if !slices.ContainsFunc(allSources, isIncrementalSyncSource) {
 			return errors.New("no email accounts to sync; add one with 'msgvault add-account <gmail>', 'add-imap', or 'add-o365' (file imports are not synced)")
 		}
+		allSources = activeSyncSources(allSources)
 		for _, src := range allSources {
 			switch src.SourceType {
 			case sourceTypeGmail:
@@ -364,7 +368,7 @@ func runIncrementalSync(ctx context.Context, s *store.Store, getOAuthMgr func(ct
 
 func init() {
 	syncIncrementalCmd.Flags().Int64("source-id", 0, "Exact source ID to sync")
-	syncIncrementalCmd.Flags().StringArrayVar(&syncFolders, "folder", []string{}, "IMAP folder to scan (repeatable)")
-	syncIncrementalCmd.Flags().StringArrayVar(&syncSkipFolders, "skip-folder", []string{}, "IMAP folder to skip (repeatable)")
+	syncIncrementalCmd.Flags().StringArrayVar(&syncFolders, "folder", []string{}, "IMAP folder to scan; either folder flag replaces saved exclusions for this run (repeatable)")
+	syncIncrementalCmd.Flags().StringArrayVar(&syncSkipFolders, "skip-folder", []string{}, "IMAP folder to skip; either folder flag replaces saved exclusions for this run (repeatable)")
 	rootCmd.AddCommand(addManualSyncCacheFlags(syncIncrementalCmd))
 }

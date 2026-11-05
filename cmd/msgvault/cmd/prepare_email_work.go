@@ -1,7 +1,8 @@
 package cmd
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"strconv"
 
@@ -21,13 +22,13 @@ func newPrepareEmailWorkCommand() *cobra.Command {
 			return err
 		}
 		defer func() { _ = client.Close() }()
-		encoder := json.NewEncoder(command.OutOrStdout())
+		encoder := jsontext.NewEncoder(command.OutOrStdout())
 		for {
 			result, err := client.PrepareEmailWork(command.Context(), sourceID, batchSize)
 			if err != nil {
 				return err
 			}
-			if err = encoder.Encode(result); err != nil {
+			if err = json.MarshalEncode(encoder, result); err != nil {
 				return err
 			}
 			if result.Progress.Done || !all {

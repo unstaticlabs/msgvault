@@ -5,7 +5,7 @@
     patchUser as generatedPatchUser,
     setUserSources as generatedSetUserSources,
   } from '../../api/generated/api/api';
-  import { Button, Checkbox } from '@kenn-io/kit-ui';
+  import { Button, Checkbox, Table, TableHeaderCell } from '@kenn-io/kit-ui';
   import { onMount } from 'svelte';
   import type { APIClient } from '../../api/client';
   import type { SourceStatus, UserSummary } from '../../api/generated/models';
@@ -101,18 +101,15 @@
     <p class="state" role="status">No user has signed in yet.</p>
   {:else}
     <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th scope="col">User</th>
-            <th scope="col">Role</th>
-            <th scope="col">Standing</th>
-            {#each sources as source (source.id)}
-              <th scope="col">{sourceLabel(source)}</th>
-            {/each}
-          </tr>
-        </thead>
-        <tbody>
+      <Table ariaLabel="User access" class="users-table" zebra={false} unsorted>
+        {#snippet header()}
+          <TableHeaderCell label="User" />
+          <TableHeaderCell label="Role" />
+          <TableHeaderCell label="Standing" />
+          {#each sources as source (source.id)}
+            <TableHeaderCell label={sourceLabel(source)} />
+          {/each}
+        {/snippet}
           {#each users as user (user.id)}
             <tr class:disabled={user.disabled}>
               <th scope="row">
@@ -141,8 +138,7 @@
               {/each}
             </tr>
           {/each}
-        </tbody>
-      </table>
+      </Table>
     </div>
   {/if}
 </section>
@@ -162,7 +158,7 @@
   .table-scroll {
     overflow-x: auto;
   }
-  table {
+  :global(.users-table) {
     border-collapse: collapse;
     min-width: 100%;
   }

@@ -89,6 +89,7 @@ type Engine interface {
 	//
 	// queryStr is the raw search string (needed for stats; search.Query doesn't store it).
 	// statsGroupBy controls which view's key columns are used for stats search filtering.
+	// ViewNoStats omits aggregates; limit=0 returns the count without a page.
 	SearchFastWithStats(ctx context.Context, query *search.Query, queryStr string,
 		filter MessageFilter, statsGroupBy ViewType, limit, offset int) (*SearchFastResult, error)
 
@@ -98,7 +99,8 @@ type Engine interface {
 
 	// SearchByDomains returns messages where any participant (from, to, cc, or bcc)
 	// belongs to one of the given domains. Non-empty sourceIDs limit results to those accounts.
-	SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) ([]MessageSummary, error)
+	// HasMore reports whether another page follows the returned messages.
+	SearchByDomains(ctx context.Context, domains []string, after, before *time.Time, limit, offset int, sourceIDs []int64) (DomainSearchResult, error)
 
 	// Account queries
 	ListAccounts(ctx context.Context) ([]AccountInfo, error)
@@ -126,6 +128,11 @@ const (
 	DeletionSearchAggregate DeletionSearchMode = "aggregate"
 )
 
+// MaxDeletionTargetSearchResults is the largest permitted bounded search
+// result set. Callers use the extra row as an overflow sentinel for the
+// 100,000-match staging limit.
+const MaxDeletionTargetSearchResults = 100_001
+
 // DeletionTargetSearchResolver resolves a filtered search and source deletion
 // eligibility in one backend query. Keeping this capability separate from
 // Engine lets callers fail closed when a backend cannot provide a stable
@@ -137,6 +144,20 @@ type DeletionTargetSearchResolver interface {
 		filter MessageFilter,
 		mode DeletionSearchMode,
 	) ([]DeletionTarget, error)
+}
+
+// BoundedDeletionTargetSearchResolver resolves at most maxResults exact
+// search matches for one-shot staging and reports the count before eligibility
+// filtering. The existing unbounded resolver stays
+// available to callers such as the TUI that intentionally stage every match.
+type BoundedDeletionTargetSearchResolver interface {
+	GetDeletionTargetsBySearchBounded(
+		ctx context.Context,
+		searchQuery *search.Query,
+		filter MessageFilter,
+		mode DeletionSearchMode,
+		maxResults int,
+	) ([]DeletionTarget, int, error)
 }
 
 // DeletionTargetAggregateSearchResolver resolves the exact message population
@@ -232,6 +253,13 @@ type PeopleInboxAnalyzer interface {
 // retains its composite subject/body/participant semantics.
 type MessageBodySearcher interface {
 	SearchMessageBodies(ctx context.Context, query *search.Query, limit, offset int) (*SearchFastResult, error)
+}
+
+// DomainSearchResult is one page of SearchByDomains matches. HasMore reports
+// whether a match remains beyond the page.
+type DomainSearchResult struct {
+	Messages []MessageSummary
+	HasMore  bool
 }
 
 // SearchFastResult carries messages and index status, with optional totals and aggregate stats.

@@ -8,15 +8,14 @@ import (
 	"os"
 	"unsafe"
 
+	"go.kenn.io/msgvault/internal/fileutil"
 	"golang.org/x/sys/windows"
 )
 
 type nativeCredentialPermissions struct{}
 
-const cardDAVFileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1FF
-
 func (nativeCredentialPermissions) secureDirectory(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
+	if err := fileutil.SecureMkdirAll(path, 0o700); err != nil {
 		return err
 	}
 	handle, err := openCardDAVSecurityHandle(path, true, windows.READ_CONTROL|windows.WRITE_DAC)
@@ -75,10 +74,22 @@ func secureCardDAVHandle(handle windows.Handle) error {
 	if err != nil {
 		return fmt.Errorf("get current user SID: %w", err)
 	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return fmt.Errorf("inspect CardDAV credential handle: %w", err)
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	accessPermissions := windows.ACCESS_MASK(windows.GENERIC_ALL)
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		// Other credential stores share this directory. Their lock files need
+		// current-user access when Windows reapplies parent inheritance.
+		inheritance = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
+		accessPermissions = fileutil.FileAllAccess
+	}
 	entries := []windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.GENERIC_ALL,
+		AccessPermissions: accessPermissions,
 		AccessMode:        windows.SET_ACCESS,
-		Inheritance:       windows.NO_INHERITANCE,
+		Inheritance:       inheritance,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER,
 			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
@@ -128,7 +139,7 @@ func verifyCardDAVHandleOwnerOnly(handle windows.Handle, user *windows.SID) erro
 		return fmt.Errorf("read CardDAV owner ACE: %w", err)
 	}
 	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-		(ace.Mask != windows.GENERIC_ALL && ace.Mask != cardDAVFileAllAccess) {
+		(ace.Mask != windows.GENERIC_ALL && ace.Mask != fileutil.FileAllAccess) {
 		return errors.New("CardDAV DACL does not grant exactly full control")
 	}
 	if ace.Header.AceFlags&windows.INHERITED_ACE != 0 {

@@ -207,7 +207,7 @@ func (s *Server) handleSemanticPersonSearch(w http.ResponseWriter, r *http.Reque
 	}
 	results, err := engine.Search(r.Context(), request.Query, request.Limit)
 	if err != nil {
-		s.writePersonSearchError(w, err)
+		s.writePersonSearchError(r.Context(), w, err)
 		return
 	}
 	response := PersonSearchResponse{Results: make([]PersonSearchResult, len(results))}
@@ -217,7 +217,7 @@ func (s *Server) handleSemanticPersonSearch(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *Server) writePersonSearchError(w http.ResponseWriter, err error) {
+func (s *Server) writePersonSearchError(ctx context.Context, w http.ResponseWriter, err error) {
 	if s.writeIfContextError(w, err) {
 		return
 	}
@@ -234,8 +234,10 @@ func (s *Server) writePersonSearchError(w http.ResponseWriter, err error) {
 			"Semantic person search cannot verify the current semantic person embedding policy or exact consent; check the live configuration and consent store")
 	case errors.Is(err, vector.ErrNotEnabled):
 		writeError(w, http.StatusServiceUnavailable, "vector_not_enabled", "Vector search is not configured")
-	case errors.Is(err, vector.ErrIndexStale):
+	case errors.Is(err, vector.ErrSemanticPersonEmbeddingRuntimeStale):
 		writeError(w, http.StatusServiceUnavailable, "index_stale", "The vector index does not match configured embedding settings")
+	case errors.Is(err, vector.ErrIndexStale):
+		s.writeIndexStale(ctx, w, err)
 	case errors.Is(err, personsearch.ErrPersonCoverageIncomplete):
 		var coverageErr *personsearch.CoverageIncompleteError
 		if errors.As(err, &coverageErr) && coverageErr.Rejected > 0 {
@@ -377,6 +379,7 @@ func (s *Server) handleDirectoryPeople(w http.ResponseWriter, r *http.Request) {
 func directoryPeopleQuery(values url.Values) (store.DirectoryPeopleQuery, error) {
 	query := store.DirectoryPeopleQuery{
 		Query:          values.Get("q"),
+		Address:        values.Get("address"),
 		Cursor:         values.Get("cursor"),
 		ContactState:   values.Get("contact_state"),
 		Category:       values.Get("category"),
@@ -530,7 +533,7 @@ func addPersonIDParameter(operation *huma.Operation) {
 func addPersonUIDParameter(operation *huma.Operation) {
 	minimumLength := 1
 	operation.Parameters = append(operation.Parameters, &huma.Param{
-		Name: "uid", In: "query", Required: true,
+		Name: "uid", In: queryParamLocation, Required: true,
 		Description: "Exact vCard UID or CardDAV resource UID",
 		Schema:      &huma.Schema{Type: huma.TypeString, MinLength: &minimumLength},
 	})
@@ -549,6 +552,7 @@ func addDirectoryPeopleParameters(operation *huma.Operation) {
 	}
 	operation.Parameters = append(operation.Parameters,
 		queryStringParam("q", "Lexical query over person names, contact points, and organizations", false),
+		queryStringParam("address", "Literal case-insensitive substring of current bound participant identities or curated contact points", false),
 		queryStringParam("cursor", "Opaque cursor returned by the previous Directory page", false),
 		queryIntegerParam("limit", "Maximum rows to return (default 50, max 100)"),
 		queryStringParam("contact_state", "Current contact state: active or inactive", false),

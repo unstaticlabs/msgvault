@@ -85,9 +85,13 @@ func TestMuesliCommandsReadRecorderConfiguration(t *testing.T) {
 }
 
 func TestMuesliRecordErrorsDoNotMaskTransportFailure(t *testing.T) {
-	assert.True(t, muesliRecordErrorsOnly(errors.Join(muesli.ErrRemoteValidation, muesli.ErrRemoteTooLarge)))
-	assert.False(t, muesliRecordErrorsOnly(errors.Join(muesli.ErrRemoteValidation, context.Canceled)))
-	assert.False(t, muesliRecordErrorsOnly(errors.New("server failure")))
+	assert := assert.New(t)
+
+	assert.True(muesliRecordErrorsOnly(errors.Join(muesli.ErrRemoteValidation, muesli.ErrRemoteTooLarge)))
+	assert.True(muesliRecordErrorsOnly(muesli.ErrRecordingTooLarge))
+	assert.False(muesliRecordErrorsOnly(errors.Join(muesli.ErrRecordingTooLarge, context.Canceled)))
+	assert.False(muesliRecordErrorsOnly(errors.Join(muesli.ErrRemoteValidation, context.Canceled)))
+	assert.False(muesliRecordErrorsOnly(errors.New("server failure")))
 }
 
 func TestMuesliBuildCacheRefreshesThroughRegisteredSource(t *testing.T) {
@@ -154,16 +158,7 @@ func TestMuesliBuildCacheRefreshesThroughRegisteredSource(t *testing.T) {
 			clientCfg.Remote = config.RemoteConfig{URL: server.URL, APIKey: serverCfg.Server.APIKey, AllowInsecure: true}
 			disabled := false
 			for _, configured := range tc.sources {
-				path := filepath.Join(t.TempDir(), "muesli.db")
-				db, err := sql.Open("sqlite3", path)
-				require.NoError(err)
-				_, err = db.Exec(`CREATE TABLE meetings (id INTEGER PRIMARY KEY,title TEXT,start_time TEXT,created_at TEXT,raw_transcript TEXT)`)
-				require.NoError(err)
-				if configured.meetings {
-					_, err = db.Exec(`INSERT INTO meetings VALUES(42,'Planning','2026-09-01T14:00:00Z','2026-09-01 14:00:03','Synthetic transcript')`)
-					require.NoError(err)
-				}
-				require.NoError(db.Close())
+				path := newMuesliMeetingsFixture(t, configured.meetings)
 				clientCfg.Muesli = append(clientCfg.Muesli, config.MuesliSource{Identifier: configured.identifier, AccountEmail: "user@example.com", DBPath: path, Contacts: &disabled})
 			}
 			register := &cobra.Command{Use: "add-muesli"}
@@ -332,4 +327,19 @@ func TestMuesliWatchRetriesTransientDaemonFailures(t *testing.T) {
 			assert.Equal(1, archived, "the scheduled rescan uploads once the daemon accepts requests")
 		})
 	}
+}
+
+func newMuesliMeetingsFixture(t *testing.T, meetings bool) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "muesli.db")
+	db, err := sql.Open("sqlite3", path)
+	require.NoError(t, err)
+	_, err = db.Exec(`CREATE TABLE meetings (id INTEGER PRIMARY KEY,title TEXT,start_time TEXT,created_at TEXT,raw_transcript TEXT)`)
+	require.NoError(t, err)
+	if meetings {
+		_, err = db.Exec(`INSERT INTO meetings VALUES(42,'Planning','2026-09-01T14:00:00Z','2026-09-01 14:00:03','Synthetic transcript')`)
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Close())
+	return path
 }

@@ -15,7 +15,8 @@ import (
 
 func pgEmailWorkFixture(t *testing.T) (*Store, int64, int64, *Message) {
 	t.Helper()
-	st := newPGStoreInternal(t, skipUnlessPostgresInternal(t))
+	skipUnlessPostgresInternal(t)
+	st := newPGStoreInternal(t)
 	source, err := st.GetOrCreateSource("gmail", "qa-lock@example.test")
 	require.NoError(t, err)
 	conversation, err := st.EnsureConversation(source.ID, "synthetic-lock-thread", "[QA]")

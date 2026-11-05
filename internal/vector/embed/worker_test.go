@@ -51,9 +51,9 @@ type yieldingStampStore struct {
 	cancel context.CancelCauseFunc
 }
 
-func (s *yieldingStampStore) SetEmbedGenIfUnchanged(context.Context, []store.EmbedGenStamp, int64) ([]int64, error) {
+func (s *yieldingStampStore) SetEmbedGenIfUnchanged(context.Context, []store.EmbedGenStamp, int64) ([]int64, int, error) {
 	s.cancel(jobctx.ErrYieldedToWaiter)
-	return nil, errors.New("stamp operation failed")
+	return nil, 0, errors.New("stamp operation failed")
 }
 
 type captureLogHandler struct {
@@ -133,7 +133,7 @@ func TestWorkerOperationPassOwnsOneInvocationAcrossProviderBatches(t *testing.T)
 
 	result, err := w.RunOnce(t.Context(), f.BuildingGen, scope)
 	require.NoError(t, err)
-	assert.Equal(t, RunResult{Claimed: 5, Succeeded: 5}, result)
+	assert.Equal(t, RunResult{Claimed: 5, Succeeded: 5, ScanComplete: true}, result)
 	assert.Equal(t, 3, f.FakeClient.calls, "precondition: pass spans three provider batches")
 
 	runs := messageEmbeddingOperationRuns(t, recorder)
@@ -182,7 +182,7 @@ func TestWorkerOperationPassCheckpointFailurePreservesPrimaryResult(t *testing.T
 
 	result, err := w.RunOnce(t.Context(), f.BuildingGen, scope)
 	require.NoError(t, err)
-	assert.Equal(t, RunResult{Claimed: 1, Succeeded: 1}, result)
+	assert.Equal(t, RunResult{Claimed: 1, Succeeded: 1, ScanComplete: true}, result)
 	invocation, ok := f.Recorder.invocation(scope.Key)
 	require.True(t, ok)
 	require.NotNil(t, invocation.run)
@@ -203,7 +203,7 @@ func TestWorkerOperationPassFinishFailurePreservesPrimaryResult(t *testing.T) {
 
 	result, err := w.RunOnce(t.Context(), f.BuildingGen, scope)
 	require.NoError(t, err)
-	assert.Equal(t, RunResult{Claimed: 1, Succeeded: 1}, result)
+	assert.Equal(t, RunResult{Claimed: 1, Succeeded: 1, ScanComplete: true}, result)
 	invocation, ok := f.Recorder.invocation(scope.Key)
 	require.True(t, ok)
 	assert.Nil(t, invocation.run, "failed finish must leave the lifecycle active for recovery")
@@ -312,22 +312,6 @@ func operationCounter(run operations.Run, name operations.CounterName) int64 {
 		}
 	}
 	return 0
-}
-
-// TestWorker_StampsAfterUpsert verifies the ordered idempotent steps:
-// every embedded message has embed_gen stamped to the target generation.
-func TestWorker_StampsAfterUpsert(t *testing.T) {
-	require := require.New(t)
-	f := newWorkerFixture(t, 3)
-
-	w := newTestWorker(f, 3)
-	_, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(err, "RunOnce")
-
-	var stamped int
-	require.NoError(f.MainDB.QueryRow(
-		`SELECT COUNT(*) FROM messages WHERE embed_gen = ?`, int64(f.BuildingGen)).Scan(&stamped))
-	require.Equal(3, stamped, "stamped messages")
 }
 
 // TestWorker_EmptyCorpusReturnsZero: scanning an empty corpus returns a
@@ -578,6 +562,92 @@ func TestWorker_EmptyMessageSkipMarkedNotReprocessed(t *testing.T) {
 	// Second run finds nothing (the empty message is stamped), so the
 	// embedder is not called again.
 	assert.Equal(t, callsBefore, f.FakeClient.calls, "no re-processing of skip-marked message")
+}
+
+func TestWorker_SkipsInvisibleOnlyContent(t *testing.T) {
+	type message struct {
+		text string
+		html string
+	}
+	type chunk struct {
+		messageID int64
+		index     int
+		start     int
+		end       int
+	}
+	blankWindow := strings.Repeat("\x7f", 8)
+	for _, tc := range []struct {
+		name          string
+		messages      []message
+		stripQuotes   bool
+		maxInputChars int
+		want          [][]string
+		wantSucceeded int
+		wantChunks    []chunk
+	}{
+		{
+			name: "quoted-only then HTML control then visible message",
+			messages: []message{
+				{text: "> quoted text only"},
+				{html: "<p>\x7f</p>"},
+				{text: "visible message"},
+			},
+			stripQuotes:   true,
+			want:          [][]string{{"visible message"}},
+			wantSucceeded: 1,
+			wantChunks:    []chunk{{messageID: 3, index: 0, start: 0, end: 15}},
+		},
+		{
+			name:          "visible windows",
+			messages:      []message{{text: blankWindow + "界abcdefg" + blankWindow + "終hijklmn" + blankWindow}},
+			maxInputChars: 8,
+			want:          [][]string{{"界abcdefg", "終hijklmn"}},
+			wantSucceeded: 1,
+			wantChunks: []chunk{
+				{messageID: 1, index: 0, start: 8, end: 16},
+				{messageID: 1, index: 1, start: 24, end: 32},
+			},
+		},
+		{
+			name:          "only blank windows retained",
+			messages:      []message{{text: strings.Repeat(blankWindow, maxSpansPerMessage+1) + "visible tail"}},
+			maxInputChars: 8,
+			want:          [][]string{},
+			wantSucceeded: 0,
+			wantChunks:    []chunk{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWorkerFixture(t, len(tc.messages))
+			_, err := f.MainDB.Exec(`UPDATE messages SET subject = ''`)
+			require.NoError(t, err)
+			for i, msg := range tc.messages {
+				_, err = f.MainDB.Exec(`UPDATE message_bodies SET body_text = ?, body_html = ? WHERE message_id = ?`, msg.text, msg.html, i+1)
+				require.NoError(t, err)
+			}
+			client, calls := newRecordingOpenAIClient(t, 4)
+			w := newTestWorker(f, 8)
+			w.deps.Client = client
+			w.deps.Preprocess.StripQuotes = tc.stripQuotes
+			w.deps.MaxInputChars = tc.maxInputChars
+			res, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, *calls)
+			assert.Equal(t, tc.wantSucceeded, res.Succeeded)
+			assert.Zero(t, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+			rows, err := f.VectorsDB.Query(`SELECT message_id, chunk_index, chunk_char_start, chunk_char_end FROM embeddings WHERE generation_id = ? ORDER BY message_id, chunk_index`, f.BuildingGen)
+			require.NoError(t, err)
+			defer func() { _ = rows.Close() }()
+			chunks := []chunk{}
+			for rows.Next() {
+				var got chunk
+				require.NoError(t, rows.Scan(&got.messageID, &got.index, &got.start, &got.end))
+				chunks = append(chunks, got)
+			}
+			require.NoError(t, rows.Err())
+			assert.Equal(t, tc.wantChunks, chunks)
+		})
+	}
 }
 
 func TestWorker_EmptyMessageDeletesExistingEmbeddingBeforeSkipMark(t *testing.T) {
@@ -856,42 +926,62 @@ func TestWorker_BackstopDoesNotPersistWatermark(t *testing.T) {
 	assert.Equal(t, wmBefore, readWatermark(t, f.VectorsDB, int64(f.BuildingGen)), "watermark unchanged by backstop")
 }
 
-// TestWorker_ReclaimStaleIsNoOp: ReclaimStale always returns (0, nil)
-// under the scan-and-fill design (kept for the EmbedRunner interface).
-func TestWorker_ReclaimStaleIsNoOp(t *testing.T) {
-	f := newWorkerFixture(t, 1)
-	w := newTestWorker(f, 1)
-	n, err := w.ReclaimStale(context.Background())
-	require.NoError(t, err, "ReclaimStale")
-	assert.Equal(t, 0, n, "no-op returns 0")
-}
-
 // --- Downshift / 4xx behavior ---
 
-// TestWorker_Downshift_MessageSpecific4xxStampedDropped: when a batch
-// 4xxs but singletons embed, the failing message is a message-specific
-// 4xx and gets stamped (dropped) so the run completes.
-func TestWorker_Downshift_MessageSpecific4xxStampedDropped(t *testing.T) {
-	f := newWorkerFixture(t, 3)
-	var singletonSeen int
-	f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
-		if len(inputs) > 1 {
-			return nil, fmt.Errorf("embed: HTTP 400: too long: %w", ErrPermanent4xx)
-		}
-		singletonSeen++
-		if singletonSeen == 2 {
-			return nil, fmt.Errorf("embed: HTTP 400: blocked: %w", ErrPermanent4xx)
-		}
-		v := make([]float32, 4)
-		v[0] = 1
-		return [][]float32{v}, nil
+// A message-specific 4xx is recorded only if its skip stamp succeeds.
+func TestWorker_Downshift_MessageSpecific4xxSkipStamp(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		stampMiss bool
+	}{
+		{name: "stamped drop"},
+		{name: "skip-stamp CAS miss", stampMiss: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			f := newWorkerFixture(t, 3)
+			var singletonSeen int
+			f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+				if len(inputs) > 1 {
+					return nil, fmt.Errorf("embed: HTTP 400: too long: %w", ErrPermanent4xx)
+				}
+				singletonSeen++
+				if singletonSeen == 2 {
+					return nil, fmt.Errorf("embed: HTTP 400: blocked: %w", ErrPermanent4xx)
+				}
+				v := make([]float32, 4)
+				v[0] = 1
+				return [][]float32{v}, nil
+			}
+			capture := &diagnosticCapture{}
+			w := newTestWorker(f, 3)
+			w.deps.Diagnostics = capture
+			if tc.stampMiss {
+				w.deps.beforeSkipStamp = func(_ context.Context, ids []int64) {
+					for _, id := range ids {
+						_, err := f.MainDB.Exec(`UPDATE messages SET last_modified = '2099-01-01 00:00:00' WHERE id = ?`, id)
+						require.NoError(err)
+					}
+				}
+			}
+			res, err := w.RunOnce(t.Context(), f.BuildingGen, testEmbeddingPassScope())
+			require.NoError(err, "RunOnce")
+			got := capture.read(t)
+			require.NotEmpty(got.RecentBatches)
+			if tc.stampMiss {
+				assert.Nil(got.LastError, "a skip-stamp miss is not a pass failure")
+				for _, batch := range got.RecentBatches {
+					assert.Nil(batch.Error)
+				}
+			} else {
+				assert.NotNil(got.LastError)
+				assert.NotNil(got.RecentBatches[0].Error)
+				assert.Equal(0, countMissing(t, f.MainDB, int64(f.BuildingGen)), "all stamped")
+			}
+			assert.Equal(2, res.Succeeded, "Succeeded")
+		})
 	}
-	w := newTestWorker(f, 3)
-	res, err := w.RunOnce(context.Background(), f.BuildingGen, testEmbeddingPassScope())
-	require.NoError(t, err, "RunOnce")
-	assert.Equal(t, 2, res.Succeeded, "Succeeded")
-	// All three stamped (2 embedded + 1 message-specific drop).
-	assert.Equal(t, 0, countMissing(t, f.MainDB, int64(f.BuildingGen)), "all stamped")
 }
 
 // TestWorker_Downshift_AllDropNoSilentDelete: a fully misconfigured

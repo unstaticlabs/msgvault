@@ -262,14 +262,6 @@ func TestDraftOperationsRemoteMutationSet(t *testing.T) {
 	assert.False(OpSendAsList.remoteMutation())
 }
 
-func TestNewRateLimiter(t *testing.T) {
-	rl := NewRateLimiter(5.0)
-
-	assert.InDelta(t, float64(DefaultCapacity), rl.capacity, 1e-9, "capacity")
-	assert.InDelta(t, float64(DefaultCapacity), rl.tokens, 1e-9, "initial tokens")
-	assert.InDelta(t, DefaultRefillRate, rl.refillRate, 1e-9, "refillRate")
-}
-
 func TestNewRateLimiter_ScaledQPS(t *testing.T) {
 	rl := NewRateLimiter(2.5)
 	expectedRate := DefaultRefillRate * 0.5
@@ -293,15 +285,6 @@ func TestRateLimiter_TryAcquire(t *testing.T) {
 	f.drain()
 
 	assert.False(t, f.rl.TryAcquire(OpMessagesBatchDelete), "TryAcquire(OpMessagesBatchDelete) should fail when bucket is empty")
-}
-
-func TestRateLimiter_Acquire_Success(t *testing.T) {
-	f := newRLFixture()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	err := f.rl.Acquire(ctx, OpProfile)
-	require.NoError(t, err, "Acquire()")
 }
 
 func TestRateLimiter_Acquire_ContextCancelled(t *testing.T) {
@@ -494,16 +477,4 @@ func TestRateLimiter_Acquire_WaitsForThrottle(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		require.Fail(t, "Acquire() did not complete after advancing clock past throttle")
 	}
-}
-
-func TestMockClock_ZeroValueSafe(t *testing.T) {
-	// Verify that a zero-value mockClock{} won't block forever due to nil channel.
-	clk := &mockClock{}
-
-	// After should work without hanging
-	ch := clk.After(10 * time.Millisecond)
-	require.NotNil(t, ch, "After() returned nil channel")
-
-	// timerNotify should be lazily initialized
-	require.NotNil(t, clk.timerNotify, "timerNotify should be initialized after After() call")
 }

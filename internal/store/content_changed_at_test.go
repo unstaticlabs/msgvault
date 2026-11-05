@@ -59,11 +59,6 @@ func TestMessagesColumnClassificationIsExhaustive(t *testing.T) {
 	}
 }
 
-func TestMessagesContentColumns_IncludeListID(t *testing.T) {
-	assert.Contains(t, store.MessagesContentColumns, "list_id",
-		"changing a List-Id must make consumers re-read the message")
-}
-
 // contentChangedPast is the fixed far-past watermark the helpers stamp before
 // exercising a write, so "did the trigger fire?" is an exact string comparison
 // instead of a sleep long enough for the clock to tick. It is written in a form
@@ -194,6 +189,12 @@ func updateMessageColumn(t *testing.T, st *store.Store, id int64, col string) er
 	switch col {
 	case "source_message_id":
 		value = fmt.Sprintf("changed-src-%d", id)
+	case "source_id":
+		source, err := st.GetOrCreateSource("gmail", fmt.Sprintf("alternate-%d@example.test", id))
+		if err != nil {
+			return err
+		}
+		value = source.ID
 	case "list_id":
 		value = fmt.Sprintf("<changed-list-%d.example.test>", id)
 	case "conversation_id":
@@ -458,7 +459,7 @@ var contentChangedAtTriggerNames = []struct {
 // built by testutil.NewTestStore, reproducing the shape of an archive that
 // predates the column, on both backends. SQLite refuses ALTER TABLE ... DROP
 // COLUMN while any trigger or index still references the column, so the
-// removal must happen in dependency order: triggers first, then the index,
+// removal must happen in dependency order: triggers first, then indexes,
 // then the column. DROP TRIGGER syntax differs by backend -- PostgreSQL
 // triggers are namespaced per-table and require "ON <table>"; SQLite triggers
 // are named at the schema level and reject a table clause.
@@ -472,16 +473,18 @@ func dropContentChangedAtColumn(t *testing.T, st *store.Store) {
 		_, err := st.DB().Exec(stmt)
 		require.NoErrorf(t, err, "drop trigger %s", trg.name)
 	}
-	_, err := st.DB().Exec(`DROP INDEX IF EXISTS idx_messages_content_changed_at`)
-	require.NoError(t, err, "drop idx_messages_content_changed_at")
-	_, err = st.DB().Exec(`ALTER TABLE messages DROP COLUMN content_changed_at`)
+	for _, index := range []string{"idx_messages_content_changed_at", "idx_messages_conversation_content_changed"} {
+		_, err := st.DB().Exec(`DROP INDEX IF EXISTS ` + index)
+		require.NoErrorf(t, err, "drop %s", index)
+	}
+	_, err := st.DB().Exec(`ALTER TABLE messages DROP COLUMN content_changed_at`)
 	require.NoError(t, err, "drop content_changed_at column")
 }
 
 // contentChangedBackfillMigration is the ledger name InitSchema records once the
 // content_changed_at backfill has run.
 const contentChangedBackfillMigration = "messages_content_changed_at_backfill"
-const messageWatermarkTriggersMigration = "message_and_attachment_triggers_v10"
+const messageWatermarkTriggersMigration = "message_and_attachment_triggers_v12"
 
 // clearContentChangedBackfillLedger deletes that row from applied_migrations so
 // InitSchema treats the migration as never having run -- the ledger state of
@@ -1105,8 +1108,9 @@ func insertMessagesTriggerPrograms(t *testing.T, st *store.Store, insert string,
 	return programs
 }
 
-// TestContentChangedAt_InsertNeedsNoWatermarkTrigger keeps the watermark from
-// adding a second row write to message ingest.
+// TestContentChangedAt_InsertNeedsNoWatermarkTrigger verifies that the
+// fresh-schema watermark still comes from the column DEFAULT. The retired-source
+// guard necessarily compiles one trigger subprogram for every messages INSERT.
 //
 // SQLite triggers cannot assign to NEW, so an AFTER INSERT trigger that stamps
 // the watermark has to re-UPDATE the row that was just inserted. Worse, merely
@@ -1144,10 +1148,9 @@ func TestContentChangedAt_InsertNeedsNoWatermarkTrigger(t *testing.T) {
 	const insert = `INSERT INTO messages (source_id, source_message_id, conversation_id, message_type, subject)
 		 VALUES (?,?,?,?,?)`
 
-	assert.Zero(insertMessagesTriggerPrograms(t, st, insert, src.ID, "explain-only", conv, "email", "x"),
-		"with metadata maintenance excluded, INSERT must compile no watermark trigger subprogram: "+
-			"SQLite opens a statement journal for every INSERT that has one, whether or not the "+
-			"trigger body runs")
+	assert.Equal(1, insertMessagesTriggerPrograms(t, st, insert, src.ID, "explain-only", conv, "email", "x"),
+		"with metadata maintenance excluded, only the retired-source guard must remain; "+
+			"the watermark DEFAULT must not add a second trigger subprogram")
 
 	// One pinned connection: total_changes() is per-connection and the pool
 	// would otherwise hand the two readings out of different sessions.

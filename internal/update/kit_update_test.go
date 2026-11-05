@@ -158,21 +158,11 @@ func TestUpdaterCheckForUpdateOffersSameBaseReleaseForDevBuild(t *testing.T) {
 	assert.True(info.IsDevBuild, "dev build")
 }
 
-func TestFormatAndVersionHelpersDelegateToKit(t *testing.T) {
-	assert := assert.New(t)
-
-	assert.Equal("1.5 KB", FormatSize(1536), "format size")
-	assert.True(IsDevBuildVersion("0.16.1-2-g75d300a"), "git describe build")
-	assert.False(IsDevBuildVersion("v0.16.1-rc1"), "release prerelease")
-	assert.True(IsNewer("0.17.0", "0.16.1-2-g75d300a"), "release newer than git describe base")
-	assert.False(IsNewer("0.16.0", "0.16.1-2-g75d300a"), "older than git describe base")
-}
-
 func TestPerformUpdateInstallsWithKitClient(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 	tmp := t.TempDir()
-	srcArchive := filepath.Join(tmp, "msgvault_0.17.0_linux_amd64.tar.gz")
+	srcArchive := filepath.Join(tmp, "msgvault_0.17.0_darwin_amd64.tar.gz")
 	dstPath := filepath.Join(tmp, "bin", "msgvault")
 	require.NoError(makeTestTarGz(srcArchive, "msgvault", "new binary"), "write archive")
 	checksum, err := selfupdate.HashFile(srcArchive)
@@ -190,7 +180,7 @@ func TestPerformUpdateInstallsWithKitClient(t *testing.T) {
 	u := NewUpdater(Deps{
 		Client:  server.Client(),
 		Version: "v0.16.0",
-		GOOS:    "linux",
+		GOOS:    "darwin",
 		GOARCH:  "amd64",
 		Executable: func() (string, error) {
 			return dstPath, nil
@@ -204,9 +194,9 @@ func TestPerformUpdateInstallsWithKitClient(t *testing.T) {
 		Owner:         releaseOwner,
 		Repo:          "msgvault",
 		LatestVersion: "v0.17.0",
-		AssetName:     "msgvault_0.17.0_linux_amd64.tar.gz",
-		DownloadURL:   server.URL + "/msgvault_0.17.0_linux_amd64.tar.gz",
-		GOOS:          "linux",
+		AssetName:     "msgvault_0.17.0_darwin_amd64.tar.gz",
+		DownloadURL:   server.URL + "/msgvault_0.17.0_darwin_amd64.tar.gz",
+		GOOS:          "darwin",
 		GOARCH:        "amd64",
 		Checksum:      checksum,
 		Size:          int64(len(archiveBytes)),

@@ -2,6 +2,7 @@ package beeper
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"strings"
 	"testing"
@@ -15,11 +16,115 @@ import (
 	"go.kenn.io/msgvault/internal/testutil"
 )
 
+func TestRepairAfterMergePreservesCopiedAttachmentClassification(t *testing.T) {
+	t.Parallel()
+	require := require.New(t)
+	assert := assert.New(t)
+	const (
+		liveAccount     = "signal-live"
+		historyAccount  = "signal-history"
+		liveMediaRef    = "mxc://beeper.local/live-photo"
+		historyMediaRef = "mxc://beeper.local/history-photo"
+	)
+	mediaBytes := []byte("same synthetic media bytes")
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	chat := func(accountID, mediaRef string) *fakeChat {
+		return &fakeChat{
+			ID: "!merge-repair:beeper.local", AccountID: accountID, Network: "Signal",
+			Title: "Merge repair", Type: "single", LastActivity: base,
+			Participants: []map[string]any{
+				{"id": "@self:beeper.local", "fullName": "Example Owner", "isSelf": true},
+				{"id": "@sender:beeper.local", "fullName": "Example Sender", "email": "sender@example.test"},
+			},
+			Msgs: []fakeMsg{{
+				ID: "message-1", SortKey: 1, Timestamp: base, Text: "same synthetic message",
+				SenderID: "@sender:beeper.local", SenderName: "Example Sender",
+				Attachments: []map[string]any{{
+					"id": mediaRef, "type": "img", "mimeType": "image/png",
+					"fileName": "photo.png", "fileSize": len(mediaBytes),
+				}},
+			}},
+		}
+	}
+
+	f := newFakeBeeper(t)
+	ch := chat(liveAccount, liveMediaRef)
+	f.addChat(ch)
+	f.setAsset(liveMediaRef, mediaBytes)
+	f.setAsset(historyMediaRef, mediaBytes)
+	imp, st, done := newTestImporter(t, f)
+	defer done()
+	attachmentsDir := t.TempDir()
+
+	_, err := imp.Import(t.Context(), ImportOptions{AccountID: liveAccount, AttachmentsDir: attachmentsDir})
+	require.NoError(err)
+	ch.AccountID = historyAccount
+	ch.Msgs[0].Attachments[0]["id"] = historyMediaRef
+	ch.Msgs[0].Attachments[0]["fileName"] = "historical-photo.png"
+	_, err = imp.Import(t.Context(), ImportOptions{AccountID: historyAccount, AttachmentsDir: attachmentsDir})
+	require.NoError(err)
+
+	liveSource, err := st.GetOrCreateSource("beeper", liveAccount)
+	require.NoError(err)
+	historySource, err := st.GetOrCreateSource("beeper", historyAccount)
+	require.NoError(err)
+	merge, err := st.MergeSourcesContext(t.Context(), store.MergeSourcesRequest{
+		FromSourceID: historySource.ID, IntoSourceID: liveSource.ID,
+	})
+	require.NoError(err)
+	assert.Equal(int64(1), merge.DuplicatesHidden)
+	assert.Equal(int64(1), merge.AttachmentsCopied)
+
+	var liveMessageID, liveAttachmentID, preservedAttachmentID int64
+	require.NoError(st.DB().QueryRow(st.Rebind(`
+			SELECT id FROM messages WHERE source_id = ? AND source_message_id = ?`),
+		liveSource.ID, "message-1").Scan(&liveMessageID))
+	require.NoError(st.DB().QueryRow(st.Rebind(`
+			SELECT id FROM attachments WHERE message_id = ? AND source_attachment_id = ?`),
+		liveMessageID, beeperAttachmentID(liveMediaRef)).Scan(&liveAttachmentID))
+	require.NoError(st.DB().QueryRow(st.Rebind(`
+			SELECT a.id FROM attachments a
+			JOIN source_merge_preserved_attachments spa ON spa.attachment_id = a.id
+			WHERE a.message_id = ?`), liveMessageID).Scan(&preservedAttachmentID))
+	var preservedSourceAttachmentID, preservedRoleBefore, preservedRoleSourceBefore string
+	require.NoError(st.DB().QueryRow(st.Rebind(`
+			SELECT source_attachment_id, attachment_role, role_source
+			FROM attachments WHERE id = ?`), preservedAttachmentID).
+		Scan(&preservedSourceAttachmentID, &preservedRoleBefore, &preservedRoleSourceBefore))
+	assert.Equal(beeperAttachmentID(historyMediaRef), preservedSourceAttachmentID)
+	assert.Equal("standalone", preservedRoleBefore)
+	assert.Equal("importer_semantics", preservedRoleSourceBefore)
+	_, err = st.DB().Exec(st.Rebind(`
+		UPDATE attachments SET attachment_role = 'unknown', role_source = 'unknown'
+		WHERE id = ?`), liveAttachmentID)
+	require.NoError(err)
+
+	sum, err := imp.RepairSource(t.Context(), liveSource.ID, nil)
+	require.NoError(err)
+	assert.Positive(sum.MessagesScanned)
+	assert.Positive(sum.AttachmentsTagged)
+	assert.Zero(sum.Errors)
+
+	var preservedRole, preservedRoleSource string
+	require.NoError(st.DB().QueryRow(st.Rebind(`
+			SELECT attachment_role, role_source FROM attachments WHERE id = ?`),
+		preservedAttachmentID).Scan(&preservedRole, &preservedRoleSource))
+	assert.Equal("standalone", preservedRole)
+	assert.Equal("importer_semantics", preservedRoleSource)
+
+	var liveRole string
+	require.NoError(st.DB().QueryRow(st.Rebind(`
+			SELECT attachment_role FROM attachments WHERE message_id = ? AND source_attachment_id = ?`),
+		liveMessageID, beeperAttachmentID(liveMediaRef)).Scan(&liveRole))
+	assert.Equal("standalone", liveRole)
+}
+
 // TestRepairArchiveRewritesStaleDerivedRows covers repairing an archive
 // written before HTML was converted and before shares were classified: the
 // pass must reach both from the stored payload alone, without contacting
 // Beeper Desktop.
 func TestRepairArchiveRewritesStaleDerivedRows(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -140,6 +245,7 @@ func TestRepairArchiveRewritesStaleDerivedRows(t *testing.T) {
 }
 
 func TestRepairArchiveRollsBackDerivedTextTogether(t *testing.T) {
+	t.Parallel()
 	testutil.SkipIfPostgres(t, "SQLite trigger injects a failure after the body write")
 	require := require.New(t)
 	assert := assert.New(t)
@@ -186,6 +292,7 @@ func TestRepairArchiveRollsBackDerivedTextTogether(t *testing.T) {
 }
 
 func TestRepairSourceResumesFromLastSuccessfulRowAfterFailure(t *testing.T) {
+	t.Parallel()
 	testutil.SkipIfPostgres(t, "SQLite trigger injects a row-level repair failure")
 	require := require.New(t)
 	assert := assert.New(t)
@@ -244,6 +351,7 @@ func TestRepairSourceResumesFromLastSuccessfulRowAfterFailure(t *testing.T) {
 }
 
 func TestRepairArchiveRefreshesSnippetAndFTSWhenBodyIsCurrent(t *testing.T) {
+	t.Parallel()
 	testutil.SkipIfPostgres(t, "directly corrupts the SQLite FTS5 table")
 	require := require.New(t)
 	assert := assert.New(t)
@@ -284,6 +392,7 @@ func TestRepairArchiveRefreshesSnippetAndFTSWhenBodyIsCurrent(t *testing.T) {
 }
 
 func TestSyncReportsIncompleteRepair(t *testing.T) {
+	t.Parallel()
 	testutil.SkipIfPostgres(t, "SQLite trigger injects a row-level metadata failure")
 	require := require.New(t)
 	assert := assert.New(t)
@@ -314,6 +423,7 @@ func TestSyncReportsIncompleteRepair(t *testing.T) {
 // TestRepairArchiveLeavesStoredMediaAlone covers the pass rewriting only
 // derived columns: a repair must never disturb downloaded blobs.
 func TestRepairArchiveLeavesStoredMediaAlone(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -390,6 +500,7 @@ func shareAndHTMLChat() *fakeChat {
 // without the user knowing a repair exists. The ledger then keeps later syncs
 // from repeating the work.
 func TestSyncHealsRowsFromAnOlderBuild(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -429,6 +540,7 @@ func TestSyncHealsRowsFromAnOlderBuild(t *testing.T) {
 }
 
 func TestSyncRunsCurrentRepairAfterV2WasApplied(t *testing.T) {
+	t.Parallel()
 	testutil.SkipIfPostgres(t, "directly corrupts the SQLite FTS5 table")
 	require := require.New(t)
 	assert := assert.New(t)
@@ -486,24 +598,48 @@ func beeperSourceID(t *testing.T, st *store.Store) int64 {
 	return id
 }
 
+func seedArchivedBeeperMessages(t *testing.T, st *store.Store, sourceID, conversationID int64, count int) {
+	t.Helper()
+	tx, err := st.DB().BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	timestamp := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := range count {
+		providerID := fmt.Sprintf("archived-%d", i)
+		var id int64
+		require.NoError(t, tx.QueryRowContext(t.Context(), st.Rebind(`
+			INSERT INTO messages (conversation_id, source_id, source_message_id, message_type)
+			VALUES (?, ?, ?, 'beeper') RETURNING id`), conversationID, sourceID, providerID).Scan(&id))
+		raw, err := json.Marshal(Message{ID: providerID, Text: "current body", SenderName: "Example Sender", Timestamp: timestamp})
+		require.NoError(t, err)
+		_, err = tx.ExecContext(t.Context(), st.Rebind(`
+			INSERT INTO message_raw (message_id, raw_data, raw_format, compression)
+			VALUES (?, ?, ?, 'none')`), id, raw, rawArchiveFormat)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tx.Commit())
+}
+
 func TestRepairSourceResumesAfterCanceledBatch(t *testing.T) {
+	t.Parallel()
 	require := require.New(t)
 	assert := assert.New(t)
-	f := newFakeBeeper(t)
-	f.addChat(budgetTestChat("!repair:beeper.local", repairBatchSize+1, time.Now().Add(-72*time.Hour)))
-	imp, st, done := newTestImporter(t, f)
-	defer done()
-	_, err := imp.Import(t.Context(), ImportOptions{AccountID: "signal"})
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("beeper", "signal")
 	require.NoError(err)
-	_, err = st.DB().Exec(`UPDATE message_bodies SET body_text = 'stale'`)
+	conversationID, err := st.EnsureConversation(source.ID, "!repair:beeper.local", "Repair")
 	require.NoError(err)
-	sourceID := beeperSourceID(t, st)
+	seedArchivedBeeperMessages(t, st, source.ID, conversationID, repairBatchSize+1)
+	_, err = st.DB().Exec(st.Rebind(`INSERT INTO message_bodies (message_id, body_text)
+		SELECT id, 'stale' FROM messages WHERE source_id = ?`), source.ID)
+	require.NoError(err)
+	imp := NewImporter(st, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	sum, err := imp.RepairSource(ctx, sourceID, func(string) { cancel() })
+	sum, err := imp.RepairSource(ctx, source.ID, func(string) { cancel() })
 	require.ErrorIs(err, context.Canceled)
 	assert.EqualValues(repairBatchSize, sum.BodiesRewritten)
-	sum, err = imp.RepairSource(t.Context(), sourceID, nil)
+	sum, err = imp.RepairSource(t.Context(), source.ID, nil)
 	require.NoError(err)
 	assert.EqualValues(1, sum.MessagesScanned, "resume starts after the committed batch")
 	assert.EqualValues(1, sum.BodiesRewritten, "the final row gets repaired")

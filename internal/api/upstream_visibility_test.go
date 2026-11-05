@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/meetingcontent"
+	"go.kenn.io/msgvault/internal/vector"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -65,4 +66,72 @@ func TestNativeInferenceLoginKeepsOIDCAdminOwnersSeparate(t *testing.T) {
 	assertions.NotContains(first, "qa-one")
 	_, ok = ownerFor("")
 	assertions.False(ok, "an unbound bearer token cannot share the API-key owner's login")
+}
+
+func TestEmbeddingCoverageUsesExistingSourceVisibility(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	f := newVisibilityFixture(t)
+	requested := []int64{}
+	f.srv.SetEmbeddingStatus(func(_ context.Context, sourceID int64) (vector.EmbeddingStatus, error) {
+		requested = append(requested, sourceID)
+		return vector.EmbeddingStatus{Eligible: 10, Current: 8, Pending: 2, Failed: 99, WindowBatches: 3, WindowSeconds: 1, Diagnostics: &vector.EmbeddingDiagnostics{}}, nil
+	}, 3)
+	response := performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status", nil, withKey("alice-secret-value"), false)
+	requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+	var status vector.EmbeddingStatus
+	requirements.NoError(decodeJSONBody(response, &status))
+	assertions.Equal([]int64{f.one}, requested)
+	assertions.Equal(f.one, status.SourceID)
+	assertions.Equal(int64(10), status.Eligible)
+	assertions.Equal(int64(8), status.Current)
+	assertions.Equal(int64(2), status.Pending)
+	assertions.Zero(status.Failed)
+	assertions.Nil(status.Diagnostics)
+	assertions.Nil(status.MessagesPerMinute)
+	assertions.Zero(status.WindowBatches)
+	response = performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status?source_id="+itoa(f.two), nil, withKey("alice-secret-value"), false)
+	assertions.Equal(http.StatusBadRequest, response.Code)
+	assertions.Equal([]int64{f.one}, requested, "hidden sources never reach the reader")
+	requirements.NoError(f.st.SetUserSources(t.Context(), f.alice.ID, []int64{f.one, f.two}))
+	f.srv.visibility.reset()
+	response = performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status", nil, withKey("alice-secret-value"), false)
+	requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+	requirements.NoError(decodeJSONBody(response, &status))
+	assertions.Equal(int64(20), status.Eligible, "default coverage sums the caller's available sources")
+	assertions.Equal(int64(16), status.Current)
+	assertions.Equal(int64(4), status.Pending)
+	assertions.Nil(status.Diagnostics)
+	response = performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status?source_id="+itoa(f.two), nil, withKey("alice-secret-value"), false)
+	requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+	assertions.Equal([]int64{f.one, f.one, f.two, f.two}, requested)
+	response = performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status", nil, withKey("admin-secret-value"), false)
+	requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+	requirements.NoError(decodeJSONBody(response, &status))
+	assertions.Equal(int64(99), status.Failed, "native Administrator diagnostics remain intact")
+	assertions.NotNil(status.Diagnostics)
+}
+
+func TestEmbeddingCoverageEmptyScopeAndGenerationSwitch(t *testing.T) {
+	assertions := assert.New(t)
+	requirements := require.New(t)
+	f := newVisibilityFixture(t)
+	calls := 0
+	f.srv.SetEmbeddingStatus(func(_ context.Context, sourceID int64) (vector.EmbeddingStatus, error) {
+		calls++
+		return vector.EmbeddingStatus{Generation: vector.EmbeddingGenerationStatus{ID: vector.GenerationID(sourceID), State: "active"}, Eligible: 50}, nil
+	}, 3)
+	requirements.NoError(f.st.SetUserSources(t.Context(), f.alice.ID, []int64{}))
+	f.srv.visibility.reset()
+	response := performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status", nil, withKey("alice-secret-value"), false)
+	requirements.Equal(http.StatusOK, response.Code, response.Body.String())
+	var status vector.EmbeddingStatus
+	requirements.NoError(decodeJSONBody(response, &status))
+	assertions.Zero(status.Eligible)
+	assertions.Zero(calls, "no source binding must never request global coverage")
+	requirements.NoError(f.st.SetUserSources(t.Context(), f.alice.ID, []int64{f.one, f.two}))
+	f.srv.visibility.reset()
+	response = performSessionRequest(t, f.srv, http.MethodGet, "/api/v1/embeddings/status", nil, withKey("alice-secret-value"), false)
+	assertions.Equal(http.StatusServiceUnavailable, response.Code, "mixed generations cannot be added into one coverage answer")
+	assertions.Contains(response.Body.String(), "generation changed")
 }

@@ -720,6 +720,25 @@ func (d DiscoverEventType) Validate() error {
 	}
 }
 
+type DocbankAttachmentStatusState string
+
+const (
+	ConsentOff                          DocbankAttachmentStatusState = "consent_off"
+	DocbankAttachmentStatusStateRunning DocbankAttachmentStatusState = "running"
+	DocbankDisabled                     DocbankAttachmentStatusState = "docbank_disabled"
+	WorkerUnavailable                   DocbankAttachmentStatusState = "worker_unavailable"
+)
+
+// Validate checks if the DocbankAttachmentStatusState value is valid
+func (d DocbankAttachmentStatusState) Validate() error {
+	switch d {
+	case ConsentOff, DocbankAttachmentStatusStateRunning, DocbankDisabled, WorkerUnavailable:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid DocbankAttachmentStatusState value, got: %v", d))
+	}
+}
+
 type EmailWorkActionPreviewKind string
 
 const (
@@ -894,6 +913,7 @@ const (
 	ExploreFilterDimensionDeletion    ExploreFilterDimension = "deletion"
 	ExploreFilterDimensionDomain      ExploreFilterDimension = "domain"
 	ExploreFilterDimensionIdentity    ExploreFilterDimension = "identity"
+	ExploreFilterDimensionKind        ExploreFilterDimension = "kind"
 	ExploreFilterDimensionMailingList ExploreFilterDimension = "mailing_list"
 	ExploreFilterDimensionMessageType ExploreFilterDimension = "message_type"
 	ExploreFilterDimensionParticipant ExploreFilterDimension = "participant"
@@ -906,7 +926,7 @@ const (
 // Validate checks if the ExploreFilterDimension value is valid
 func (e ExploreFilterDimension) Validate() error {
 	switch e {
-	case Account, ExploreFilterDimensionAccount, ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionSource, HandlingState, ReadState, RowUnit:
+	case Account, ExploreFilterDimensionAccount, ExploreFilterDimensionAfter, ExploreFilterDimensionBefore, ExploreFilterDimensionDeletion, ExploreFilterDimensionDomain, ExploreFilterDimensionIdentity, ExploreFilterDimensionKind, ExploreFilterDimensionMailingList, ExploreFilterDimensionMessageType, ExploreFilterDimensionParticipant, ExploreFilterDimensionSource, HandlingState, ReadState, RowUnit:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ExploreFilterDimension value, got: %v", e))
@@ -916,6 +936,7 @@ func (e ExploreFilterDimension) Validate() error {
 type ExploreGroupDimension string
 
 const (
+	ExploreGroupDimensionDay         ExploreGroupDimension = "day"
 	ExploreGroupDimensionDomain      ExploreGroupDimension = "domain"
 	ExploreGroupDimensionKind        ExploreGroupDimension = "kind"
 	ExploreGroupDimensionMailingList ExploreGroupDimension = "mailing_list"
@@ -929,10 +950,30 @@ const (
 // Validate checks if the ExploreGroupDimension value is valid
 func (e ExploreGroupDimension) Validate() error {
 	switch e {
-	case ExploreGroupDimensionDomain, ExploreGroupDimensionKind, ExploreGroupDimensionMailingList, ExploreGroupDimensionMessageType, ExploreGroupDimensionMonth, ExploreGroupDimensionParticipant, ExploreGroupDimensionSource, ExploreGroupDimensionYear:
+	case ExploreGroupDimensionDay, ExploreGroupDimensionDomain, ExploreGroupDimensionKind, ExploreGroupDimensionMailingList, ExploreGroupDimensionMessageType, ExploreGroupDimensionMonth, ExploreGroupDimensionParticipant, ExploreGroupDimensionSource, ExploreGroupDimensionYear:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ExploreGroupDimension value, got: %v", e))
+	}
+}
+
+type ExploreGroupRowLevel string
+
+const (
+	ExploreGroupRowLevelFirstQuartile  ExploreGroupRowLevel = "FIRST_QUARTILE"
+	ExploreGroupRowLevelFourthQuartile ExploreGroupRowLevel = "FOURTH_QUARTILE"
+	ExploreGroupRowLevelNone           ExploreGroupRowLevel = "NONE"
+	ExploreGroupRowLevelSecondQuartile ExploreGroupRowLevel = "SECOND_QUARTILE"
+	ExploreGroupRowLevelThirdQuartile  ExploreGroupRowLevel = "THIRD_QUARTILE"
+)
+
+// Validate checks if the ExploreGroupRowLevel value is valid
+func (e ExploreGroupRowLevel) Validate() error {
+	switch e {
+	case ExploreGroupRowLevelFirstQuartile, ExploreGroupRowLevelFourthQuartile, ExploreGroupRowLevelNone, ExploreGroupRowLevelSecondQuartile, ExploreGroupRowLevelThirdQuartile:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ExploreGroupRowLevel value, got: %v", e))
 	}
 }
 
@@ -988,6 +1029,7 @@ func (e ExploreGroupsHTTPRequestPresentation) Validate() error {
 	}
 }
 
+// ExploreGroupsHTTPRequestSearchMode Search mode; pipe OR is full_text only
 type ExploreGroupsHTTPRequestSearchMode string
 
 const (
@@ -1024,6 +1066,7 @@ func (e ExploreHTTPRequestPresentation) Validate() error {
 	}
 }
 
+// ExploreHTTPRequestSearchMode Search mode; pipe OR is full_text only
 type ExploreHTTPRequestSearchMode string
 
 const (
@@ -1549,6 +1592,25 @@ func (m MessageTranscriptOrigin) Validate() error {
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessageTranscriptOrigin value, got: %v", m))
+	}
+}
+
+type MessagingRouteStatus string
+
+const (
+	ArchiveVerified MessagingRouteStatus = "archive_verified"
+	GroupContext    MessagingRouteStatus = "group_context"
+	MergedContainer MessagingRouteStatus = "merged_container"
+	Unresolved      MessagingRouteStatus = "unresolved"
+)
+
+// Validate checks if the MessagingRouteStatus value is valid
+func (m MessagingRouteStatus) Validate() error {
+	switch m {
+	case ArchiveVerified, GroupContext, MergedContainer, Unresolved:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid MessagingRouteStatus value, got: %v", m))
 	}
 }
 
@@ -2814,6 +2876,7 @@ const (
 	SavedViewFilterFieldHandlingState SavedViewFilterField = "handling_state"
 	SavedViewFilterFieldIdentity      SavedViewFilterField = "identity"
 	SavedViewFilterFieldInboxState    SavedViewFilterField = "inbox_state"
+	SavedViewFilterFieldKind          SavedViewFilterField = "kind"
 	SavedViewFilterFieldMailingList   SavedViewFilterField = "mailing_list"
 	SavedViewFilterFieldMessageType   SavedViewFilterField = "message_type"
 	SavedViewFilterFieldParticipant   SavedViewFilterField = "participant"
@@ -2827,7 +2890,7 @@ const (
 // Validate checks if the SavedViewFilterField value is valid
 func (s SavedViewFilterField) Validate() error {
 	switch s {
-	case SavedViewFilterFieldAccount, SavedViewFilterFieldAfter, SavedViewFilterFieldBefore, SavedViewFilterFieldDeletion, SavedViewFilterFieldDomain, SavedViewFilterFieldHandlingState, SavedViewFilterFieldIdentity, SavedViewFilterFieldInboxState, SavedViewFilterFieldMailingList, SavedViewFilterFieldMessageType, SavedViewFilterFieldParticipant, SavedViewFilterFieldParticipantID, SavedViewFilterFieldReadState, SavedViewFilterFieldRowUnit, SavedViewFilterFieldSource, SavedViewFilterFieldSourceID:
+	case SavedViewFilterFieldAccount, SavedViewFilterFieldAfter, SavedViewFilterFieldBefore, SavedViewFilterFieldDeletion, SavedViewFilterFieldDomain, SavedViewFilterFieldHandlingState, SavedViewFilterFieldIdentity, SavedViewFilterFieldInboxState, SavedViewFilterFieldKind, SavedViewFilterFieldMailingList, SavedViewFilterFieldMessageType, SavedViewFilterFieldParticipant, SavedViewFilterFieldParticipantID, SavedViewFilterFieldReadState, SavedViewFilterFieldRowUnit, SavedViewFilterFieldSource, SavedViewFilterFieldSourceID:
 		return nil
 	default:
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid SavedViewFilterField value, got: %v", s))
@@ -3227,7 +3290,7 @@ func (t TaskIntegrationStatusResponseState) Validate() error {
 	}
 }
 
-// TelemetryEventResponseStatus queued when accepted, including suppressed daily screen duplicates or invalid screen names; disabled when telemetry is off
+// TelemetryEventResponseStatus queued when accepted, including suppressed daily screen_viewed and message_opened duplicates or invalid screen names; disabled when telemetry is off
 type TelemetryEventResponseStatus string
 
 const (

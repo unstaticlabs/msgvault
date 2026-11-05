@@ -230,3 +230,35 @@ func TestEmailWorkNativeProjectionLifecycle(t *testing.T) {
 	_, err = os.Stat(CacheStatePath(e.analyticsDir))
 	assertions.NoError(err, "Close preserves the committed archive publication")
 }
+
+func TestEmailWorkMemoKeepsUnrestrictedAndEmptyAuthoritySeparateWithJSONV2(t *testing.T) {
+	for _, emptyFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty-first=%t", emptyFirst), func(t *testing.T) {
+			assertions, requirements := assert.New(t), require.New(t)
+			engine := emailWorkPopulationFixture(t)
+			read := func(sources []int64) *emailWorkPopulation {
+				release, err := engine.acquireQuerySlot(t.Context())
+				requirements.NoError(err)
+				defer release()
+				population, err := engine.emailWorkPopulationLocked(t.Context(), EmailWorkScope{SourceIDs: sources, AuthorityKey: "same-effective-authority"})
+				requirements.NoError(err)
+				return population
+			}
+			var all, none *emailWorkPopulation
+			if emptyFirst {
+				none = read([]int64{})
+				all = read(nil)
+			} else {
+				all = read(nil)
+				none = read([]int64{})
+			}
+			assertions.Len(all.activities, 3, "unrestricted reads retain the real authorized archive population")
+			assertions.Len(all.components, 1)
+			assertions.Empty(none.activities, "an explicit empty binding must not borrow a primed all-source population")
+			assertions.Empty(none.components)
+			assertions.NotSame(all, none)
+			assertions.Same(all, read(nil))
+			assertions.Same(none, read([]int64{}))
+		})
+	}
+}

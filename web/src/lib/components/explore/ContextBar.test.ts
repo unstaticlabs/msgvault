@@ -8,7 +8,7 @@ import { chooseSelectOption } from '../../../test/kit-ui';
 const sort = { options: [{ value: 'newest', label: 'Newest first' }], value: 'newest' };
 
 describe('ContextBar presentation control', () => {
-  it('exposes Table, Timeline, and Files as one keyboard-operable Show-as control', async () => {
+  it('shows presentation and sort choices and changes Table to Timeline', async () => {
     const onPresentationChange = vi.fn();
     render(ContextBar, {
       client: createAPIClient(vi.fn<typeof fetch>()),
@@ -46,6 +46,7 @@ describe('ContextBar chips', () => {
       onRemoveQuery, onRemoveFilter
     });
     expect(screen.getByText('Full text: “network”')).toBeTruthy();
+    expect(screen.getByTitle('Full text: “network”')).toBeTruthy();
     expect(screen.getByText('Source: 7')).toBeTruthy();
     expect(screen.queryByText(/full_text/)).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: 'Remove search' }));
@@ -93,6 +94,18 @@ describe('ContextBar chips', () => {
 });
 
 describe('ContextBar grouping picker', () => {
+  it('hides presentation and grouping choices for a locked filter', () => {
+    render(ContextBar, {
+      client: createAPIClient(vi.fn()),
+      query: '', searchMode: 'full_text', filters: [], groupingChain: [],
+      lockedFilter: { dimension: 'participant', values: ['1'] },
+      countLabel: '', sort,
+      onAddGroup: vi.fn(), onRemoveGroup: vi.fn(), onClearFilters: vi.fn(), onFiltersChange: vi.fn()
+    });
+    expect(screen.queryByRole('combobox', { name: /^Show as:/ })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Group by' })).toBeNull();
+  });
+
   it.each([
     [[], 'Group by'],
     [['participant'], 'Add grouping']
@@ -134,6 +147,18 @@ describe('ContextBar grouping picker', () => {
 });
 
 describe('Mailbox filters', () => {
+  it('keeps mailbox choices inside the native message Filter menu', async () => {
+    const onFiltersChange = vi.fn();
+    render(ContextBar, { countLabel: '0 items', messages: true,
+      client: createAPIClient(vi.fn<typeof fetch>(async () => Response.json({ sources: [], rows: [] }))),
+      query: '', searchMode: 'full_text', filters: [], groupingChain: [],
+      onAddGroup: vi.fn(), onRemoveGroup: vi.fn(), onClearFilters: vi.fn(), onFiltersChange,
+    });
+    await fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
+    await chooseSelectOption(screen.getByRole('combobox', { name: 'Inbox: All inbox states' }), 'In inbox');
+    expect(onFiltersChange).toHaveBeenCalledWith([{ dimension: 'inbox_state', values: ['inbox'] }]);
+    expect(screen.getByRole('combobox', { name: 'Read status: All read states' })).toBeDefined();
+  });
   it('adds Inbox while retaining the account union and participant context', async () => {
     const onFiltersChange = vi.fn();
     render(ContextBar, { countLabel: '0 items',

@@ -27,6 +27,7 @@ provide different ways to use the same archive.
   from the task, including formatting and generated output.
 - Pull requests must have a user-facing benefit or improve the developer
   experience, and the body must say which one.
+- Write issues and pull requests in English.
 - Keep PR descriptions focused on the problem, resulting behavior, and review
   boundaries. Do not add `Validation`, `Test plan`, or equivalent command-run
   sections; CI carries routine check results.
@@ -54,6 +55,9 @@ provide different ways to use the same archive.
   proposals, and historical decisions. Preserve rationale, approvals, and active
   exceptions with their removal conditions; label superseded designs and keep
   them outside normal navigation.
+- Release notes state what changed for the reader. Put any required action in
+  the entry for that change. Do not add precautionary warnings, upgrade
+  checklists, or internals such as schema versions.
 - Keep the website, its Markdown companions, README, and documentation on
   message. Distinguish the latest release from newer `main` functionality.
   Follow [docs/README.md](docs/README.md) for the publishing layout and checks.
@@ -78,7 +82,11 @@ Use these as reasoning checkpoints, not a requirement to create a design doc.
 
 - Use `make build` for a worktree binary. `make install` changes the user's
   installed binary and needs intentional authorization.
-- All `go test` invocations need `-tags "fts5 sqlite_vec"`; prefer `make test`.
+- Tests that construct configuration directly must set `Data.DataDir` to a
+  temporary directory before writing or purging attachments. Changing
+  `HomeDir` after `config.NewDefaultConfig()` does not change `Data.DataDir`.
+- All `go test` invocations need `-tags "fts5 sqlite_vec"`. Run the packages you
+  changed; `make test` (and CI) runs the full suite.
   PostgreSQL tests use the targets documented in [Development](docs/development.md).
   The PostgreSQL-only library profile is the exception: use `make test-pg-nocgo`,
   which omits native-driver tags and disables CGO.
@@ -96,6 +104,12 @@ Use these as reasoning checkpoints, not a requirement to create a design doc.
   the commit message.
 - Do not write shell tests that grep scripts, workflows, config, or docs for
   expected implementation text. Use real execution or tool-native validation.
+- Never locate files from a path returned by `runtime.Caller` or a stack
+  trace; builds use `-trimpath`, so those paths are module-relative. Tests run
+  from their package directory, so use paths relative to it.
+- A test package that loads a named time zone must import `time/tzdata` in a
+  `_test.go` file. Trimmed builds cannot fall back to GOROOT's zone database,
+  and Windows has no system database.
 - A timeout may bound a wait for an observable transition. Do not make runner
   throughput a correctness requirement, such as ten polls within one second.
 
@@ -112,6 +126,16 @@ before publication. This exception does not permit reuse in ordinary tests.
 
 ## Code and SQL conventions
 
+- Parse every cron schedule with `cronexpr.Parser`, which is go-cron with five
+  fields and `DowOrDom`. Use go-cron's grammar and run times as they are. Do
+  not add parser rules, pre-checks, or daylight-saving workarounds. The only
+  exception is the comma-only field check in `ValidateCronExpr`; delete it if
+  go-cron starts rejecting those fields.
+- `web/src/lib/settings/cron.ts` mirrors go-cron and nothing else, and
+  `web/src/lib/settings/cron-corpus.json` holds both parsers to the same
+  answers. When go-cron changes, record its behaviour in the corpus first, then
+  update the browser parser to match. Never change the corpus to fit the
+  browser parser.
 - Increment `store.SchemaVersion` for any main archive schema change, including
   indexes, or required data migration. Embedded readers open without DDL and
   require completed setup at their exact expected version. See
