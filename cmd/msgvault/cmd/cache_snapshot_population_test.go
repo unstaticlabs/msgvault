@@ -159,6 +159,21 @@ func TestCSVIncrementalBuildExportsOnlyNewChildRows(t *testing.T) {
 				require.NoError(st.UpsertAttachment(id, "document.txt", "text/plain", "", fmt.Sprintf("hash-%d", i), 42))
 			}
 			addMessage(1)
+			// The parity helper requires a meaningful row in every required
+			// dataset, including local related-email evidence and recovery.
+			// Seed those before the baseline so the append below still tests
+			// only newly added source children, without a repair revision.
+			require.NoError(st.UpsertMessageRaw(1, []byte("Message-ID: <initial@example.test>\r\nFrom: Bob <bob@example.com>\r\nTo: Alice <alice@example.com>\r\n\r\nSynthetic initial message")))
+			seed, err := st.EmailWorkSeedForMessage(t.Context(), 1)
+			require.NoError(err)
+			snapshot, err := st.EmailWorkRecoverySnapshot(t.Context())
+			require.NoError(err)
+			_, err = st.CreateEmailWorkAction(t.Context(), store.EmailWorkActionInput{
+				UID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Kind: "handled",
+				Targets:  []store.EmailWorkActionTarget{{UID: seed.UID, SourceID: sourceID}},
+				Snapshot: snapshot, ActorKind: "user", ActorUserID: 7,
+			})
+			require.NoError(err)
 			require.NoError(st.Close())
 			_, err = buildCache(dbPath, incDir, true)
 			require.NoError(err)
