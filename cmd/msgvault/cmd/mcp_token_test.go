@@ -360,3 +360,104 @@ func TestMCPIndependentInboundTokenWithEnvironmentOnlyBackend(t *testing.T) {
 	}
 	assert.False(wrongBackendKey.Load())
 }
+
+// Exercise the real listener: checking only prepareMCPHTTP misses the second
+// address check after the backend connection has been established.
+func TestMCPRemoteListenerWithNamedKeyOrOIDC(t *testing.T) { //nolint:paralleltest // process environment and MCP flags
+	for _, mode := range []string{"named key", "OIDC resource"} {
+		t.Run(mode, func(t *testing.T) {
+			assert := assert.New(t)
+			require := require.New(t)
+			clearServerKeyEnvironment(t)
+			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("X-Api-Key") != "backend-key" {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/api/v1/health" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "api_schema_version": api.APISchemaVersion})
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			t.Cleanup(backend.Close)
+			home := t.TempDir()
+			cfg := &config.Config{
+				HomeDir: home,
+				Data:    config.DataConfig{DataDir: t.TempDir()},
+				Remote:  config.RemoteConfig{URL: backend.URL, APIKey: "backend-key", AllowInsecure: true},
+			}
+			if mode == "named key" {
+				cfg.Auth.APIKeys = []config.APIKeyConfig{{Name: "reader", Key: "reader-key", Role: "viewer"}}
+			} else {
+				cfg.Auth.OIDC = config.OIDCConfig{Issuer: "https://identity.example.test", Resource: "https://archive.example.test/mcp", ViewerGroups: []string{"archive-readers"}}
+			}
+			setMCPTokenTestFlags(t, nil)
+			mcpHTTPAddr = "0.0.0.0:0"
+			ctx, cancel := context.WithCancel(withStoreResolverConfig(t, cfg))
+			mcpCmd.SetContext(ctx)
+			done := make(chan error, 1)
+			go func() { done <- mcpCmd.RunE(mcpCmd, nil) }()
+			var stopped bool
+			t.Cleanup(func() {
+				cancel()
+				if stopped {
+					return
+				}
+				select {
+				case err := <-done:
+					assert.ErrorIs(err, context.Canceled)
+				case <-time.After(serveLifecycleTestTimeout):
+					assert.Fail("MCP did not stop")
+				}
+			})
+			var endpoint string
+			var startupErr error
+			require.Eventually(func() bool {
+				select {
+				case startupErr = <-done:
+					stopped = true
+					return true
+				default:
+				}
+				entries, err := mcpdiscovery.List(filepath.Join(home, "mcp"))
+				if err != nil || len(entries) != 1 {
+					return false
+				}
+				endpoint = entries[0].URL
+				return true
+			}, serveLifecycleTestTimeout, 20*time.Millisecond)
+			require.False(stopped, "MCP failed to start: %v", startupErr)
+			parsed, err := url.Parse(endpoint)
+			require.NoError(err)
+			_, port, err := net.SplitHostPort(parsed.Host)
+			require.NoError(err)
+			parsed.Host = net.JoinHostPort("127.0.0.1", port)
+			client := &http.Client{Timeout: serveLifecycleTestTimeout}
+			for _, token := range []string{"", "backend-key", "reader-key"} {
+				request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String(), strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example-client","version":"test"}}}`))
+				require.NoError(err)
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("Accept", "application/json, text/event-stream")
+				if token != "" {
+					request.Header.Set("Authorization", "Bearer "+token)
+				}
+				response, err := client.Do(request)
+				require.NoError(err)
+				body, err := io.ReadAll(response.Body)
+				require.NoError(err)
+				require.NoError(response.Body.Close())
+				if mode == "named key" && token == "reader-key" {
+					assert.Equal(http.StatusOK, response.StatusCode, string(body))
+					var initialized map[string]any
+					require.NoError(json.Unmarshal(body, &initialized))
+					assert.NotContains(initialized, "error")
+					assert.Contains(initialized, "result")
+				} else {
+					assert.Equal(http.StatusUnauthorized, response.StatusCode)
+				}
+			}
+		})
+	}
+}
