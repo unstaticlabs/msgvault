@@ -368,3 +368,40 @@ func readCalendarBoundarySnippet(t *testing.T, analyticsDir string) string {
 	require.True(got.Valid, "Parquet snippet must be non-NULL")
 	return got.String
 }
+
+// TestBuildCache_CalendarSentAtKeepsTheInstantForNonUTCEvents proves the
+// analytics cache holds the event's real instant. A 09:00+02:00 start is
+// 07:00Z; the cache must not keep the wall-clock 09:00 as if it were UTC.
+func TestBuildCache_CalendarSentAtKeepsTheInstantForNonUTCEvents(t *testing.T) {
+	require := require.New(t)
+	tmp := t.TempDir()
+	dbPath := filepath.Join(tmp, "msgvault.db")
+	analyticsDir := filepath.Join(tmp, "analytics")
+
+	st := testutil.NewSQLiteTestStoreAt(t, dbPath)
+	paris := time.FixedZone("", 2*60*60)
+	mock := gcal.NewMockAPI()
+	mock.Calendars = []gcal.Calendar{{ID: "primary", AccessRole: "owner"}}
+	mock.FullEvents["primary"] = [][]gcal.Event{{{
+		ID:     "ev-offset",
+		Status: gcal.StatusConfirmed,
+		Start:  gcal.EventDateTime{DateTime: time.Date(2026, 6, 2, 9, 0, 0, 0, paris), TimeZone: "Europe/Paris"},
+		End:    gcal.EventDateTime{DateTime: time.Date(2026, 6, 2, 9, 30, 0, 0, paris), TimeZone: "Europe/Paris"},
+	}}}
+	mock.FullSyncToken["primary"] = "T1"
+	_, err := calsync.New(mock, st, calsync.Options{AccountEmail: "alice@example.com"}).Full(context.Background())
+	require.NoError(err)
+	require.NoError(st.Close())
+
+	_, err = buildCache(dbPath, analyticsDir, false)
+	require.NoError(err)
+
+	duckdb, err := sql.Open("duckdb", "")
+	require.NoError(err)
+	defer func() { _ = duckdb.Close() }()
+	var sentAt time.Time
+	require.NoError(duckdb.QueryRow(
+		`SELECT sent_at FROM read_parquet(?, hive_partitioning=true) WHERE message_type = 'calendar_event'`,
+		filepath.Join(analyticsDir, "messages", "**", "*.parquet")).Scan(&sentAt))
+	require.Equal("2026-06-02T07:00:00Z", sentAt.UTC().Format(time.RFC3339))
+}
