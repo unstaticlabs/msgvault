@@ -279,11 +279,14 @@ func conversationKey(ev gcal.Event) string {
 // eventSentAt is the universal time axis: the event start, falling back to the
 // occurrence's original start (for cancellation tombstones that omit start).
 func eventSentAt(ev gcal.Event) sql.NullTime {
+	// Stored in UTC: SQLite keeps a zoned time as local text with an offset,
+	// and the analytics cache reads that text as UTC, shifting every event by
+	// its zone offset.
 	if t, ok := ev.Start.Instant(); ok {
-		return sql.NullTime{Time: t, Valid: true}
+		return sql.NullTime{Time: t.UTC(), Valid: true}
 	}
 	if t, ok := ev.OriginalStartTime.Instant(); ok {
-		return sql.NullTime{Time: t, Valid: true}
+		return sql.NullTime{Time: t.UTC(), Valid: true}
 	}
 	return sql.NullTime{}
 }
