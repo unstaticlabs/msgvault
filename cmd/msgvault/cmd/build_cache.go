@@ -2002,10 +2002,6 @@ func identityColumns(columns ...string) map[string]bool {
 }
 
 func openCacheSourceSnapshot(duckDB *sql.DB, dbPath string) (*cacheSourceSnapshot, error) {
-	// Offset-free SQLite timestamps use UTC in the archive readers too.
-	if _, err := duckDB.Exec("SET TimeZone='UTC'"); err != nil {
-		return nil, fmt.Errorf("set cache snapshot time zone: %w", err)
-	}
 	// MSGVAULT_FORCE_CSV_SNAPSHOT lets tests exercise the CSV fallback that
 	// Windows and macOS always use, so drift between the COPY queries and the
 	// CSV views fails on every platform instead of only on Windows CI.
@@ -2265,6 +2261,11 @@ func (s *cacheSourceSnapshot) tables(through int64, afterMessageIDs map[string]i
 }
 
 func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
+	// Offset-free SQLite timestamps use UTC in archive readers too. Configure
+	// DuckDB only for exports: metadata-only fallback reads need no DuckDB.
+	if _, err := s.DuckDB().Exec("SET TimeZone='UTC'"); err != nil {
+		return fmt.Errorf("set cache snapshot time zone: %w", err)
+	}
 	if s.sqliteTx == nil {
 		return nil
 	}
