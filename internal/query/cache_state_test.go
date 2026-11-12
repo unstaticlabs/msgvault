@@ -146,7 +146,7 @@ func TestInspectCacheReadiness(t *testing.T) {
 }
 
 func TestCacheSchemaVersionIncludesProviderMailboxStateAndEmailWorkFacts(t *testing.T) {
-	assert.Equal(t, 35, CacheSchemaVersion)
+	assert.Equal(t, 36, CacheSchemaVersion)
 }
 
 func TestInspectCacheMarkerReadinessSkipsDatasetFingerprint(t *testing.T) {
@@ -172,7 +172,7 @@ func TestInspectCacheMarkerReadinessSkipsDatasetFingerprint(t *testing.T) {
 }
 
 func TestCacheSchemaVersionIncludesRelationshipContributions(t *testing.T) {
-	assert.Equal(t, 35, CacheSchemaVersion)
+	assert.Equal(t, 36, CacheSchemaVersion)
 }
 
 func TestInspectCacheReadinessNamesStaleSchemaAndDrift(t *testing.T) {

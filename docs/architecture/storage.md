@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-08"
+last_edited: "2026-11-12"
 title: Data Storage
 description: Database schema, Parquet analytics cache, content-addressed attachments, and token storage.
 ---
@@ -280,6 +280,12 @@ Messages listings share the filtered message population between page
 selection, participant enrichment, and total counting. This avoids repeating
 recipient and conversation-roster membership joins under the interactive
 memory limit. Listings without domain filters retain separate scalar scans.
+
+Cache message timestamps are timezone-free UTC instants. The publisher parses
+stored offsets before converting to UTC, including timestamps in older archives.
+It leaves archive rows and original calendar dates, timezone metadata, and
+recurrence rules unchanged. A publication using the older timestamp conversion
+is rebuilt from one read-only archive snapshot; provider sync is not involved.
 
 The Parquet cache is disposable and can be rebuilt at any time. The daemon
 starts HTTP health and API routing before analytics cache maintenance, and

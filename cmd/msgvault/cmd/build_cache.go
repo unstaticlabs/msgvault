@@ -2077,12 +2077,12 @@ func (s *cacheSourceSnapshot) DuckDB() sqlRunner {
 	return s.duckDB
 }
 
-// messageSliceRelation lets SQLite use its message indexes before DuckDB
-// reads an incremental slice. Cast back to the attached schema because
+// messageSliceRelation lets SQLite filter indexed slices and preserve timestamp
+// offsets before DuckDB sees them. Cast back to the attached schema because
 // sqlite_query transports columns as VARCHAR.
 func (s *cacheSourceSnapshot) messageSliceRelation(table, idColumn string, after, through int64) (string, error) {
 	relation := "sqlite_db." + table
-	if s.csvSnapshot || after == 0 {
+	if s.csvSnapshot || (after == 0 && table != tableMessages) {
 		return relation, nil
 	}
 	rows, err := s.DuckDB().Query("SELECT * FROM " + relation + " LIMIT 0")
@@ -2098,12 +2098,23 @@ func (s *cacheSourceSnapshot) messageSliceRelation(table, idColumn string, after
 	for _, typ := range types {
 		column := `"` + typ.Name() + `"`
 		columns = append(columns, column)
-		casts = append(casts, fmt.Sprintf("CAST(%s AS %s) AS %s", column, typ.DatabaseTypeName(), column))
+		if table == tableMessages && typ.Name() == "sent_at" {
+			// sqlite_query preserves the original timestamp text. The native
+			// scanner's TIMESTAMP conversion discards offsets before SQL can
+			// normalize them, including in archives predating UTC persistence.
+			casts = append(casts, fmt.Sprintf("timezone('UTC', CAST(%s AS TIMESTAMPTZ)) AS %s", column, column))
+		} else {
+			casts = append(casts, fmt.Sprintf("CAST(%s AS %s) AS %s", column, typ.DatabaseTypeName(), column))
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return "", fmt.Errorf("read message slice schema %s: %w", table, err)
 	}
-	sqliteSQL := fmt.Sprintf("SELECT %s FROM %s WHERE %s > %d AND %s <= %d", strings.Join(columns, ", "), table, idColumn, after, idColumn, through)
+	filter := fmt.Sprintf("%s <= %d", idColumn, through)
+	if after > 0 {
+		filter += fmt.Sprintf(" AND %s > %d", idColumn, after)
+	}
+	sqliteSQL := fmt.Sprintf("SELECT %s FROM %s WHERE %s", strings.Join(columns, ", "), table, filter)
 	return "(SELECT " + strings.Join(casts, ", ") + " FROM sqlite_query('sqlite_db', '" + strings.ReplaceAll(sqliteSQL, "'", "''") + "'))", nil
 }
 
@@ -2184,7 +2195,7 @@ func (s *cacheSourceSnapshot) tables(through int64, afterMessageIDs map[string]i
 		recipientEnvelopePresence = emailPresence + " AS envelope_present"
 	}
 	messageColumns := "id, source_id, source_message_id, rfc822_message_id, conversation_id, subject, snippet, sent_at, size_estimate, has_attachments, hidden_text_present, attachment_count, deleted_from_source_at, deleted_at, sender_id, message_type, list_id, is_from_me"
-	messageTypes := "types={'id': 'BIGINT', 'source_id': 'BIGINT', 'source_message_id': 'VARCHAR', 'rfc822_message_id': 'VARCHAR', 'conversation_id': 'BIGINT', 'subject': 'VARCHAR', 'snippet': 'VARCHAR', 'sent_at': 'TIMESTAMP', 'size_estimate': 'BIGINT', 'has_attachments': 'BOOLEAN', 'hidden_text_present': 'BOOLEAN', 'attachment_count': 'INTEGER', 'deleted_from_source_at': 'TIMESTAMP', 'deleted_at': 'TIMESTAMP', 'sender_id': 'BIGINT', 'message_type': 'VARCHAR', 'list_id': 'VARCHAR', 'is_from_me': 'BOOLEAN'"
+	messageTypes := "types={'id': 'BIGINT', 'source_id': 'BIGINT', 'source_message_id': 'VARCHAR', 'rfc822_message_id': 'VARCHAR', 'conversation_id': 'BIGINT', 'subject': 'VARCHAR', 'snippet': 'VARCHAR', 'sent_at': 'TIMESTAMPTZ', 'size_estimate': 'BIGINT', 'has_attachments': 'BOOLEAN', 'hidden_text_present': 'BOOLEAN', 'attachment_count': 'INTEGER', 'deleted_from_source_at': 'TIMESTAMP', 'deleted_at': 'TIMESTAMP', 'sender_id': 'BIGINT', 'message_type': 'VARCHAR', 'list_id': 'VARCHAR', 'is_from_me': 'BOOLEAN'"
 	if s.hasMessageSourceAttribution {
 		messageColumns += ", source_is_from_me"
 		messageTypes += ", 'source_is_from_me': 'BOOLEAN'"
@@ -2250,6 +2261,11 @@ func (s *cacheSourceSnapshot) tables(through int64, afterMessageIDs map[string]i
 }
 
 func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
+	// Offset-free SQLite timestamps use UTC in archive readers too. Configure
+	// DuckDB only for exports: metadata-only fallback reads need no DuckDB.
+	if _, err := s.DuckDB().Exec("SET TimeZone='UTC'"); err != nil {
+		return fmt.Errorf("set cache snapshot time zone: %w", err)
+	}
 	if s.sqliteTx == nil {
 		return nil
 	}
@@ -2297,9 +2313,15 @@ func (s *cacheSourceSnapshot) prepareTables(tables []cacheSnapshotTable) error {
 			// CSV reader otherwise reserves a buffer, even for a one-row vault.
 			kind = "TABLE"
 		}
+		projection := "*"
+		if t.name == tableMessages {
+			// Parse the stored offset as an instant, then keep the cache's
+			// existing timezone-free UTC TIMESTAMP contract.
+			projection = "* REPLACE (timezone('UTC', sent_at) AS sent_at)"
+		}
 		viewSQL := fmt.Sprintf(
-			`CREATE %s sqlite_db."%s" AS SELECT * FROM read_csv_auto('%s', %s)`,
-			kind, t.name, escaped, csvOpts,
+			`CREATE %s sqlite_db."%s" AS SELECT %s FROM read_csv_auto('%s', %s)`,
+			kind, t.name, projection, escaped, csvOpts,
 		)
 		if _, err := s.duckDB.Exec(viewSQL); err != nil {
 			return query.HintRepairEncoding(
