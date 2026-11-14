@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-01"
+last_edited: "2026-11-14"
 title: Web UI & API Server
 description: Daemon-served analytical Web UI and REST API for your msgvault archive, with optional background sync scheduling.
 ---
@@ -672,6 +672,13 @@ missing or invalid credentials still return `401`.
 | `viewer` | Read messages, attachments, files, people, and statistics; run searches, exploration, and aggregates |
 | `member` | Everything a viewer may, plus curation: Saved Views, people and organizations, relationships and employments, attributes and notes, day entries, message task links |
 | `admin` | Everything, including accounts and sync, imports, deletions, settings, CardDAV, index maintenance, the CLI transport, and `POST /api/v1/query` |
+
+With [`[auth] member_source_writes`](/docs/configuration/#auth), members may
+also stage and cancel deletions and archive messages from the inbox in their
+own sources. A source outside their view answers `404`, and a manifest or
+confirmation token for it cannot be used. Whatever the option, a caller who is
+not an administrator lists and reads only the deletion manifests of their own
+sources.
 
 `GET /api/v1/me` returns the caller's `kind`, `name`, `email`, and `role`.
 `GET /api/session` carries the same `principal` for an authenticated browser,

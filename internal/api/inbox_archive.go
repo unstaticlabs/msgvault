@@ -242,6 +242,10 @@ func (s *Server) handleInboxArchiveAuthorize(w http.ResponseWriter, r *http.Requ
 		writeInboxArchiveDisabled(w)
 		return
 	}
+	if !s.requestPrincipal(r).Sees(req.SourceID) {
+		writeSourceNotVisible(w)
+		return
+	}
 
 	now := time.Now().UTC()
 	expiry := now.Add(inboxArchiveTokenTTL)
@@ -294,6 +298,12 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		writeInboxArchiveTokenInvalid(w,
 			"the confirmation token is unknown, expired, or already used")
+		return
+	}
+	// The token was minted for a source; a caller who cannot see it may not
+	// spend it, whoever minted it.
+	if !s.requestPrincipal(r).Sees(grant.SourceID) {
+		writeSourceNotVisible(w)
 		return
 	}
 	// No ids means "archive the plan this token names". The set was fixed when

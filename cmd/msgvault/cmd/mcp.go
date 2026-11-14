@@ -295,6 +295,7 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 	if cfg != nil {
 		opts.AttachmentsDir = cfg.AttachmentsDir()
 		opts.DataDir = cfg.Data.DataDir
+		opts.MemberSourceWrites = cfg.Auth.MemberSourceWrites
 	}
 	capabilities, discoveryErr := st.MCPCapabilities(ctx)
 	if discoveryErr != nil {
