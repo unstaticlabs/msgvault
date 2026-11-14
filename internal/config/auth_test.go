@@ -267,3 +267,32 @@ func TestAuthEnvOverridesDeclareKeysAndRemote(t *testing.T) {
 	_, err = loadAuthConfig(t, "")
 	require.ErrorIs(err, ErrAuthEnvAPIKeys)
 }
+
+// TestMemberSourceWritesEnvOverride: like the inbox-archive gate, the opt-in
+// that lets members write to their own sources is set by the stack.
+func TestMemberSourceWritesEnvOverride(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
+	for _, name := range AuthEnvOverrideNames() {
+		t.Setenv(name, "")
+		require.NoError(os.Unsetenv(name))
+	}
+
+	cfg, err := loadAuthConfig(t, "[server]\napi_key = \"admin-secret-value\"\n")
+	require.NoError(err)
+	assert.False(cfg.Auth.MemberSourceWrites, "off by default")
+
+	cfg, err = loadAuthConfig(t, "[auth]\nmember_source_writes = true\n")
+	require.NoError(err)
+	assert.True(cfg.Auth.MemberSourceWrites, "set in config.toml")
+
+	t.Setenv("MSGVAULT_AUTH_MEMBER_SOURCE_WRITES", "true")
+	cfg, err = loadAuthConfig(t, "[server]\napi_key = \"admin-secret-value\"\n")
+	require.NoError(err)
+	assert.True(cfg.Auth.MemberSourceWrites, "set from the environment")
+
+	t.Setenv("MSGVAULT_AUTH_MEMBER_SOURCE_WRITES", "false")
+	cfg, err = loadAuthConfig(t, "[auth]\nmember_source_writes = true\n")
+	require.NoError(err)
+	assert.False(cfg.Auth.MemberSourceWrites, "the environment replaces the file's value")
+}

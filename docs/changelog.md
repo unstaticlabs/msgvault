@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-04"
+last_edited: "2026-11-14"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -18,6 +18,9 @@ with the existing downstream Inbox, calendar and multi-user workflows.
   across the browser, sidecar and native MCP endpoints.
 - Search and sync large archives with upstream query, indexing and IMAP
   improvements. New upstream importers and MCP discovery are included.
+- Let members stage deletions and archive from the inbox in their own sources
+  with `[auth] member_source_writes`, so people who share an archive need not
+  be administrators who see each other's mail.
 - Install downstream binaries and images from `unstaticlabs/msgvault`.
   The personal fork is used for contributions and does not publish this build.
 

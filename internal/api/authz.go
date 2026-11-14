@@ -377,6 +377,35 @@ func minimumRoleForOperation(op *huma.Operation) authz.Role {
 	return authz.RoleAdmin
 }
 
+// memberSourceWriteOperations are the administrator operations that
+// [auth] member_source_writes opens to members. Each handler confines a
+// scoped caller to the sources bound to their user, so a member acts only on
+// their own mail: staging and cancelling deletions, and archiving from the
+// inbox. Executing a staged deletion stays with administrators.
+var memberSourceWriteOperations = map[string]struct{}{
+	"stageDeletion":             {},
+	"cancelDeletion":            {},
+	"createCLIDeletionManifest": {},
+	"authorizeInboxArchive":     {},
+	"executeInboxArchive":       {},
+}
+
+// requiredRoleForOperation applies the deployment's opt-ins to the static
+// policy table.
+func (s *Server) requiredRoleForOperation(op *huma.Operation) authz.Role {
+	required := minimumRoleForOperation(op)
+	if op != nil && s.memberSourceWritesEnabled() {
+		if _, ok := memberSourceWriteOperations[op.OperationID]; ok {
+			return authz.RoleMember
+		}
+	}
+	return required
+}
+
+func (s *Server) memberSourceWritesEnabled() bool {
+	return s.cfg != nil && s.cfg.Auth.MemberSourceWrites
+}
+
 func (s *Server) logForbiddenAPIRequest(r *http.Request, principal authz.Principal, required authz.Role) {
 	if s.logger == nil {
 		return

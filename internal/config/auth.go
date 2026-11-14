@@ -19,6 +19,10 @@ type AuthConfig struct {
 	// APIKeyLogin controls the Web UI's API-key login form. Nil means enabled.
 	APIKeyLogin *bool          `toml:"api_key_login"`
 	APIKeys     []APIKeyConfig `toml:"api_keys"`
+	// MemberSourceWrites lets members stage and cancel deletions and archive
+	// messages from the inbox, confined to the sources bound to their user.
+	// Off by default: these operations stay administrator-only.
+	MemberSourceWrites bool `toml:"member_source_writes"`
 	// OIDC signs people in through an OpenID Connect provider and accepts
 	// that provider's access tokens. An empty issuer leaves it disabled.
 	OIDC OIDCConfig `toml:"oidc"`
@@ -85,7 +89,7 @@ func AuthEnvOverrideNames() []string {
 	names := []string{
 		"MSGVAULT_AUTH_API_KEY_LOGIN", "MSGVAULT_AUTH_API_KEYS", "MSGVAULT_SERVER_TRUSTED_PROXIES",
 		"MSGVAULT_REMOTE_URL", "MSGVAULT_REMOTE_API_KEY", "MSGVAULT_REMOTE_ALLOW_INSECURE",
-		"MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED",
+		"MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED", "MSGVAULT_AUTH_MEMBER_SOURCE_WRITES",
 	}
 	for _, override := range oidcEnvOverrides {
 		names = append(names, override.name)
@@ -140,6 +144,9 @@ func (c *Config) applyAuthEnvOverrides(lookupEnv func(string) string) error {
 	// stack that turns it on.
 	if value := strings.TrimSpace(lookupEnv("MSGVAULT_INBOX_ARCHIVE_REMOTE_ENABLED")); value != "" {
 		c.InboxArchive.RemoteEnabled = !strings.EqualFold(value, "false") && value != "0"
+	}
+	if value := strings.TrimSpace(lookupEnv("MSGVAULT_AUTH_MEMBER_SOURCE_WRITES")); value != "" {
+		c.Auth.MemberSourceWrites = !strings.EqualFold(value, "false") && value != "0"
 	}
 	return nil
 }

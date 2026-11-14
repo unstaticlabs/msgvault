@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/msgvault/internal/accountops"
 	"go.kenn.io/msgvault/internal/agentgrant"
 	"go.kenn.io/msgvault/internal/apiprotocol"
+	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/cacheops"
 	"go.kenn.io/msgvault/internal/clirun"
 	"go.kenn.io/msgvault/internal/collectionops"
@@ -1644,6 +1645,12 @@ func (s *Server) handleCLICreateDeletionManifest(w http.ResponseWriter, r *http.
 		writeAPIHTTPError(w, err)
 		return
 	}
+	if principal := s.requestPrincipal(r); principal.Scoped() {
+		if err := s.confineDeletionManifest(r.Context(), principal, &manifest); err != nil {
+			writeAPIHTTPError(w, err)
+			return
+		}
+	}
 	if err := saver.SaveCLIDeletionManifest(r.Context(), &manifest); err != nil {
 		s.logger.Error("failed to save CLI deletion manifest", "id", manifest.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "save_deletion_manifest_failed", "Failed to save deletion manifest")
@@ -1653,6 +1660,42 @@ func (s *Server) handleCLICreateDeletionManifest(w http.ResponseWriter, r *http.
 		ID:           manifest.ID,
 		MessageCount: len(manifest.GmailIDs),
 	})
+}
+
+// confineDeletionManifest binds a manifest built by a scoped caller to one of
+// their sources. The client chose the message IDs, so the daemon checks the
+// source they belong to and the account a later execution will use.
+func (s *Server) confineDeletionManifest(ctx context.Context, principal authz.Principal, manifest *deletion.Manifest) *apiHTTPError {
+	if manifest.Source == nil {
+		return newAPIHTTPError(http.StatusBadRequest, "source_required",
+			"A deletion manifest from a scoped caller must name its source")
+	}
+	if !principal.Sees(manifest.Source.ID) {
+		return newAPIHTTPError(http.StatusNotFound, "source_not_found", "source not found")
+	}
+	resolver, ok := s.store.(agentGrantSourceResolver)
+	if !ok {
+		return newAPIHTTPError(http.StatusServiceUnavailable, "source_lookup_unavailable",
+			"The daemon cannot check the manifest's source")
+	}
+	src, err := resolver.GetSourceByIDContext(ctx, manifest.Source.ID)
+	if errors.Is(err, store.ErrSourceNotFound) || (err == nil && src == nil) {
+		return newAPIHTTPError(http.StatusNotFound, "source_not_found", "source not found")
+	}
+	if err != nil {
+		s.logger.Error("resolve deletion manifest source", "source_id", manifest.Source.ID, "error", err)
+		return newAPIHTTPError(http.StatusInternalServerError, "internal_error", "Could not resolve source")
+	}
+	if manifest.Source.Type != src.SourceType || manifest.Source.Identifier != src.Identifier {
+		return newAPIHTTPError(http.StatusBadRequest, "source_mismatch",
+			"The manifest's source does not match the archive's source")
+	}
+	if manifest.Filters.Account != "" && manifest.Filters.Account != src.Identifier {
+		return newAPIHTTPError(http.StatusBadRequest, "source_mismatch",
+			"The manifest's account does not match its source")
+	}
+	manifest.Filters.Account = src.Identifier
+	return nil
 }
 
 func validateCLIDeletionManifest(manifest *deletion.Manifest) *apiHTTPError {

@@ -176,6 +176,10 @@ type ServeOptions struct {
 	// independent opt-in of its own: this flag decides whether a model can ask,
 	// not whether the archive is allowed to happen.
 	AllowMailboxWrites bool
+	// MemberSourceWrites offers stage_deletion and archive_from_inbox to
+	// members as well as administrators. The daemon must enable the same
+	// option: it confines each call to the sources bound to the caller.
+	MemberSourceWrites bool
 
 	// InboxArchiver executes archive_from_inbox through the selected daemon.
 	// When nil the tool is not registered, whatever the flags say.
@@ -466,7 +470,7 @@ func newMCPServerWithPolicy(
 	}
 
 	for _, definition := range operationCatalog(opts, h) {
-		if !principal.Can(definition.minRole) {
+		if !principal.Can(toolMinimumRole(definition, opts)) {
 			continue
 		}
 		if !toolClassAllowed(definition.security, opts, allowWrites) {
@@ -841,4 +845,22 @@ func agentReadToolPermission(name string) (agentgrant.Permission, bool) {
 		return agentgrant.PermissionStatsRead, true
 	}
 	return "", false
+}
+
+// memberSourceWriteTools are the administrator tools that MemberSourceWrites
+// opens to members. Each one reaches a daemon operation that confines a
+// scoped caller to their own sources.
+var memberSourceWriteTools = map[string]struct{}{
+	ToolStageDeletion:    {},
+	ToolArchiveFromInbox: {},
+}
+
+// toolMinimumRole applies the deployment's opt-ins to a tool's role.
+func toolMinimumRole(definition toolDefinition, opts ServeOptions) authz.Role {
+	if opts.MemberSourceWrites {
+		if _, ok := memberSourceWriteTools[definition.name]; ok {
+			return authz.RoleMember
+		}
+	}
+	return definition.minRole
 }

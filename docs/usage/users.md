@@ -75,6 +75,16 @@ default.
   `acting_user_refused` error asking them to sign in to the Web UI once; that
   first sign-in creates the user.
 
+## Letting members manage their own mail
+
+By default only administrators stage deletions and archive messages from the
+inbox, and administrators see every source. To let each person, or an
+assistant key bound to them, manage only their own mail, make everyone a
+member and set [`[auth] member_source_writes`](/docs/configuration/#auth) on the
+daemon and the MCP sidecar. A member can then stage and cancel deletions and
+archive from the inbox in the sources bound to them, and in no other source.
+An administrator still runs `msgvault delete-staged`.
+
 ## Binding sources to users
 
 Administrators bind sources from Settings → Users in the Web UI, from the
