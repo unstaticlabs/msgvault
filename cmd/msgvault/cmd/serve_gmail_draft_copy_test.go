@@ -15,16 +15,18 @@ import (
 )
 
 func TestGmailDraftGetAndArchivedTrashLabels(t *testing.T) {
+	require := require.New(t)
+	assert := assert.New(t)
 	fixture := newGmailDraftTestFixture(t)
 	draft := fixture.seedDraft(t)
 	labels, err := fixture.store.EnsureLabelsBatch(fixture.source.ID, map[string]store.LabelInfo{
 		"DRAFT": {Name: "DRAFT", Type: "system"},
 		"TRASH": {Name: "TRASH", Type: "system"},
 	})
-	require.NoError(t, err)
+	require.NoError(err)
 	changed, err := fixture.store.ReconcileMessageLabels(draft.CurrentMessageID, []int64{labels["DRAFT"], labels["TRASH"]}, true)
-	require.NoError(t, err)
-	require.True(t, changed)
+	require.NoError(err)
+	require.True(changed)
 	fixture.client.getErr = &gmail.NotFoundError{Path: "/drafts/gmail-draft-managed"}
 
 	var events []api.CLIRunEvent
@@ -34,32 +36,32 @@ func TestGmailDraftGetAndArchivedTrashLabels(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	require.NoError(t, err)
-	require.Len(t, events, 1)
+	require.NoError(err)
+	require.Len(events, 1)
 	var result gmailDraftLifecycleOutput
-	require.NoError(t, json.Unmarshal([]byte(events[0].Data), &result))
-	assert.Equal(t, "active", result.Lifecycle)
-	assert.Equal(t, int64(1), result.Revision)
-	assert.Equal(t, draft.CurrentMessageID, result.MessageID)
-	require.NotNil(t, result.ProviderObservation)
-	assert.Equal(t, "not_checked", result.ProviderObservation.State)
+	require.NoError(json.Unmarshal([]byte(events[0].Data), &result))
+	assert.Equal("active", result.Lifecycle)
+	assert.Equal(int64(1), result.Revision)
+	assert.Equal(draft.CurrentMessageID, result.MessageID)
+	require.NotNil(result.ProviderObservation)
+	assert.Equal("not_checked", result.ProviderObservation.State)
 
 	router := api.NewServer(fixture.adapter.config, fixture.adapter, nil, fixture.adapter.logger).Router()
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, fmt.Sprintf("/api/v1/messages/%d", result.MessageID), nil)
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
-	require.Equal(t, http.StatusOK, response.Code)
+	require.Equal(http.StatusOK, response.Code)
 	var archived api.MessageDetail
-	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &archived))
-	assert.ElementsMatch(t, []string{"DRAFT", "TRASH"}, archived.Labels)
+	require.NoError(json.Unmarshal(response.Body.Bytes(), &archived))
+	assert.ElementsMatch([]string{"DRAFT", "TRASH"}, archived.Labels)
 
 	_, err = fixture.lifecycle(t, api.CLIRunDraftRecoverCommand, draft, "")
-	require.ErrorContains(t, err, "not_supported")
-	assert.Zero(t, fixture.client.getCalls)
+	require.ErrorContains(err, "not_supported")
+	assert.Zero(fixture.client.getCalls)
 
 	_, err = fixture.lifecycle(t, api.CLIRunDraftEditCommand, draft, "replacement")
-	require.ErrorContains(t, err, "provider_absent")
-	assert.Equal(t, 1, fixture.client.getCalls)
-	assert.Zero(t, fixture.client.updateCalls)
-	assert.Zero(t, fixture.client.deleteCalls)
+	require.ErrorContains(err, "provider_absent")
+	assert.Equal(1, fixture.client.getCalls)
+	assert.Zero(fixture.client.updateCalls)
+	assert.Zero(fixture.client.deleteCalls)
 }

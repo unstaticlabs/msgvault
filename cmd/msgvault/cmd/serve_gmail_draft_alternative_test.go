@@ -56,7 +56,7 @@ func TestGmailDraftExternalAlternativeAdoptionReproducesFormatRefusal(t *testing
 	require.ErrorContains(err, "invalid_draft")
 	coded, ok := errors.AsType[*api.CLIRunCodedError](err)
 	require.True(ok)
-	assert.ErrorContains(coded.Err, "plain-text message")
+	require.ErrorContains(coded.Err, "plain-text message")
 	assert.Zero(fixture.client.updateCalls)
 	after, err := fixture.store.GetGmailDraftContext(t.Context(), draft.DraftID)
 	require.NoError(err)
