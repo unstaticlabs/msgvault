@@ -66,4 +66,4 @@ the newer target.
 ## Limitations
 
 - The daemon operation gate is held only through the freeze protocol (checkpoint plus read-transaction pin), not through attachment capture. A gated operation that deletes attachment files (such as `remove-account`) while a backup is still capturing can therefore delete a file the frozen database still references; the backup then fails loudly with a read or hash error and can be retried after the deletion completes. This is a deliberate trade: holding the gate — and with it every daemon write — for the full capture window would be far more disruptive than a rare retryable backup failure. A snapshot that completed is unaffected: it captured every file it references.
-- Repository encryption and retention (`forget`/`prune`) are not yet implemented; see the engine's `backup/FORMAT.md` roadmap for the settled design.
+- Repository encryption is not yet implemented. Retention delegates dependency validation and physical reclamation to the engine; see [Backup](../usage/backup.md#keeping-local-backup-history-bounded) for recovery-anchor handling.

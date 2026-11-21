@@ -2424,7 +2424,7 @@ msgvault sync-synctech-sms <name>
 
 ## backup
 
-Create, list, verify, and restore incremental archive snapshots in a backup
+Create, list, verify, restore, and retain incremental archive snapshots in a backup
 repository.
 
 ```bash
@@ -2490,6 +2490,25 @@ msgvault backup verify [snapshot] [flags]
 | `--quick` | Skip reading and hash-verifying content blobs |
 | `--force-unlock` | Break a stale exclusive repository lock before verifying |
 | `--jobs N` | Concurrent pack readers; `0` uses one per CPU |
+
+### backup retain, forget, and prune
+
+```bash
+msgvault backup retain --keep-last 14 --protect <snapshot> [--dry-run] [--repo <dir>]
+msgvault backup forget <snapshot>... [--dry-run] [--repo <dir>]
+msgvault backup prune [--dry-run] [--repo <dir>]
+```
+
+`retain` requires `--keep-last` of at least one. It also keeps repeated or
+comma-separated `--protect` anchors and required incremental ancestors, then
+prunes unreferenced content. `--dry-run` reports manifest selection only.
+`forget` removes exact snapshot manifests and refuses to remove the last snapshot
+or a dependency of a retained one. `prune` reclaims unreferenced packs and reports
+planned bytes, removed bytes and replacement bytes separately; planned bytes are
+not net savings. All three take exclusive native repository locks and do not
+modify the live archive. They do not force-unlock, upload, or qualify recovery
+anchors. See [Backup](usage/backup.md#keeping-local-backup-history-bounded) for
+serialized off-site copying and anchor replacement.
 
 ### backup restore
 

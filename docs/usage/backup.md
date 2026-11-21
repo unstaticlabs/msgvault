@@ -5,10 +5,10 @@ description: Create incremental, verifiable snapshots of your archive in a local
 
 `msgvault backup` captures your entire archive — the SQLite database, every attachment, and optionally your configuration and deletion audit trail — into a **backup repository**: a self-contained directory of immutable, checksummed files. Snapshots are incremental (only changed database pages and new attachments are stored), deduplicated, and verifiable down to the byte.
 
-The repository is append-only and consists entirely of write-once files, which makes it friendly to `rsync`, `rclone`, cloud-drive folders, and filesystem snapshots. You can point any off-site sync tool at it without worrying about files changing underneath the transfer.
+Capture writes immutable files, which makes completed snapshots friendly to off-site copying. Serialize copying with retention: `forget`, `retain`, and `prune` can remove obsolete files, so do not run them during an off-site transfer.
 
-!!! note "Encryption and retention are not implemented yet"
-    This release ships capture and restore: `init`, `create`, `list`, `verify`, and `restore`. Repository encryption and retention (pruning old snapshots) are planned follow-ups.
+!!! note "Repository encryption is not implemented yet"
+    Use encrypted storage or an encrypted off-site backup tool when the archive contains private information.
 
 ## Quick Start
 
@@ -116,6 +116,45 @@ Its performance benefit comes primarily from eliminating per-attachment file
 creation, directory updates, and antivirus scans rather than from avoiding
 repository read I/O.
 
+## Keeping local backup history bounded
+
+`backup retain` keeps the newest snapshots, named recovery anchors, and every
+incremental ancestor they need, then reclaims unreferenced content through the
+native backup engine. Preview the selection first:
+
+```bash
+msgvault backup retain --keep-last 14 --protect SNAPSHOT_ID --dry-run
+msgvault backup retain --keep-last 14 --protect SNAPSHOT_ID
+```
+
+`--keep-last` is required and must be at least one. Repeat `--protect` or pass a
+comma-separated list to keep several anchors. An unknown anchor fails before
+removal. An anchor should identify a snapshot whose off-site copy has actually
+been restored successfully. Keep that anchor until a newer off-site snapshot
+passes the same restore check; a failed upload or restore must leave it unchanged.
+The command does not upload, certify, or advance anchors automatically.
+
+Incremental snapshots can need older page maps. These dependencies remain even
+when they exceed `--keep-last`; periodic native keyframes bound the chain.
+Retention removes recovery points, not live messages or attachments. It does not
+guarantee a byte quota or securely erase deleted content.
+
+For an exact reviewed selection, use `backup forget SNAPSHOT_ID... --dry-run`,
+then repeat without `--dry-run`. It refuses the last recovery point and any parent
+required by a retained snapshot. `forget` removes manifests only; run
+`backup prune --dry-run` to inspect physical reclamation, then `backup prune` to
+apply it. Prune follows references and verifies rewritten content. It never
+selects content by file age. It can require temporary space for replacement
+packs, and interruptions may leave extra copies that a retry can reclaim.
+
+These operations use exclusive repository locks and run locally, without
+modifying the live archive. Schedule capture, upload, restore checks, and retention
+as a serialized sequence. Run full verification and restore retained anchors
+after cleanup. Dry-run retention reports manifest selection only; it does not
+estimate space as though those manifests had already been removed. Off-site
+copies have their own retention policy and must retain a complete repository for
+each required recovery point.
+
 ## Configuration
 
 ```toml
@@ -215,9 +254,9 @@ msgvault distinguishes hiding a message (flagging it deleted) from purging it (r
 
 - **Flag-deleted messages** are a database change like any other. The message and its attachments are still in the archive, so new snapshots continue to capture them; the changed database pages are stored incrementally. Restoring any snapshot restores the flag state as of that snapshot.
 - **Purged messages** disappear *logically* from subsequent snapshots. Once the rows and attachment files are gone, the next `backup create` no longer references them: the purged attachment content is not in the snapshot's attachment list, and no query against a restored database returns the purged rows. Physically, though, backups capture the database byte-for-byte at page granularity — and SQLite keeps deleted row payloads in free pages until those pages are rewritten or the database is vacuumed. Fragments of purged content can therefore persist inside later snapshots' database pages, and inside a *fresh* repository seeded from the same unvacuumed archive.
-- **Older snapshots keep everything.** The repository is append-only: a snapshot taken before a purge still references the purged content, and that content remains in the repository's pack files. This is deliberate — it is what makes a backup protection against an accidental or malicious purge.
+- **Older snapshots keep everything.** A snapshot taken before a purge still references the purged content, and that content remains in the repository's pack files until explicit retention removes the snapshot and reclaims its unreferenced content. This is deliberate — it is what makes a backup protection against an accidental or malicious purge.
 
-The flip side is a privacy consideration: purging a message from the archive does **not** expunge it from backups taken earlier. Until the planned `forget`/`prune` commands ship (delete old snapshots, then reclaim unreferenced data), expunging content from a backup repository takes two steps: rewrite the archive database so free-page remnants are gone (`VACUUM`, or any msgvault compact operation that rewrites the file), then recreate the repository and take a fresh snapshot. Recreating the repository without vacuuming first can carry purged fragments along in the new snapshot's pages. If you sync the repository off-site, the same applies to the replica.
+The flip side is a privacy consideration: purging a message from the archive does **not** expunge it from backups taken earlier. Retention can remove old recovery points, but it does not scrub free pages inside a retained database snapshot. Expunging those remnants from future snapshots takes two steps: rewrite the archive database so free-page remnants are gone (`VACUUM`, or any msgvault compact operation that rewrites the file), then recreate the repository and take a fresh snapshot. Recreating the repository without vacuuming first can carry purged fragments along in the new snapshot's pages. If you sync the repository off-site, the same applies to the replica.
 
 ## Compatibility
 
