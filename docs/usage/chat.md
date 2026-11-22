@@ -90,7 +90,7 @@ These tools run the matching CLI commands through your selected daemon. They req
 | `draft_compose` | `draft-compose` | `account`, `source_id`, `from`, `to`, `cc`, `bcc`, `subject`, `body`, `conversation`, `reply_to` |
 | `draft_forward` | `draft-forward` | Required `message_id`; optional `from`, `to`, `cc`, `bcc`, `account`, `source_id`, `body` |
 | `draft_get` | `draft-get` | `draft_id` or `conversation` |
-| `draft_edit` | `draft-edit` | Required `draft_id`, `revision`, `body` |
+| `draft_edit` | `draft-edit` | Required `draft_id`, `revision`, `body`. Optional `body_html` for a rich email alternative. |
 | `draft_delete` | `draft-delete` | Required `draft_id`, `revision` |
 | `draft_recover` | `draft-recover` | Required `draft_id`, `revision`; recovery can finish an interrupted deletion |
 | `draft_send_as` | `draft-send-as` | Required `account`; lists Gmail sender identities |

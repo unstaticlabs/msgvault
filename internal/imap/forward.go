@@ -365,22 +365,30 @@ func IsGeneratedForward(raw []byte) bool {
 // Plain drafts keep the existing replacement contract; a multipart message
 // must carry the forward marker.
 func BuildIMAPDraftReplacement(currentRaw []byte, body string, now time.Time, messageID string) (ReplyDraft, error) {
+	return BuildRichIMAPDraftReplacement(currentRaw, body, nil, now, messageID)
+}
+
+// BuildRichIMAPDraftReplacement retains generated forwards and accepts rich edits to other drafts.
+func BuildRichIMAPDraftReplacement(currentRaw []byte, body string, formatted *string, now time.Time, messageID string) (ReplyDraft, error) {
 	message, err := mail.ReadMessage(bytes.NewReader(currentRaw))
 	if err != nil {
 		return ReplyDraft{}, fmt.Errorf("read draft headers: %w", err)
 	}
 	contentType := message.Header.Get("Content-Type")
 	if contentType == "" {
-		return BuildDraftReplacement(currentRaw, body, now, messageID)
+		return BuildRichDraftReplacement(currentRaw, body, formatted, now, messageID)
 	}
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return ReplyDraft{}, fmt.Errorf("invalid draft Content-Type: %w", err)
 	}
-	if !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") {
-		return BuildDraftReplacement(currentRaw, body, now, messageID)
+	if !strings.HasPrefix(strings.ToLower(mediaType), "multipart/") || message.Header.Get(forwardMarkerHeader) != forwardMarkerValue {
+		return BuildRichDraftReplacement(currentRaw, body, formatted, now, messageID)
 	}
-	if !strings.EqualFold(mediaType, "multipart/mixed") || message.Header.Get(forwardMarkerHeader) != forwardMarkerValue || params["boundary"] == "" {
+	if formatted != nil {
+		return ReplyDraft{}, errors.New("a generated forward accepts a plain-text note")
+	}
+	if !strings.EqualFold(mediaType, "multipart/mixed") || params["boundary"] == "" {
 		return ReplyDraft{}, errors.New("draft replacement does not support this multipart message")
 	}
 	if !utf8.ValidString(body) || strings.ContainsAny(body, "\x00") {

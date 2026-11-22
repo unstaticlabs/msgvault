@@ -571,7 +571,7 @@ Read, edit, or delete a managed draft created by `draft-reply`,
 
 ```bash
 msgvault draft-get <draft-id> [--json]
-msgvault draft-edit <draft-id> --revision <n> --body <text> [--json]
+msgvault draft-edit <draft-id> --revision <n> --body <text> [--body-html <html>] [--json]
 msgvault draft-delete <draft-id> --revision <n> [--json]
 msgvault draft-recover <draft-id> --revision <n> [--json]
 ```
@@ -584,8 +584,14 @@ The creation result supplies the opaque `draft_id` and initial revision.
 - `--json` emits one JSON result.
 
 `draft-edit --body` replaces the note in a draft created by `draft-forward` and
-keeps the quoted text and attachments. Other drafts must be `text/plain`; any
-other multipart draft returns `invalid_draft` before the provider draft changes.
+keeps the quoted text and attachments. For an email with plain-text and HTML
+alternatives, it updates the text inside the existing formatting. Links, inline
+images and attachments stay with the draft. If the two alternatives differ
+where you edit, pass the intended HTML in `--body-html` along with `--body`.
+For example, a rich footer may use a link label where plain text shows a URL.
+
+When another mail client saves first, read the adopted revision with
+`draft-get` and repeat the intended edit using that revision.
 
 `draft-get` reads retained archive content, including discarded drafts, without
 connecting to a provider or requiring the source's draft mutation grant. For

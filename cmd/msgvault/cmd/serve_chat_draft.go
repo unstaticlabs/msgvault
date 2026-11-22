@@ -134,6 +134,9 @@ func (a *storeAPIAdapter) runCLIChatDraftLifecycle(
 	status := "ok"
 	switch intent.Operation {
 	case api.CLIRunDraftEditCommand:
+		if intent.BodyHTML != nil {
+			return draftReplyError("invalid_args", errors.New("chat drafts accept only plain text"))
+		}
 		status = "edited"
 		if err := invalidChatDraftBody(intent.Body); err != nil {
 			return err
