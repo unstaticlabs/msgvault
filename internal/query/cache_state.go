@@ -45,9 +45,10 @@ import (
 // Version 34 carries hidden_text_present in message rows.
 // Version 35 combines these projections with provider mailbox state and
 // revision-pinned related-email facts and recovery journals.
+// Version 36 preserves timestamp offsets when publishing legacy calendar rows.
 // Schema bumps force a full rebuild before readers use an older publication,
 // so committed caches never mix shards of different shapes.
-const CacheSchemaVersion = 35
+const CacheSchemaVersion = 36
 
 // CacheSyncState is the commit marker written after a complete analytics
 // cache publication. SQLite remains authoritative; these watermarks only

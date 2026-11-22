@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-04"
+last_edited: "2026-11-12"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -11,6 +11,10 @@ All notable changes to msgvault, grouped by release.
 This build combines upstream 0.23.0 and subsequent fixes through `c3afaa35`
 with the existing downstream Inbox, calendar and multi-user workflows.
 
+- Calendar search and analytics retain the correct instant for events already
+  archived with a timezone offset. Upgrading rebuilds the local analytics cache;
+  no provider re-sync is needed. If automatic cache building is disabled, run
+  `msgvault build-cache`.
 - Browse the redesigned Messages, People, Files and Sources workspaces while
   retaining cross-account Inbox/read filters and related-email grouping.
 - Keep exact-message Inbox archiving, saved-filter recovery and calendar coverage.
