@@ -18,6 +18,11 @@ func TestDraftHTMLRetainsStyledSpans(t *testing.T) {
 		{"replace across styles", "<b>A11</b><i>22Z</i>", "A1122Z", "AxxZ", []string{"<b>Axx</b>", "<i>Z</i>"}},
 		{"quote and link", `<div>Héllo &amp; salut</div><blockquote cite="q"><a href="https://example.test">Source</a></blockquote>`, "Héllo & salut\n> Source", "Héllo <team> & salut\n> Source", []string{"Héllo &lt;team&gt; &amp; salut", `<blockquote cite="q"><a href="https://example.test">Source</a></blockquote>`}},
 		{"nonbreaking space", "<b>Hello&nbsp;team</b>", "Hello team", "Bonjour team", []string{"Bonjour\u00a0team"}},
+		{"mail client terminal newline", "<div>Hello</div>", "Hello\r\n", "Bye", []string{"<div>Bye</div>"}},
+		{"empty formatted draft", "<html><body><div><b><br></b></div></body></html>", "\r\n", "Hello", []string{"<b>Hello<br></b>"}},
+		{"join paragraphs", "<p>Keep <b>blue</b></p><p><i>sky</i> today</p>", "Keep blue\nsky today", "Keep blue sky today", []string{"<p>Keep <b>blue</b> <i>sky</i> today</p>"}},
+		{"delete across paragraphs", "<div>First. Obsolete</div><div>sentence. Last.</div>", "First. Obsolete\nsentence. Last.", "First. Last.", []string{"<div>First. Last.</div>"}},
+		{"join lines", "<div>one<br>two</div>", "one\ntwo", "onetwo", []string{"<div>onetwo</div>"}},
 		{"new line", "<b>Hello</b>", "Hello", "Hello\nagain", []string{"<b>Hello<br>again</b>"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -90,4 +95,28 @@ func TestRichDraftExplicitHTMLForDifferentAlternatives(t *testing.T) {
 	require.NoError(err)
 	assert.Equal("Second", strings.TrimSpace(got.Parsed.BodyText))
 	assert.Equal(formatted, strings.TrimSpace(got.Parsed.BodyHTML))
+}
+
+func TestRichOnlyDraftAddsPlainAlternative(t *testing.T) {
+	const htmlBody = "<p><strong>Hello</strong></p><p>team</p>"
+	const image = "Content-Type: image/png\r\nContent-ID: <image>\r\nContent-Transfer-Encoding: base64\r\n\r\nYWJj\r\n"
+	related := "Content-Type: multipart/related; boundary=r; start=\"<main>\"\r\n\r\n--r\r\n" + image + "--r\r\nContent-Type: text/html\r\nContent-ID: <main>\r\n\r\n" + htmlBody + "<img src=\"cid:image\">\r\n--r--\r\n"
+	for _, tc := range []struct {
+		name, body string
+		withImage  bool
+	}{{"HTML", "Content-Type: text/html; charset=utf-8\r\n\r\n" + htmlBody, false}, {"related, named root after image", related, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
+			raw := []byte("From: sender@example.test\r\nTo: to@example.test\r\n" + tc.body)
+			got, err := BuildIMAPDraftReplacement(raw, "Hello everyone", time.Now(), "")
+			require.NoError(err)
+			assert.Equal("Hello everyone", strings.TrimSpace(got.Parsed.BodyText))
+			assert.Contains(got.Parsed.BodyHTML, "<strong>Hello</strong> everyone")
+			if tc.withImage {
+				assert.Contains(got.Parsed.BodyHTML, `src="cid:image"`)
+				assert.Contains(string(got.Raw), "\r\nYWJj\r\n")
+			}
+		})
+	}
 }

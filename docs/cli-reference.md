@@ -585,8 +585,10 @@ The creation result supplies the opaque `draft_id` and initial revision.
 
 `draft-edit --body` replaces the note in a draft created by `draft-forward` and
 keeps the quoted text and attachments. For an email with plain-text and HTML
-alternatives, it updates the text inside the existing formatting. Links, inline
-images and attachments stay with the draft. If the two alternatives differ
+alternatives, it updates the text inside the existing formatting. An HTML-only
+email gains a matching plain-text alternative. You can join matching paragraphs
+and edit across styled spans. Links, inline images and attachments stay with
+the draft. If the two alternatives differ
 where you edit, pass the intended HTML in `--body-html` along with `--body`.
 For example, a rich footer may use a link label where plain text shows a URL.
 

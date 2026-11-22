@@ -411,7 +411,7 @@ func BuildRichDraftReplacement(currentRaw []byte, body string, formatted *string
 		if err != nil {
 			return ReplyDraft{}, fmt.Errorf("invalid draft Content-Type: %w", err)
 		}
-		if mediaType == "multipart/alternative" || mediaType == "multipart/related" || mediaType == "multipart/mixed" {
+		if mediaType == "text/html" || mediaType == "multipart/alternative" || mediaType == "multipart/related" || mediaType == "multipart/mixed" {
 			richType, richParams = mediaType, params
 		} else if !strings.EqualFold(mediaType, "text/plain") {
 			return ReplyDraft{}, errors.New("draft replacement requires a plain-text message")
