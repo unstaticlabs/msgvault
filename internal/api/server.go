@@ -769,7 +769,8 @@ func (s *Server) setupRouter() http.Handler {
 	// Most trusted local traffic bypasses the general limiter, but the change
 	// feed takes SQLite's writer lock and therefore has its own non-bypassable
 	// budget.
-	s.rateLimiter = NewRateLimiter(10, 20)
+	s.rateLimiter = NewRateLimiter(
+		generalRequestsPerSecond, generalRequestBurst)
 	s.changesRateLimiter = NewRateLimiter(
 		changeFeedRequestsPerSecond, changeFeedRequestBurst)
 	s.documentSearchRateLimiter = NewRateLimiter(

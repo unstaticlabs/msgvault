@@ -388,6 +388,14 @@ func (s *Server) requestGateEligible(r *http.Request) bool {
 	return auth.Mode != AuthModeRequired
 }
 
+// The general limiter's budget for one client address. Every caller behind
+// that address shares it, so a sidecar that fronts several clients, such as a
+// separate MCP server, spends one budget for all of them.
+const (
+	generalRequestsPerSecond = 20
+	generalRequestBurst      = 40
+)
+
 // RateLimitMiddleware returns a middleware that rate limits requests by IP.
 // The exempt predicate lets trusted requests bypass the limiter: the local
 // TUI/CLI legitimately bursts far past the remote budget (daemon discovery

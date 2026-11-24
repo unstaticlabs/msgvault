@@ -973,6 +973,55 @@ func TestLoopbackDiscoveryBypassesRateLimitWithAPIKey(t *testing.T) {
 	}
 }
 
+func TestGeneralRateLimitAllowsTwentyPerSecondWithBurstOfForty(t *testing.T) {
+	t.Parallel()
+	// The bubble's clock only moves when the test sleeps, so the token bucket
+	// refills by exactly the amounts asserted below.
+	synctest.Test(t, func(t *testing.T) {
+		assert := assert.New(t)
+		require := require.New(t)
+		srv := NewServerWithOptions(ServerOptions{
+			Config: &config.Config{Server: config.ServerConfig{APIKey: "secret-key"}},
+			Logger: testLogger(),
+		})
+		defer func() {
+			require.NoError(srv.Shutdown(context.Background()), "shutdown")
+			synctest.Wait()
+		}()
+		handler := srv.Router()
+		get := func(remoteAddr string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, daemon.DefaultPingPath, nil)
+			req.RemoteAddr = remoteAddr
+			req.Header.Set("X-Api-Key", "secret-key")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			return w
+		}
+
+		// A non-loopback caller, such as an MCP server in its own container.
+		const caller = "203.0.113.7:1234"
+		for i := range 40 {
+			require.Equal(http.StatusOK, get(caller).Code, "burst request %d", i+1)
+		}
+		refused := get(caller)
+		require.Equal(http.StatusTooManyRequests, refused.Code, "request past the burst")
+		assert.Equal("1", refused.Header().Get("Retry-After"), "Retry-After")
+		assert.JSONEq(
+			`{"error":"rate_limit_exceeded","message":"Too many requests. Please slow down."}`,
+			refused.Body.String(), "refusal body")
+
+		// Each address has its own budget.
+		assert.Equal(http.StatusOK, get("203.0.113.8:1234").Code, "second address")
+
+		time.Sleep(time.Second)
+		for i := range 20 {
+			require.Equal(http.StatusOK, get(caller).Code, "refilled request %d", i+1)
+		}
+		assert.Equal(http.StatusTooManyRequests, get(caller).Code,
+			"request past one second of refill")
+	})
+}
+
 func TestDaemonIdentityEndpointProvesRuntimeSecretWithoutReceivingIt(t *testing.T) {
 	t.Parallel()
 	assert := assert.New(t)
