@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	stdmime "mime"
-	"mime/quotedprintable"
 	"net/mail"
 	"strings"
 	"time"
@@ -85,8 +83,28 @@ func parseComposeAddresses(name string, values []string) ([]*mail.Address, error
 }
 
 func renderPlainTextDraft(envelope plainTextEnvelope, body string, now time.Time) (ReplyDraft, error) {
+	var raw bytes.Buffer
+	if err := writeDraftEnvelope(&raw, envelope, now); err != nil {
+		return ReplyDraft{}, err
+	}
+	raw.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n")
+	if err := writeQuotedPrintable(&raw, body); err != nil {
+		return ReplyDraft{}, err
+	}
+	return parseRenderedDraft(&raw)
+}
+
+func parseRenderedDraft(raw *bytes.Buffer) (ReplyDraft, error) {
+	parsed, err := msgmime.Parse(raw.Bytes())
+	if err != nil {
+		return ReplyDraft{}, fmt.Errorf("parse composed draft: %w", err)
+	}
+	return ReplyDraft{Raw: raw.Bytes(), Parsed: parsed}, nil
+}
+
+func writeDraftEnvelope(raw *bytes.Buffer, envelope plainTextEnvelope, now time.Time) error {
 	if len(envelope.From) != 1 {
-		return ReplyDraft{}, errors.New("draft requires one From address")
+		return errors.New("draft requires one From address")
 	}
 	fromValue := formatAddresses(envelope.From)
 	toValue := formatAddresses(envelope.To)
@@ -95,13 +113,12 @@ func renderPlainTextDraft(envelope plainTextEnvelope, body string, now time.Time
 	replyToValue := formatAddresses(envelope.ReplyTo)
 	for _, value := range []string{fromValue, toValue, ccValue, bccValue, replyToValue, envelope.Subject} {
 		if value != "" && !validHeaderValue(value) {
-			return ReplyDraft{}, errors.New("invalid draft header")
+			return errors.New("invalid draft header")
 		}
 	}
 
-	var raw bytes.Buffer
 	writeHeader := func(name, value string) {
-		_, _ = fmt.Fprintf(&raw, "%s: %s\r\n", name, value)
+		_, _ = fmt.Fprintf(raw, "%s: %s\r\n", name, value)
 	}
 	writeHeader("Date", now.UTC().Format(time.RFC1123Z))
 	writeHeader("From", fromValue)
@@ -129,22 +146,8 @@ func renderPlainTextDraft(envelope plainTextEnvelope, body string, now time.Time
 		writeHeader("In-Reply-To", formatMessageIDs(envelope.InReplyTo))
 	}
 	if len(envelope.References) > 0 {
-		writeFoldedHeader(&raw, "References", formatMessageIDs(envelope.References))
+		writeFoldedHeader(raw, "References", formatMessageIDs(envelope.References))
 	}
 	writeHeader("MIME-Version", "1.0")
-	writeHeader("Content-Type", `text/plain; charset="utf-8"`)
-	writeHeader("Content-Transfer-Encoding", "quoted-printable")
-	raw.WriteString("\r\n")
-	qp := quotedprintable.NewWriter(&raw)
-	if _, err := io.WriteString(qp, body); err != nil {
-		return ReplyDraft{}, fmt.Errorf("encode draft body: %w", err)
-	}
-	if err := qp.Close(); err != nil {
-		return ReplyDraft{}, fmt.Errorf("close draft body: %w", err)
-	}
-	parsed, err := msgmime.Parse(raw.Bytes())
-	if err != nil {
-		return ReplyDraft{}, fmt.Errorf("parse composed draft: %w", err)
-	}
-	return ReplyDraft{Raw: raw.Bytes(), Parsed: parsed}, nil
+	return nil
 }

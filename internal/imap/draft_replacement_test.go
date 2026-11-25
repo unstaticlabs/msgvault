@@ -107,11 +107,11 @@ func TestBuildDraftReplacementPreservesCcOnlyEnvelope(t *testing.T) {
 	requirements.Len(result.Parsed.Bcc, 1)
 }
 
-func TestBuildDraftReplacementRejectsMalformedOrRichDraft(t *testing.T) {
+func TestBuildDraftReplacementRejectsMalformedOrUnsupportedDraft(t *testing.T) {
 	requirements := require.New(t)
 	for _, raw := range []string{
 		"From: alice@example.com\r\nTo: bob@example.com\r\nContent-Type: broken;\r\n\r\nold",
-		"From: alice@example.com\r\nTo: bob@example.com\r\nContent-Type: text/html\r\n\r\nold",
+		"From: alice@example.com\r\nTo: bob@example.com\r\nContent-Type: application/octet-stream\r\n\r\nold",
 	} {
 		_, err := BuildDraftReplacement([]byte(raw), "new", time.Now(), "")
 		requirements.Error(err)

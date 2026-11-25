@@ -52,6 +52,7 @@ type Message struct {
 	References      []string
 	BodyText        string
 	BodyHTML        string
+	TextFromHTML    bool `json:"-"` // The MIME parser synthesized BodyText from an HTML-only message.
 	Attachments     []Attachment
 	Errors          []string // Non-fatal parsing errors
 }
@@ -164,6 +165,9 @@ func parse(raw []byte, inspect func(*enmime.Part)) (*Message, error) {
 
 	// Collect any parsing errors
 	for _, e := range env.Errors {
+		if e.Name == enmime.ErrorPlainTextFromHTML {
+			msg.TextFromHTML = true
+		}
 		msg.Errors = append(msg.Errors, e.Error())
 	}
 

@@ -385,6 +385,11 @@ func writeFoldedHeader(raw *bytes.Buffer, name, value string) {
 // BuildDraftReplacement keeps the envelope and thread headers of a plain-text
 // draft while replacing its body and assigning a new Date and Message-ID.
 func BuildDraftReplacement(currentRaw []byte, body string, now time.Time, messageID string) (ReplyDraft, error) {
+	return BuildRichDraftReplacement(currentRaw, body, nil, now, messageID)
+}
+
+// BuildRichDraftReplacement can supply both MIME alternatives for a rich edit.
+func BuildRichDraftReplacement(currentRaw []byte, body string, formatted *string, now time.Time, messageID string) (ReplyDraft, error) {
 	if len(currentRaw) == 0 {
 		return ReplyDraft{}, errors.New("draft message is empty")
 	}
@@ -398,13 +403,17 @@ func BuildDraftReplacement(currentRaw []byte, body string, now time.Time, messag
 	if err := validateSingletonHeaders(message.Header); err != nil {
 		return ReplyDraft{}, err
 	}
+	var richType string
+	var richParams map[string]string
 	contentType := message.Header.Get("Content-Type")
 	if contentType != "" {
-		mediaType, _, err := stdmime.ParseMediaType(contentType)
+		mediaType, params, err := stdmime.ParseMediaType(contentType)
 		if err != nil {
 			return ReplyDraft{}, fmt.Errorf("invalid draft Content-Type: %w", err)
 		}
-		if !strings.EqualFold(mediaType, "text/plain") {
+		if mediaType == "text/html" || mediaType == "multipart/alternative" || mediaType == "multipart/related" || mediaType == "multipart/mixed" {
+			richType, richParams = mediaType, params
+		} else if !strings.EqualFold(mediaType, "text/plain") {
 			return ReplyDraft{}, errors.New("draft replacement requires a plain-text message")
 		}
 	}
@@ -412,7 +421,7 @@ func BuildDraftReplacement(currentRaw []byte, body string, now time.Time, messag
 	if err != nil {
 		return ReplyDraft{}, fmt.Errorf("parse draft MIME: %w", err)
 	}
-	if len(parsedCurrent.Attachments) != 0 || parsedCurrent.BodyHTML != "" {
+	if richType == "" && (len(parsedCurrent.Attachments) != 0 || parsedCurrent.BodyHTML != "") {
 		return ReplyDraft{}, errors.New("draft replacement does not support multipart or attachments")
 	}
 
@@ -462,11 +471,18 @@ func BuildDraftReplacement(currentRaw []byte, body string, now time.Time, messag
 		return ReplyDraft{}, err
 	}
 
-	return renderPlainTextDraft(plainTextEnvelope{
+	envelope := plainTextEnvelope{
 		From: from, To: to, Cc: cc, Bcc: bcc, ReplyTo: replyTo,
 		Subject: subject, MessageID: messageID,
 		InReplyTo: inReplyTo, References: references,
-	}, body, now)
+	}
+	if richType != "" {
+		return renderRichDraft(envelope, body, formatted, now, message.Body, richType, richParams, parsedCurrent)
+	}
+	if formatted != nil {
+		return ReplyDraft{}, errors.New("body-html is only available for a draft with an existing formatted alternative")
+	}
+	return renderPlainTextDraft(envelope, body, now)
 }
 
 func parseDraftHeaderAddresses(header mail.Header, name string, required bool) ([]*mail.Address, error) {

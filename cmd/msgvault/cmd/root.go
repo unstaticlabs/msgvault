@@ -350,6 +350,7 @@ func sanitizeArgs(args []string) []string {
 		"--refresh-token":  true,
 		"--client-secrets": true,
 		"--body":           true,
+		"--body-html":      true,
 	}
 	for _, a := range args {
 		if redactNext {

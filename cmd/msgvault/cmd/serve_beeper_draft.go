@@ -227,6 +227,9 @@ func (a *storeAPIAdapter) runBeeperDraftLifecycle(ctx context.Context, intent dr
 		return draftReplyError("draft_discarded", errors.New("discarded drafts cannot be edited"))
 	}
 	if intent.Operation == api.CLIRunDraftEditCommand {
+		if intent.BodyHTML != nil {
+			return draftReplyError("invalid_args", errors.New("chat drafts accept only plain text"))
+		}
 		if err := validBeeperDraftBody(intent.Body); err != nil {
 			return err
 		}

@@ -54,7 +54,7 @@ var stableDraftDefinitions = func() map[string]toolDefinition {
 			"draft_id": stringSchema("Managed draft ID"), "conversation": safeIDSchema("Local chat conversation ID"),
 		}), stableDraftOutputSchema, draftToolHandler("draft-get", "draft_id")),
 		"draft-edit": writeDefinition(ToolDraftEdit, "Run msgvault draft-edit through the daemon to replace a draft body. Msgvault never sends.", closedObject(map[string]*jsonschema.Schema{
-			"draft_id": stringSchema("Managed draft ID"), "revision": safeIDSchema("Current draft revision"), "body": stringSchema("Replacement body"),
+			"draft_id": stringSchema("Managed draft ID"), "revision": safeIDSchema("Current draft revision"), "body": stringSchema("Replacement plain-text body"), "body_html": stringSchema("Optional corresponding HTML for editing an existing rich email draft"),
 		}, "draft_id", "revision", "body"), stableDraftOutputSchema, draftToolHandler("draft-edit", "draft_id")),
 		"draft-delete": destructiveWriteDefinition(ToolDraftDelete, "Run msgvault draft-delete through the daemon to delete a managed draft. Client confirmation is required. Msgvault never sends.", closedObject(map[string]*jsonschema.Schema{
 			"draft_id": stringSchema("Managed draft ID"), "revision": safeIDSchema("Current draft revision"),
