@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-12"
+last_edited: "2026-11-24"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -22,6 +22,9 @@ with the existing downstream Inbox, calendar and multi-user workflows.
   across the browser, sidecar and native MCP endpoints.
 - Search and sync large archives with upstream query, indexing and IMAP
   improvements. New upstream importers and MCP discovery are included.
+- Remote API and MCP clients can make 20 requests per second per client
+  address, with a burst of 40, before the daemon answers `429`. The limit was
+  10 with a burst of 20.
 - Install downstream binaries and images from `unstaticlabs/msgvault`.
   The personal fork is used for contributions and does not publish this build.
 

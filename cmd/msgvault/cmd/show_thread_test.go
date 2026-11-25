@@ -29,7 +29,7 @@ func TestLoadThreadMessagesBeyondRateLimitBurst(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		assert := assert.New(t)
 		require := require.New(t)
-		limiter := api.NewRateLimiter(10, 20)
+		limiter := api.NewRateLimiter(20, 40)
 		defer limiter.Close()
 		handler := api.RateLimitMiddleware(limiter, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			assert.Equal("/api/v1/cli/message", r.URL.Path)
