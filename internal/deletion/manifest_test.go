@@ -653,6 +653,45 @@ func TestManager_CancelManifest_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+func TestStageManifestPreservesEachBatchAndAcceptsIdenticalRetries(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	mgr := testManager(t)
+	first := NewManifestForSource("Inbox follow-up", []string{"message-a"}, SourceReference{ID: 1, Type: "gmail", Identifier: "a@example.test"})
+	second := NewManifestForSource("Second follow-up", []string{"message-b"}, SourceReference{ID: 2, Type: "gmail", Identifier: "b@example.test"})
+	second.ID = first.ID
+	results := make(chan error, 2)
+	start := make(chan struct{})
+	for _, batch := range []*Manifest{first, second} {
+		go func() {
+			<-start
+			results <- mgr.StageManifest(batch)
+		}()
+	}
+	close(start)
+	left, right := <-results, <-results
+	if left == nil {
+		req.ErrorIs(right, ErrManifestExists)
+	} else {
+		req.ErrorIs(left, ErrManifestExists)
+		req.NoError(right)
+	}
+	stored, status, err := mgr.GetManifestWithStatus(first.ID)
+	req.NoError(err)
+	req.Equal(StatusPending, status)
+	original := first
+	if stored.Source.ID == second.Source.ID {
+		original = second
+	}
+	check.Equal(original.GmailIDs, stored.GmailIDs)
+	check.Equal(original.Description, stored.Description)
+	req.NoError(mgr.StageManifest(original))
+	req.NoError(mgr.CancelManifest(first.ID))
+	req.ErrorIs(mgr.StageManifest(original), ErrManifestExists)
+	_, status, err = mgr.GetManifestWithStatus(first.ID)
+	req.NoError(err)
+	check.Equal(StatusCancelled, status)
+}
+
 func TestManager_SaveManifest(t *testing.T) {
 	mgr := testManager(t)
 

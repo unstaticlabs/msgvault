@@ -3044,7 +3044,7 @@ func (h *handlers) saveDeletionManifest(ctx context.Context, manifest *deletion.
 	if err != nil {
 		return fmt.Errorf("create deletion manager: %w", err)
 	}
-	return manager.SaveManifest(manifest)
+	return manager.StageManifest(manifest)
 }
 
 func (h *handlers) searchByDomains(ctx context.Context, req toolRequest) (*toolResult, error) {

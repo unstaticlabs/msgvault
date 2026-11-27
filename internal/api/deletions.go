@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/deletion"
 	"go.kenn.io/msgvault/internal/query"
 )
@@ -212,6 +213,15 @@ func (s *Server) handleStageDeletion(w http.ResponseWriter, r *http.Request) {
 	if len(targets) == 0 {
 		writeError(w, http.StatusBadRequest, "no_messages_matched", "No messages matched the given criteria")
 		return
+	}
+	// The scoped engine already resolves only visible messages; this check
+	// keeps a member's manifest confined even if a resolver does not.
+	principal := s.requestPrincipal(r)
+	for _, target := range targets {
+		if !principal.Sees(target.SourceID) {
+			writeSourceNotVisible(w)
+			return
+		}
 	}
 
 	source, httpErr := sourceReferenceForTargets(targets)
@@ -508,8 +518,12 @@ func (s *Server) handleListDeletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "list_deletions_failed", "Failed to list deletion manifests")
 		return
 	}
+	principal := s.requestPrincipal(r)
 	summaries := make([]DeletionManifestSummary, 0, len(manifests))
 	for _, m := range manifests {
+		if !deletionManifestVisible(principal, m) {
+			continue
+		}
 		summaries = append(summaries, DeletionManifestSummary{
 			ID:           m.ID,
 			Status:       string(m.Status),
@@ -538,7 +552,7 @@ func (s *Server) handleGetDeletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	manifest, status, err := canceller.GetDeletionManifest(r.Context(), id)
-	if errors.Is(err, deletion.ErrManifestNotFound) {
+	if errors.Is(err, deletion.ErrManifestNotFound) || (err == nil && !deletionManifestVisible(s.requestPrincipal(r), manifest)) {
 		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("deletion manifest %q not found", id))
 		return
 	}
@@ -566,8 +580,8 @@ func (s *Server) handleCancelDeletion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_manifest_id", err.Error())
 		return
 	}
-	_, status, err := canceller.GetDeletionManifest(r.Context(), id)
-	if errors.Is(err, deletion.ErrManifestNotFound) {
+	manifest, status, err := canceller.GetDeletionManifest(r.Context(), id)
+	if errors.Is(err, deletion.ErrManifestNotFound) || (err == nil && !deletionManifestVisible(s.requestPrincipal(r), manifest)) {
 		writeError(w, http.StatusNotFound, "not_found", fmt.Sprintf("deletion manifest %q not found", id))
 		return
 	}
@@ -587,6 +601,22 @@ func (s *Server) handleCancelDeletion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, CancelDeletionResponse{ID: id, Status: string(deletion.StatusCancelled)})
+}
+
+// deletionManifestVisible reports whether the caller may see a manifest. A
+// scoped caller sees only manifests bound to one of their sources; a legacy
+// manifest without a source belongs to administrators.
+func deletionManifestVisible(principal authz.Principal, manifest *deletion.Manifest) bool {
+	if !principal.Scoped() {
+		return true
+	}
+	return manifest != nil && manifest.Source != nil && principal.Sees(manifest.Source.ID)
+}
+
+// writeSourceNotVisible answers a scoped caller who names a source outside
+// their view as if it did not exist, like every other scoped read.
+func writeSourceNotVisible(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, "source_not_found", "source not found")
 }
 
 // manifestFiltersFromRequest maps the request fields that

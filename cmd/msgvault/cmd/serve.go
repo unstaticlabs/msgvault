@@ -2784,7 +2784,7 @@ func (a *storeAPIAdapter) SaveCLIDeletionManifest(_ context.Context, manifest *d
 	if err != nil {
 		return err
 	}
-	return mgr.SaveManifest(manifest)
+	return mgr.StageManifest(manifest)
 }
 
 func (a *storeAPIAdapter) ListDeletionManifests(_ context.Context, status deletion.Status) ([]*deletion.Manifest, error) {

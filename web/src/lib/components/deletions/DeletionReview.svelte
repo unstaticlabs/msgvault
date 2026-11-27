@@ -138,9 +138,9 @@
     {#if result}
       <p role="status">{resultSummary(result)}</p>
       <p>Batch ID: <code>{result.id}</code></p>
-      <p>Run <code>msgvault delete-staged</code> separately to delete these messages from the source.</p>
+      <p>You can cancel this batch in Staged deletions until an administrator deletes the messages from the mailbox.</p>
     {:else}
-    <p>Stage eligible Gmail and Microsoft mail. The archive stays intact. Run <code>msgvault delete-staged</code> separately to execute deletion.</p>
+    <p>Staging keeps the messages in the mailbox and the archive. An administrator can later delete the staged messages from Gmail or Microsoft.</p>
     <Button label="Dry run" disabled={pending || !review || deletable === 0 || Boolean(blocked)} onclick={() => void dryRun()} />
     {#if pending && !review}
       <p class="muted" role="status">Checking…</p>

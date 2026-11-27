@@ -246,7 +246,7 @@ func (s *Server) humaAuthMiddleware(ctx huma.Context, next func(huma.Context)) {
 		writeHumaError(ctx, http.StatusUnauthorized, "unauthorized", "Invalid or missing API key")
 		return
 	}
-	required := minimumRoleForOperation(ctx.Operation())
+	required := s.requiredRoleForOperation(ctx.Operation())
 	if !auth.Principal.Can(required) {
 		s.logForbiddenAPIRequest(req, auth.Principal, required)
 		writeHumaError(ctx, http.StatusForbidden, "forbidden",

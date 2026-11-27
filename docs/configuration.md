@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-10-30"
+last_edited: "2026-11-14"
 title: Configuration
 description: Configuration file reference, environment variables, and file locations.
 ---
@@ -1182,6 +1182,7 @@ is an administrator.
 | Key | Default | Description |
 |---|---|---|
 | `api_key_login` | `true` | Whether the Web UI login form accepts an API key. Set to `false` when keys should stay a programmatic credential. |
+| `member_source_writes` | `false` | Lets members stage and cancel deletions and archive messages from the inbox, only in the sources bound to their user. Executing a staged deletion stays administrator-only. Set it on the daemon and on `msgvault mcp --http`, which then offers `stage_deletion` and `archive_from_inbox` to members. Environment: `MSGVAULT_AUTH_MEMBER_SOURCE_WRITES`. |
 
 `[[auth.api_keys]]` entries are additional bearer credentials, each with a role:
 

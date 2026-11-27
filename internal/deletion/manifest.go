@@ -59,6 +59,9 @@ const (
 // directory. Callers use errors.Is to map it to HTTP 404.
 var ErrManifestNotFound = errors.New("manifest not found")
 
+// ErrManifestExists identifies a batch ID already used by a different or finished plan.
+var ErrManifestExists = errors.New("deletion batch ID already in use")
+
 // Filters specifies criteria for selecting messages.
 type Filters struct {
 	Senders       []string `json:"senders,omitempty"`
@@ -868,6 +871,40 @@ func (m *Manager) GetManifestWithStatus(id string) (*Manifest, Status, error) {
 	return nil, "", fmt.Errorf("manifest %s: %w", id, ErrManifestNotFound)
 }
 
+// StageManifest publishes a new batch. An identical retry returns the existing
+// pending batch; an ID used by another plan or a later state stays reserved.
+func (m *Manager) StageManifest(manifest *Manifest) error {
+	if manifest.Status != StatusPending || manifest.Execution != nil {
+		return errors.New("staging requires a pending batch without execution history")
+	}
+	digest, err := manifest.Digest()
+	if err != nil {
+		return err
+	}
+	lock, err := m.acquireManifestLock(manifest.ID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Unlock() }()
+	existing, status, err := m.GetManifestWithStatus(manifest.ID)
+	switch {
+	case errors.Is(err, ErrManifestNotFound):
+		return writeManifestAtomic(manifest, filepath.Join(m.PendingDir(), manifest.ID+".json"))
+	case err != nil:
+		return err
+	case status != StatusPending:
+		return ErrManifestExists
+	}
+	existingDigest, err := existing.Digest()
+	if err != nil {
+		return err
+	}
+	if existingDigest != digest {
+		return ErrManifestExists
+	}
+	return nil
+}
+
 // SaveManifest saves a manifest to the appropriate directory based on status.
 func (m *Manager) SaveManifest(manifest *Manifest) error {
 	if err := ValidateManifestID(manifest.ID); err != nil {
@@ -987,7 +1024,7 @@ func (m *Manager) CreateManifest(description string, gmailIDs []string, filters 
 	manifest := NewManifest(description, gmailIDs)
 	manifest.Filters = filters
 
-	if err := m.SaveManifest(manifest); err != nil {
+	if err := m.StageManifest(manifest); err != nil {
 		return nil, err
 	}
 

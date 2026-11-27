@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/config"
 )
 
@@ -625,8 +626,8 @@ func TestInboxArchiveGrantsAreBounded(t *testing.T) {
 
 	// The newest plan survives, so a caller that plans and then confirms is
 	// never the one evicted.
-	grant, ok := grants.claim(last, issued.Add(time.Minute))
-	require.True(ok)
+	grant, err := grants.claim(last, issued.Add(time.Minute), authz.ServerKey())
+	require.NoError(err)
 	assert.Equal(
 		[]string{"m-" + strconv.Itoa(maxOutstandingInboxArchiveGrants+7)},
 		grant.SourceMessageIDs)
