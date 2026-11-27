@@ -226,7 +226,8 @@ func calendarEventRowsInWindow(ctx context.Context, r *loggedDB, dialect Dialect
 		for _, row := range parents {
 			if _, exists := byID[row.MessageID]; !exists {
 				byID[row.MessageID] = row
-				if row.Event.Kind == "series" {
+				// A cancelled parent supplies context for its archived edits only.
+				if row.Event.Kind == "series" && row.Event.Status != "cancelled" {
 					seriesCount++
 				}
 				if seriesCount > maxCalendarSeries {

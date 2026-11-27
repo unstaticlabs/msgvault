@@ -20,7 +20,7 @@ msgvault calendar events --from 2027-03-01 --to 2027-04-01
 msgvault calendar events --from 2027-03-01 --to 2027-04-01 --json
 ```
 
-Repeating events expand into occurrences. Edited occurrences appear at their new times, and cancelled occurrences show `cancelled`. A deleted series lists only its archived edited or cancelled occurrences. Existing archives rebuild event and attendee tables during setup, so a re-sync isn't needed.
+Repeating events expand into occurrences. Edited occurrences appear at their new times, and cancelled occurrences show `cancelled`. When a whole series is cancelled, only its archived edits and cancellations appear. They show as `cancelled`, and the series stays outside the 2,000-series limit. Existing archives rebuild event and attendee tables during setup, so a re-sync isn't needed.
 
 Date-only bounds use midnight in your machine's time zone. You can also pass RFC3339 timestamps with offsets. The end is exclusive and must follow the start. Timed events print in your machine's time zone; all-day events show their dates. The `END (EXCL)` column shows the exclusive end. The ID identifies the effective archive message, including the edited or cancelled copy. JSON carries the series master ID separately in `series_message_id`.
 
