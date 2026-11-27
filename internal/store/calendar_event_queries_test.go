@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -99,6 +100,22 @@ func TestCalendarEventRowsHardSeriesCap(t *testing.T) {
 	requirements.NoError(err)
 	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.Add(time.Hour))
 	requirements.NoError(err)
+
+	// An archived edit can bring a cancelled parent into the window even
+	// when the 2,000 live series already use the full allowance.
+	_, err = st.db.Exec(`UPDATE calendar_events SET status = 'confirmed' WHERE kind = 'series' AND provider_event_id <> 'bulk-series-100000'`)
+	requirements.NoError(err)
+	_, moved := calendarFixture(t, st, "moved-rehearsal", `{"id":"moved-rehearsal","recurringEventId":"bulk-series-100000","originalStartTime":{"date":"2027-03-14"},"start":{"dateTime":"2027-03-14T00:30:00Z"},"end":{"dateTime":"2027-03-14T00:45:00Z"}}`)
+	page, err := st.ListCalendarOccurrencesContext(t.Context(), from, from.Add(time.Hour))
+	requirements.NoError(err)
+	index := slices.IndexFunc(page.Occurrences, func(o CalendarOccurrence) bool { return o.MessageID == moved })
+	requirements.NotEqual(-1, index)
+	assertions.Equal("cancelled", page.Occurrences[index].Status)
+	assertions.Equal(from.Add(30*time.Minute), page.Occurrences[index].Start.UTC())
+	_, err = st.db.Exec(`UPDATE calendar_events SET status = 'confirmed' WHERE provider_event_id = 'bulk-series-100000'`)
+	requirements.NoError(err)
+	_, err = st.ListCalendarOccurrencesContext(t.Context(), from, from.Add(time.Hour))
+	requirements.ErrorIs(err, ErrQueryTooBroad)
 }
 
 func TestCalendarEventRowsBudgetRejectsBeforeDecoding(t *testing.T) {

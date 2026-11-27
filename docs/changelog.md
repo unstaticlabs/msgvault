@@ -15,6 +15,9 @@ with the existing downstream Inbox, calendar and multi-user workflows.
   archived with a timezone offset. Upgrading rebuilds the local analytics cache;
   no provider re-sync is needed. If automatic cache building is disabled, run
   `msgvault build-cache`.
+- Calendar listings still open at the 2,000-series limit when a cancelled
+  series has an archived edit in the requested window. The edit appears at its
+  archived time with the status `cancelled`.
 - Browse the redesigned Messages, People, Files and Sources workspaces while
   retaining cross-account Inbox/read filters and related-email grouping.
 - Keep exact-message Inbox archiving, saved-filter recovery and calendar coverage.
