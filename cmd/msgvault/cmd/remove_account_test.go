@@ -933,32 +933,29 @@ func TestRemoveNonMatrixAccountDoesNotWaitForMatrixLifecycleLock(t *testing.T) {
 	testCfg := &config.Config{HomeDir: tmpDir, Data: config.DataConfig{DataDir: tmpDir}}
 	ctx := testInvocationContext(t.Context(), testCfg, invocationOptions{})
 
-	lockHeld := make(chan struct{})
-	releaseLock := make(chan struct{})
-	lockDone := make(chan error, 1)
-	go func() {
-		lockDone <- matrixsource.WithCredentialLifecycleLock(testCfg.TokensDir(), func() error {
-			close(lockHeld)
-			<-releaseLock
+	cascadeDone := make(chan struct{})
+	removeAccountAfterCascadeHook = func() { close(cascadeDone) }
+	t.Cleanup(func() { removeAccountAfterCascadeHook = nil })
+
+	// Observe the source removal while the Matrix lock is held. The later
+	// analytics rebuild can take longer than the deadlock timeout on Windows.
+	var removeDone chan error
+	lockErr := matrixsource.WithCredentialLifecycleLock(testCfg.TokensDir(), func() error {
+		removeDone = make(chan error, 1)
+		go func() { removeDone <- executeRemoveAccount(t, ctx) }()
+		select {
+		case <-cascadeDone:
 			return nil
-		})
-	}()
-	select {
-	case <-lockHeld:
-	case <-time.After(5 * time.Second):
-		require.FailNow("Matrix lifecycle lock was not acquired")
+		case <-time.After(5 * time.Second):
+			return errors.New("unrelated account removal waited for Matrix lifecycle lock")
+		}
+	})
+	var removeErr error
+	if removeDone != nil {
+		// Join before TempDir cleanup even when the lock assertion fails.
+		removeErr = <-removeDone
 	}
-	removeDone := make(chan error, 1)
-	go func() { removeDone <- executeRemoveAccount(t, ctx) }()
-	select {
-	case err := <-removeDone:
-		require.NoError(err)
-	case <-time.After(5 * time.Second):
-		close(releaseLock)
-		require.FailNow("unrelated account removal waited for Matrix lifecycle lock")
-	}
-	close(releaseLock)
-	require.NoError(<-lockDone)
+	require.NoError(errors.Join(lockErr, removeErr))
 }
 
 func TestRemoveAccountCmd_LiveSQLWhileRemovalPausedAfterCascade(t *testing.T) {
