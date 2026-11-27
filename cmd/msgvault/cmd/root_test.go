@@ -20,6 +20,7 @@ import (
 
 func TestSanitizeArgsDraftBody(t *testing.T) {
 	assert.Equal(t, []string{"draft-reply", "42", "--body", "<redacted>", "--body=<redacted>"}, sanitizeArgs([]string{"draft-reply", "42", "--body", "body-secret-731", "--body=body-secret-731"}))
+	assert.Equal(t, []string{"draft-edit", "d1", "--body-html", "<redacted>", "--body-html=<redacted>"}, sanitizeArgs([]string{"draft-edit", "d1", "--body-html", "<b>example</b>", "--body-html=<b>example</b>"}))
 }
 
 func TestErrOAuthNotConfigured(t *testing.T) {

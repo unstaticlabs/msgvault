@@ -24,6 +24,7 @@ type draftLifecycleIntent struct {
 	DraftID      string
 	Revision     int64
 	Body         string
+	BodyHTML     *string
 	JSON         bool
 	MetadataOnly bool // Set by delegated authorization, never by CLI arguments.
 	// ConversationID lists a conversation's local chat drafts in place of DraftID.
@@ -108,12 +109,19 @@ func parseDraftLifecycleArgs(args []string) (draftLifecycleIntent, error) {
 				return draftLifecycleIntent{}, draftReplyError("invalid_args", errors.New("--revision must be a positive integer"))
 			}
 			intent.Revision, revisionSet = parsed, true
-		case "body":
+		case "body", "body-html":
 			if !hasValue {
 				if len(rest) == 0 {
 					return draftLifecycleIntent{}, draftReplyError("invalid_args", errors.New("--body requires a value"))
 				}
 				value, rest = rest[0], rest[1:]
+			}
+			if name == "body-html" {
+				if intent.Operation != api.CLIRunDraftEditCommand || intent.BodyHTML != nil {
+					return draftLifecycleIntent{}, draftReplyError("invalid_args", errors.New("only draft-edit accepts one --body-html"))
+				}
+				intent.BodyHTML = &value
+				continue
 			}
 			if bodySet {
 				return draftLifecycleIntent{}, draftReplyError("invalid_args", errors.New("--body given more than once"))
@@ -526,7 +534,7 @@ func (a *storeAPIAdapter) runCLIDraftLifecycle(
 	}
 	var replacement imaplib.ReplyDraft
 	if intent.Operation == api.CLIRunDraftEditCommand {
-		replacement, err = imaplib.BuildIMAPDraftReplacement(currentRaw, intent.Body, time.Now(), "")
+		replacement, err = imaplib.BuildRichIMAPDraftReplacement(currentRaw, intent.Body, intent.BodyHTML, time.Now(), "")
 		if err != nil {
 			return draftReplyError("invalid_draft", err)
 		}
@@ -537,7 +545,7 @@ func (a *storeAPIAdapter) runCLIDraftLifecycle(
 			if err != nil {
 				return draftReplyError("draft_read_failed", err)
 			}
-			if current.BodyText != replacement.Parsed.BodyText {
+			if current.BodyText != replacement.Parsed.BodyText || current.BodyHTML != replacement.Parsed.BodyHTML {
 				return draftReplyError("pending_operation", errors.New("retry must use the already published edit body"))
 			}
 		}
@@ -1321,7 +1329,8 @@ func draftLifecyclePersistData(
 		}
 		data := &store.MessagePersistData{
 			Message: message, BodyText: sql.NullString{String: parsed.BodyText, Valid: true},
-			RawMIME: replacement.Raw, RawFormat: "mime",
+			BodyHTML: sql.NullString{String: parsed.BodyHTML, Valid: parsed.BodyHTML != ""},
+			RawMIME:  replacement.Raw, RawFormat: "mime",
 			Recipients: []store.RecipientSet{
 				{Type: "from", ParticipantIDs: fromIDs, EmailAddresses: fromAddresses},
 				{Type: "to", ParticipantIDs: toIDs, EmailAddresses: toAddresses},

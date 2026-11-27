@@ -1031,7 +1031,7 @@ func (a *storeAPIAdapter) runCLIGmailDraftLifecycle(
 		if readErr != nil {
 			return draftReplyError("draft_read_failed", readErr)
 		}
-		replacement, buildErr := imaplib.BuildDraftReplacement(currentRaw, intent.Body, time.Now(), "")
+		replacement, buildErr := imaplib.BuildRichDraftReplacement(currentRaw, intent.Body, intent.BodyHTML, time.Now(), "")
 		if buildErr != nil {
 			return draftReplyError("invalid_draft", buildErr)
 		}

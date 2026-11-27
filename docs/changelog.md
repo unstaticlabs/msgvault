@@ -1,5 +1,5 @@
 ---
-last_edited: "2026-11-14"
+last_edited: "2026-11-27"
 title: Changelog
 description: Release history for msgvault
 ---
@@ -11,6 +11,10 @@ All notable changes to msgvault, grouped by release.
 This build combines upstream 0.23.0 and subsequent fixes through `c3afaa35`
 with the existing downstream Inbox, calendar and multi-user workflows.
 
+- Calendar search and analytics retain the correct instant for events already
+  archived with a timezone offset. Upgrading rebuilds the local analytics cache;
+  no provider re-sync is needed. If automatic cache building is disabled, run
+  `msgvault build-cache`.
 - Browse the redesigned Messages, People, Files and Sources workspaces while
   retaining cross-account Inbox/read filters and related-email grouping.
 - Keep exact-message Inbox archiving, saved-filter recovery and calendar coverage.
@@ -21,6 +25,9 @@ with the existing downstream Inbox, calendar and multi-user workflows.
 - Let members stage deletions and archive from the inbox in their own sources
   with `[auth] member_source_writes`, so people who share an archive need not
   be administrators who see each other's mail.
+- Remote API and MCP clients can make 20 requests per second per client
+  address, with a burst of 40, before the daemon answers `429`. The limit was
+  10 with a burst of 20.
 - Install downstream binaries and images from `unstaticlabs/msgvault`.
   The personal fork is used for contributions and does not publish this build.
 

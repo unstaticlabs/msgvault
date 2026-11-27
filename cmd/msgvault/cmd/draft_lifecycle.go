@@ -40,6 +40,7 @@ func newDraftEditCommand() *cobra.Command {
 	}
 	command.Flags().Int64("revision", 0, "current draft revision")
 	command.Flags().String("body", "", "replacement plain-text body")
+	command.Flags().String("body-html", "", "formatted alternative for a rich email draft")
 	_ = command.MarkFlagRequired("revision")
 	_ = command.MarkFlagRequired("body")
 	command.Flags().Bool("json", false, "emit one JSON result")

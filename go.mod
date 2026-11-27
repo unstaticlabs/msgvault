@@ -12,6 +12,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/BurntSushi/toml v1.6.0
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
+	github.com/aymanbagabas/go-udiff v0.4.1
 	github.com/aymerick/douceur v0.2.0
 	github.com/cenkalti/backoff/v7 v7.0.2
 	github.com/charmbracelet/x/ansi v0.11.9
