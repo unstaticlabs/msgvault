@@ -36,11 +36,14 @@ type scriptedGmailDraftClient struct {
 	sendAs         []gmail.SendAs
 	sendAsErr      error
 
-	createCalls int
-	getCalls    int
-	updateCalls int
-	deleteCalls int
-	listCalls   int
+	createCalls     int
+	getCalls        int
+	updateCalls     int
+	updatedDraftID  string
+	updatedThreadID string
+	updatedRaw      []byte
+	deleteCalls     int
+	listCalls       int
 }
 
 func (c *scriptedGmailDraftClient) CreateDraft(_ context.Context, raw []byte, threadID string) (*gmail.Draft, error) {
@@ -71,8 +74,10 @@ func (c *scriptedGmailDraftClient) GetDraft(context.Context, string) (*gmail.Dra
 	return c.getDraft, nil
 }
 
-func (c *scriptedGmailDraftClient) UpdateDraft(context.Context, string, []byte, string) (*gmail.Draft, error) {
+func (c *scriptedGmailDraftClient) UpdateDraft(_ context.Context, draftID string, raw []byte, threadID string) (*gmail.Draft, error) {
 	c.updateCalls++
+	c.updatedDraftID, c.updatedThreadID = draftID, threadID
+	c.updatedRaw = append([]byte(nil), raw...)
 	if c.updateHook != nil {
 		c.updateHook()
 	}

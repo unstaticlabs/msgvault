@@ -654,17 +654,20 @@ func TestStripHTML(t *testing.T) {
 }
 
 func TestMessage_GetBodyText(t *testing.T) {
-	// Prefers plain text
-	msg := &Message{BodyText: "plain", BodyHTML: "<p>html</p>"}
-	assert.Equal(t, "plain", msg.GetBodyText())
-
-	// Falls back to HTML
-	msg = &Message{BodyHTML: "<p>html only</p>"}
-	assert.Equal(t, "html only", msg.GetBodyText())
-
-	// Empty
-	msg = &Message{}
-	assert.Empty(t, msg.GetBodyText())
+	for _, tc := range []struct {
+		name, plain, html, want string
+	}{
+		{"plain text keeps its whitespace", " plain\n", "<p>html</p>", " plain\n"},
+		{"HTML only", "", "<p>html only</p>", "html only"},
+		{"blank plain alternative", " \t\r\n", "<p>Visible <b>text</b></p>", "Visible text"},
+		{"blank plain only", " \t\r\n", "", " \t\r\n"},
+		{"empty message", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			msg := Message{BodyText: tc.plain, BodyHTML: tc.html}
+			assert.Equal(t, tc.want, msg.GetBodyText())
+		})
+	}
 }
 
 // TestParse_MinimalMessage tests our Parse wrapper with a minimal valid message.
