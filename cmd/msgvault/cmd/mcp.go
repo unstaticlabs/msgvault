@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -231,6 +233,9 @@ func delegatedMCPServeOptions(ctx context.Context, st *daemonclient.Client) (mcp
 		opts.Engine = daemonclient.NewEngineAdapter(st)
 		opts.AttachmentReader = st
 		opts.GrantPermissions = grant.Permissions
+		if slices.Contains(grant.ReadOperations, "listCalendarEvents") {
+			opts.CalendarOccurrences = st
+		}
 	}
 	if daemonclient.APISchemaVersionAtLeast(schemaVersion, calendarControlMinAPISchemaVersion) {
 		opts.Calendar = st
@@ -301,6 +306,10 @@ func daemonMCPServeOptions(ctx context.Context, st *daemonclient.Client, state *
 		log.Warn("operational MCP tools disabled because daemon discovery failed", "error", discoveryErr)
 	} else {
 		backend := newDaemonMCPOperations(st, capabilities)
+		hasRoute := supportedMCPRoutes(capabilities)
+		if hasRoute("listCalendarEvents", http.MethodGet, "/api/v1/calendar/events", "source_ids", "limit", "offset") {
+			opts.CalendarOccurrences = st
+		}
 		opts.Operations = backend
 		opts.OperationCapabilities = backend.capabilities()
 	}

@@ -147,6 +147,7 @@ type ServeOptions struct {
 	PersonTierBackend      PersonTierBackend
 	Kata                   KataBackend
 	ContactRoutesBackend   ContactRoutesBackend
+	CalendarOccurrences    CalendarOccurrenceReader
 	// KataLookup enables issue lookup and context reads.
 	KataLookup  bool
 	KataDocbank bool
@@ -462,6 +463,7 @@ func newMCPServerWithPolicy(
 		identityScoring:      opts.IdentityScoring,
 		drafts:               opts.Drafts,
 		contactRoutesBackend: opts.ContactRoutesBackend,
+		calendarOccurrences:  opts.CalendarOccurrences,
 		chatDiscoveryBackend: opts.ChatDiscoveryBackend,
 	}
 
@@ -833,7 +835,7 @@ func agentReadToolPermission(name string) (agentgrant.Permission, bool) {
 	switch name {
 	case ToolSearchMessages, ToolSearchMetadata, ToolSearchMessageBodies, ToolListMessages, ToolAggregate, ToolSearchByDomains:
 		return agentgrant.PermissionSearchRead, true
-	case ToolGetMessage, ToolListThread, ToolSearchInMessage:
+	case ToolGetMessage, ToolListThread, ToolSearchInMessage, ToolListCalendarOccurrences:
 		return agentgrant.PermissionMessageRead, true
 	case ToolGetAttachment:
 		return agentgrant.PermissionAttachmentRead, true

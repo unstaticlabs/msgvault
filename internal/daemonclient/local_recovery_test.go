@@ -82,7 +82,7 @@ func TestLocalDaemonRecoveryMessageURLsUseCurrentEndpoint(t *testing.T) {
 	assertions.Equal(http.StatusNoContent, response.StatusCode)
 	requirements.NoError(response.Body.Close())
 
-	assertions.Equal(replacement.URL+"/messages/42", client.messageWebURL(context.Background(), 42))
+	assertions.Equal(replacement.URL+"/messages/42", client.MessageWebURL(context.Background(), 42))
 }
 
 func TestLocalDaemonRecoveryReplaysBodyAndRefreshesCredentials(t *testing.T) {

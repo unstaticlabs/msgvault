@@ -14,6 +14,31 @@ import (
 	"go.kenn.io/msgvault/internal/store"
 )
 
+func TestArchivedCalendarPageRejectsLegacyAndUnscopedResponses(t *testing.T) {
+	from := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct{ name, body, want string }{
+		{"legacy", `{"occurrences":[],"unexpandable":[]}`, "does not support scoped calendar pages"},
+		{"other source", `{"occurrences":[{"source_id":18}],"unexpandable":[],"total":1}`, "unselected calendar"},
+		{"oversized", `{"occurrences":[],"unexpandable":[{"message_id":1},{"message_id":2}],"total":2}`, "does not support scoped calendar pages"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "17", r.URL.Query().Get("source_ids"))
+				assert.Equal(t, "1", r.URL.Query().Get("limit"))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			t.Cleanup(server.Close)
+			client, err := daemonclient.New(daemonclient.Config{URL: server.URL, APIKey: "synthetic-owner-key", AllowInsecure: true, HTTPClient: server.Client()})
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.NoError(t, client.Close()) })
+			page, err := client.ArchivedCalendarPage(t.Context(), []int64{17}, from, from.Add(time.Hour), 1, 0)
+			require.Nil(t, page)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
 func TestCalendarEventsClient(t *testing.T) {
 	assertions := assert.New(t)
 	requirements := require.New(t)

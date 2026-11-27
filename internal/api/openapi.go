@@ -399,7 +399,8 @@ import (
 // 3.42.0 adds iMessage participant and attachment-size limits to settings.
 // 3.43.0 adds receiver-reported sender authentication to single-message reads.
 // 3.44.0 retains scoped mailbox, related-email work, calendar coverage and provider-state contracts alongside upstream 3.43.
-const APISchemaVersion = "3.44.0"
+// The fork's 3.45.0 adds source selection and pagination to archived calendar occurrences.
+const APISchemaVersion = "3.45.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

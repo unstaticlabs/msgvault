@@ -31,6 +31,8 @@ type CalendarUnexpandable struct {
 	Reason    string `json:"reason"`
 }
 type CalendarOccurrencePage struct {
+	Total        *int                   `json:"total,omitempty"`
+	NextOffset   *int                   `json:"next_offset,omitempty"`
 	Occurrences  []CalendarOccurrence   `json:"occurrences"`
 	Unexpandable []CalendarUnexpandable `json:"unexpandable"`
 }

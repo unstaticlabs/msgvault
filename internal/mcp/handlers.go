@@ -158,6 +158,7 @@ type handlers struct {
 	savedViews           savedview.Service
 	meetings             MeetingBackend
 	calendar             CalendarBackend
+	calendarOccurrences  CalendarOccurrenceReader
 	personAgendaBackend  PersonAgendaBackend
 	personTierBackend    PersonTierBackend
 	kata                 KataBackend

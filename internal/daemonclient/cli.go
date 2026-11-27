@@ -987,7 +987,7 @@ func (c *Client) GetCLISearch(ctx context.Context, req CLISearchRequest) (*CLISe
 	}
 	result := cliSearchFromGenerated(resp.JSON200)
 	for i := range result.Results {
-		result.Results[i].WebURL = c.messageWebURL(ctx, result.Results[i].ID)
+		result.Results[i].WebURL = c.MessageWebURL(ctx, result.Results[i].ID)
 	}
 	return result, nil
 }
@@ -1044,7 +1044,7 @@ func (c *Client) GetCLIHybridSearch(
 		return nil, err
 	}
 	for i := range result.Results {
-		result.Results[i].Message.WebURL = c.messageWebURL(ctx, result.Results[i].Message.ID)
+		result.Results[i].Message.WebURL = c.MessageWebURL(ctx, result.Results[i].Message.ID)
 	}
 	return result, nil
 }
@@ -1448,7 +1448,7 @@ func (c *Client) GetCLIMessage(ctx context.Context, id string) (*query.MessageDe
 	}
 	message := cliMessageDetailFromGenerated(resp.JSON200)
 	if message != nil {
-		message.WebURL = c.messageWebURL(ctx, message.ID)
+		message.WebURL = c.MessageWebURL(ctx, message.ID)
 	}
 	return message, nil
 }
@@ -1772,9 +1772,9 @@ func inboxArchiveResultFromGenerated(
 	return out
 }
 
-// messageWebURL opens the selected daemon's direct message route.
+// MessageWebURL opens the selected daemon's direct message route.
 // Message IDs are local to that daemon.
-func (c *Client) messageWebURL(ctx context.Context, id int64) string {
+func (c *Client) MessageWebURL(ctx context.Context, id int64) string {
 	if id <= 0 {
 		return ""
 	}
@@ -1784,7 +1784,7 @@ func (c *Client) messageWebURL(ctx context.Context, id int64) string {
 func (c *Client) messageSummariesWithURLs(ctx context.Context, messages []generated.MessageSummary) []query.MessageSummary {
 	result := messageSummariesFromGenerated(messages)
 	for i := range result {
-		result[i].WebURL = c.messageWebURL(ctx, result[i].ID)
+		result[i].WebURL = c.MessageWebURL(ctx, result[i].ID)
 	}
 	return result
 }

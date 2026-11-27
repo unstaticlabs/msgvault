@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -55,12 +56,13 @@ type agentTokenIssueResponse struct {
 
 // agentTokenView is the list/revoke-safe view of a grant: no secret or digest.
 type agentTokenView struct {
-	ExpiresAt   *time.Time             `json:"expires_at,omitempty"`
-	ID          string                 `json:"id"`
-	Label       string                 `json:"label"`
-	Permissions []string               `json:"permissions"`
-	Sources     []agentTokenSourceView `json:"sources"`
-	CreatedAt   time.Time              `json:"created_at"`
+	ReadOperations []string               `json:"read_operations,omitempty"`
+	ExpiresAt      *time.Time             `json:"expires_at,omitempty"`
+	ID             string                 `json:"id"`
+	Label          string                 `json:"label"`
+	Permissions    []string               `json:"permissions"`
+	Sources        []agentTokenSourceView `json:"sources"`
+	CreatedAt      time.Time              `json:"created_at"`
 }
 
 type agentTokenSourceView struct {
@@ -350,7 +352,14 @@ func (s *Server) handleGetAgentTokenSelf(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "agent_token_required", "Only an agent token can read its own grant")
 		return
 	}
-	writeJSON(w, http.StatusOK, grantToView(*grant))
+	view := grantToView(*grant)
+	for operation, permission := range agentReadPermissions {
+		if slices.Contains(grant.Permissions, permission) {
+			view.ReadOperations = append(view.ReadOperations, operation)
+		}
+	}
+	slices.Sort(view.ReadOperations)
+	writeJSON(w, http.StatusOK, view)
 }
 
 // handleRevokeAgentToken removes a grant by ID.

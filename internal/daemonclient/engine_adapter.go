@@ -679,7 +679,7 @@ func (c *Client) queryMessageSummariesFromCLIGenerated(ctx context.Context, msgs
 	out := make([]query.MessageSummary, len(msgs))
 	for i, msg := range msgs {
 		out[i] = queryMessageSummaryFromGenerated(msg)
-		out[i].WebURL = c.messageWebURL(ctx, msg.ID)
+		out[i].WebURL = c.MessageWebURL(ctx, msg.ID)
 	}
 	return out
 }
@@ -817,7 +817,7 @@ func (e *Engine) GetMessage(ctx context.Context, id int64) (*query.MessageDetail
 
 	detail := queryDetailFromAPIMessage(msg)
 	if detail != nil {
-		detail.WebURL = e.store.messageWebURL(ctx, detail.ID)
+		detail.WebURL = e.store.MessageWebURL(ctx, detail.ID)
 	}
 	return detail, nil
 }
@@ -1152,7 +1152,7 @@ func (e *Engine) SearchMessageBodies(ctx context.Context, q *search.Query, limit
 	}
 	messages, err := bodySearchSummariesFromGenerated(resp.JSON200.Messages, resp.JSON200.BodyContexts)
 	for i := range messages {
-		messages[i].WebURL = e.store.messageWebURL(ctx, messages[i].ID)
+		messages[i].WebURL = e.store.MessageWebURL(ctx, messages[i].ID)
 	}
 	if err != nil {
 		return nil, err
