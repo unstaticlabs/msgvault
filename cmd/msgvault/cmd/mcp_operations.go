@@ -22,12 +22,11 @@ type daemonMCPOperations struct {
 	supported []string
 }
 
-func newDaemonMCPOperations(client *daemonclient.Client, capabilities *apiprotocol.MCPCapabilities) *daemonMCPOperations {
-	backend := &daemonMCPOperations{client: client}
-	if capabilities == nil {
-		return backend
-	}
-	hasRoute := func(id, method, path string, query ...string) bool {
+func supportedMCPRoutes(capabilities *apiprotocol.MCPCapabilities) mcpRouteCheck {
+	return func(id, method, path string, query ...string) bool {
+		if capabilities == nil {
+			return false
+		}
 		for _, route := range capabilities.Routes {
 			if route.OperationID != id || route.Method != method || route.Path != path {
 				continue
@@ -41,6 +40,14 @@ func newDaemonMCPOperations(client *daemonclient.Client, capabilities *apiprotoc
 		}
 		return false
 	}
+}
+
+func newDaemonMCPOperations(client *daemonclient.Client, capabilities *apiprotocol.MCPCapabilities) *daemonMCPOperations {
+	backend := &daemonMCPOperations{client: client}
+	if capabilities == nil {
+		return backend
+	}
+	hasRoute := supportedMCPRoutes(capabilities)
 	if hasRoute("getSchedulerStatus", http.MethodGet, "/api/v1/scheduler/status") {
 		backend.supported = append(backend.supported, "get_source_scheduler_status")
 	}

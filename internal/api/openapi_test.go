@@ -2376,7 +2376,7 @@ func TestInboxArchiveSchemaVersion(t *testing.T) {
 	assert := assert.New(t)
 	require := require.New(t)
 
-	assert.Equal("3.44.0", APISchemaVersion)
+	assert.Equal("3.45.0", APISchemaVersion)
 
 	document := OpenAPIDocument()
 	authorize := document.Paths["/api/v1/inbox-archive/authorize"]
@@ -2389,19 +2389,19 @@ func TestInboxArchiveSchemaVersion(t *testing.T) {
 }
 
 func TestDeletionSubsetSchemaVersion(t *testing.T) {
-	assert.Equal(t, "3.44.0", APISchemaVersion)
+	assert.Equal(t, "3.45.0", APISchemaVersion)
 }
 
 func TestOperationsWorkspaceSchemaVersion(t *testing.T) {
 	for _, doc := range []*huma.OpenAPI{OpenAPIDocument(), openAPIClientDocument()} {
-		assert.Equal(t, "3.44.0", doc.Info.Version)
+		assert.Equal(t, "3.45.0", doc.Info.Version)
 	}
 }
 
 func TestAnalyticsCacheReadinessUsesAdditiveSchemaVersion(t *testing.T) {
-	assert.Equal(t, "3.44.0", APISchemaVersion)
+	assert.Equal(t, "3.45.0", APISchemaVersion)
 }
 
 func TestPersonFilesUseAdditiveSchemaVersion(t *testing.T) {
-	assert.Equal(t, "3.44.0", APISchemaVersion)
+	assert.Equal(t, "3.45.0", APISchemaVersion)
 }

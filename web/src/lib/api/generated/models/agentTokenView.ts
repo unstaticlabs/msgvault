@@ -9,6 +9,7 @@ export interface AgentTokenView {
   id: string;
   label: string;
   permissions: string[];
+  read_operations?: string[];
   sources: AgentTokenSourceView[];
   [key: string]: unknown;
 }

@@ -42,9 +42,10 @@ func TestCalendarEventsRoute(t *testing.T) {
 		want              string
 	}{
 		{"owner", path, "", nil, 200, `"message_id":42`},
-		{"delegated", path, secret, nil, 401, ""},
+		{"calendar write grant without message read", path, secret, nil, 403, "permission_denied"},
 		{"remote", path, "synthetic-reader-key", nil, 403, ""},
 		{"missing", "/api/v1/calendar/events", "", nil, 400, "invalid_argument"},
+		{"negative calendar ID", path + "&source_ids=-1", "", nil, 400, "invalid_argument"},
 		{"reversed", strings.Replace(path, "2027-04-01", "2027-02-01", 1), "", nil, 400, "invalid_argument"},
 		{"broad", path, "", store.ErrQueryTooBroad, 400, "query_too_broad"},
 		{"series cap", path, "", fmt.Errorf("%w: more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series", store.ErrQueryTooBroad), 400, "more than 2000 recurring series overlap the window; a narrower window will not reduce open-ended series"},

@@ -141,6 +141,15 @@ type ListAttributeDefinitionsQuery struct {
 type ListCalendarEventsQuery struct {
 	From time.Time `json:"from" validate:"required"`
 	To   time.Time `json:"to" validate:"required"`
+
+	// SourceIds Only include these archive calendar source IDs.
+	SourceIds []int64 `json:"source_ids,omitempty"`
+
+	// Limit Return at most this many occurrences and unexpandable records, from 1 to 100.
+	Limit *int64 `json:"limit,omitempty"`
+
+	// Offset Number of results to skip when a limit is supplied.
+	Offset *int64 `json:"offset,omitempty"`
 }
 
 func (l ListCalendarEventsQuery) Validate() error {

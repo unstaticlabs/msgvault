@@ -461,7 +461,7 @@ func (b *PeopleBrowser) ListMeetings(
 			return nil, fmt.Errorf("meeting timeline row %q has no anchor message", row.Key)
 		}
 		page.Rows[i] = meetingSummaryFromGenerated(row)
-		page.Rows[i].WebURL = b.engine.store.messageWebURL(ctx, page.Rows[i].ID)
+		page.Rows[i].WebURL = b.engine.store.MessageWebURL(ctx, page.Rows[i].ID)
 	}
 	return page, nil
 }

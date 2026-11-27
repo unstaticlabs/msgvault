@@ -282,6 +282,11 @@ attempt time, and whether the latest refresh completed. A first failed or
 limited run can have no successful range. Existing sources acquire this metadata
 on their next sync; no database migration or destructive reimport is needed.
 
+For an actual schedule, the MCP tool `list_calendar_occurrences` expands archived
+series in selected calendars and includes their coverage. A metadata search can
+instead locate the historical message for a series or an individual edit.
+[Reading a calendar from chat](chat.md#calendar-control).
+
 MCP `get_stats` and explicit `message_type:calendar_event` metadata/body searches
 include `calendar_cache`. It identifies registered sources with `covered`,
 `incomplete`, `stale` (older than 24 hours), `outside_coverage`, `mixed`, or

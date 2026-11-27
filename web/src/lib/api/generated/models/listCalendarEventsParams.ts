@@ -5,4 +5,16 @@
 export type ListCalendarEventsParams = {
   from: string;
   to: string;
+  /**
+   * Only include these archive calendar source IDs.
+   */
+  source_ids?: number[];
+  /**
+   * Return at most this many occurrences and unexpandable records, from 1 to 100.
+   */
+  limit?: number;
+  /**
+   * Number of results to skip when a limit is supplied.
+   */
+  offset?: number;
 };

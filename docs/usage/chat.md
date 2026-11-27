@@ -37,6 +37,19 @@ View never deletes archive messages.
 
 ## Calendar control
 
+Ask what your archive shows for a day or week with `list_calendar_occurrences`.
+Select calendar source IDs from your grant or `get_stats`, then give `from`
+and `to` as timestamps with UTC offsets. The end is exclusive. The tool
+follows recurring meetings to the time they were moved and preserves
+cancellations. Use the returned message ID to open an archived event.
+
+A page includes up to 50 results by default. Follow `next_offset` to continue.
+An unexpandable item identifies an archived meeting whose exact occurrences
+could not be calculated. Check `calendar_cache` for the coverage of each
+selected source before interpreting a gap. Use `calendar_freebusy` for live
+availability. The archive read uses the same source access as other message
+reads and requires `message.read` for a delegated token.
+
 Daemon API schema 3.1.0 adds `calendar_create`, `calendar_update`,
 `calendar_delete`, `calendar_move`, `calendar_respond`, `calendar_freebusy`, and
 `calendar_conflicts`. All require `account`; event mutations also require
