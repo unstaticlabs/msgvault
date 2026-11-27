@@ -58,6 +58,7 @@ func TestMCPMemoryChild(t *testing.T) {
 		names := task3ToolNames(t, listed)
 		require.Contains(names, ToolDraftReply)
 		require.Contains(names, ToolGetIdentityScoringStatus)
+		require.Contains(names, ToolListCalendarOccurrences)
 		t.Logf("tools=%d", len(names))
 		// The transport goroutine and cleanup keep the server alive through GC.
 	}
@@ -98,6 +99,7 @@ func daemonProxyMemoryOptions() ServeOptions {
 		}{},
 		Meetings:             struct{ MeetingBackend }{},
 		Calendar:             struct{ CalendarBackend }{},
+		CalendarOccurrences:  struct{ CalendarOccurrenceReader }{},
 		MessageTags:          struct{ MessageTagBackend }{},
 		ArchiveSQLQuerier:    struct{ ArchiveSQLQuerier }{},
 		IdentityReview:       struct{ IdentityReviewBackend }{},
