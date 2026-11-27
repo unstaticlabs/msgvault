@@ -593,7 +593,9 @@ where you edit, pass the intended HTML in `--body-html` along with `--body`.
 For example, a rich footer may use a link label where plain text shows a URL.
 
 When another mail client saves first, read the adopted revision with
-`draft-get` and repeat the intended edit using that revision.
+`draft-get` and repeat the intended edit using that revision. If the client
+left the plain-text part blank, MsgVault reads the formatted body and lets you
+edit its wording with `--body`.
 
 `draft-get` reads retained archive content, including discarded drafts, without
 connecting to a provider or requiring the source's draft mutation grant. For

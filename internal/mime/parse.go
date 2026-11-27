@@ -844,13 +844,10 @@ func StripHTML(rawHTML string) string {
 // GetBodyText returns the best available body text.
 // Prefers plain text, falls back to stripped HTML.
 func (m *Message) GetBodyText() string {
-	if m.BodyText != "" {
-		return m.BodyText
-	}
-	if m.BodyHTML != "" {
+	if m.BodyHTML != "" && strings.TrimSpace(m.BodyText) == "" {
 		return StripHTML(m.BodyHTML)
 	}
-	return ""
+	return m.BodyText
 }
 
 // GetFirstFrom returns the first From address, or empty if none.
