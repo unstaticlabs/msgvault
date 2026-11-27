@@ -81,11 +81,17 @@ By default only administrators stage deletions and archive messages from the
 inbox, and administrators see every source. To let each person, or an
 assistant key bound to them, manage only their own mail, make everyone a
 member and set [`[auth] member_source_writes`](/docs/configuration/#auth) on the
-daemon and the MCP sidecar. A member can then stage and cancel deletions and
-archive from the inbox in the sources bound to them, and in no other source.
-A key bound to that member can act on the same sources. Removing a source
-from the member also removes it from their assistant’s view. A prepared batch
-can be canceled until execution. An administrator runs `msgvault delete-staged`.
+daemon and the MCP sidecar.
+
+In the Web UI, a member can select messages from their sources, choose
+**Review deletion…**, and stage the batch. They can cancel it in **Staged
+deletions** until an administrator runs `msgvault delete-staged`. Staging a
+batch keeps its messages in both the mailbox and the archive.
+
+With remote inbox archiving enabled, the MCP tool `archive_from_inbox` can
+remove selected messages from the inbox while keeping them in the mailbox.
+An assistant key bound to a member can act on the same sources as that member.
+Removing a source from the member also removes it from their assistant’s view.
 
 ## Binding sources to users
 

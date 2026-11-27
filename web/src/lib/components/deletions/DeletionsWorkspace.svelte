@@ -149,6 +149,7 @@
   {/if}
 
   <footer class="end">
+    <span class="muted">Administrator command to delete staged messages from the mailbox</span>
     <CommandLine command={DELETE_COMMAND} />
   </footer>
 </main>
@@ -286,6 +287,9 @@
     outline-offset: 2px;
   }
   .end {
+    display: grid;
+    justify-items: start;
+    gap: var(--label-gap);
     margin-top: auto;
     padding-top: var(--section-gap);
   }
