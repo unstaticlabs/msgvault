@@ -145,7 +145,7 @@ func (c *ActionController) SaveManifest(manifest *deletion.Manifest) error {
 		}
 		c.deletions = mgr
 	}
-	return c.deletions.SaveManifest(manifest)
+	return c.deletions.StageManifest(manifest)
 }
 
 // StageForDeletion prepares messages for deletion based on selection.

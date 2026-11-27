@@ -83,7 +83,9 @@ assistant key bound to them, manage only their own mail, make everyone a
 member and set [`[auth] member_source_writes`](/docs/configuration/#auth) on the
 daemon and the MCP sidecar. A member can then stage and cancel deletions and
 archive from the inbox in the sources bound to them, and in no other source.
-An administrator still runs `msgvault delete-staged`.
+A key bound to that member can act on the same sources. Removing a source
+from the member also removes it from their assistant’s view. A prepared batch
+can be canceled until execution. An administrator runs `msgvault delete-staged`.
 
 ## Binding sources to users
 

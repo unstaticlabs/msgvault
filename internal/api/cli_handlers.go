@@ -1652,6 +1652,10 @@ func (s *Server) handleCLICreateDeletionManifest(w http.ResponseWriter, r *http.
 		}
 	}
 	if err := saver.SaveCLIDeletionManifest(r.Context(), &manifest); err != nil {
+		if errors.Is(err, deletion.ErrManifestExists) {
+			writeError(w, http.StatusConflict, "batch_id_in_use", "Choose a new batch ID for this deletion plan")
+			return
+		}
 		s.logger.Error("failed to save CLI deletion manifest", "id", manifest.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "save_deletion_manifest_failed", "Failed to save deletion manifest")
 		return
@@ -1713,6 +1717,9 @@ func validateCLIDeletionManifest(manifest *deletion.Manifest) *apiHTTPError {
 	}
 	if manifest.Status == "" {
 		manifest.Status = deletion.StatusPending
+	}
+	if manifest.Execution != nil {
+		return newAPIHTTPError(http.StatusBadRequest, "invalid_manifest", "A staged batch cannot include execution history")
 	}
 	if manifest.Status != deletion.StatusPending {
 		return newAPIHTTPError(http.StatusBadRequest, "invalid_manifest_status", "Deletion manifest status must be pending")

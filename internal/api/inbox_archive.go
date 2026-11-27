@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"go.kenn.io/msgvault/internal/authz"
 )
 
 // inboxArchiveTokenTTL bounds how long a confirmation token stays redeemable.
@@ -183,19 +185,25 @@ func (g *inboxArchiveGrants) issue(grant inboxArchiveGrant) (string, error) {
 	return token, nil
 }
 
-// claim spends a token, so a plan cannot be confirmed twice.
-func (g *inboxArchiveGrants) claim(token string, now time.Time) (inboxArchiveGrant, bool) {
+var (
+	errInboxArchiveTokenInvalid = errors.New("unknown or expired archive plan")
+	errInboxArchiveSourceHidden = errors.New("archive source is outside the caller's scope")
+)
+
+// claim consumes the plan once for a caller who can act on its source.
+func (g *inboxArchiveGrants) claim(token string, now time.Time, principal authz.Principal) (inboxArchiveGrant, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	grant, ok := g.grants[token]
-	if !ok {
-		return inboxArchiveGrant{}, false
+	if !ok || now.After(grant.ExpiresAt) {
+		delete(g.grants, token)
+		return inboxArchiveGrant{}, errInboxArchiveTokenInvalid
+	}
+	if !principal.Sees(grant.SourceID) {
+		return inboxArchiveGrant{}, errInboxArchiveSourceHidden
 	}
 	delete(g.grants, token)
-	if now.After(grant.ExpiresAt) {
-		return inboxArchiveGrant{}, false
-	}
-	return grant, true
+	return grant, nil
 }
 
 // inboxArchiveSelectionHash binds a token to one exact set of messages. The
@@ -292,18 +300,14 @@ func (s *Server) handleInboxArchiveExecute(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Claiming spends the token whatever happens next, so a plan cannot be
-	// confirmed twice even if the selection turns out not to match.
-	grant, ok := s.inboxArchiveGrants.claim(req.ConfirmationToken, time.Now().UTC())
-	if !ok {
-		writeInboxArchiveTokenInvalid(w,
-			"the confirmation token is unknown, expired, or already used")
+	grant, err := s.inboxArchiveGrants.claim(req.ConfirmationToken, time.Now().UTC(), s.requestPrincipal(r))
+	if errors.Is(err, errInboxArchiveSourceHidden) {
+		writeSourceNotVisible(w)
 		return
 	}
-	// The token was minted for a source; a caller who cannot see it may not
-	// spend it, whoever minted it.
-	if !s.requestPrincipal(r).Sees(grant.SourceID) {
-		writeSourceNotVisible(w)
+	if err != nil {
+		writeInboxArchiveTokenInvalid(w,
+			"the confirmation token is unknown, expired, or already used")
 		return
 	}
 	// No ids means "archive the plan this token names". The set was fixed when

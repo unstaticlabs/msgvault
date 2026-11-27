@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"testing"
@@ -188,6 +189,68 @@ func TestArchiveExactIDsThroughMCPAndDaemon(t *testing.T) {
 	assert.Contains(task5SDKResultText(scopedResult), "unavailable")
 	assert.Len(provider.calls, 2)
 	assert.True(provider.inbox["leave-alone"])
+}
+
+// Each member has one real source binding and a named assistant key. The
+// native HTTP endpoint resolves those bindings again on its nested daemon calls.
+func TestMemberArchiveAcrossNativeMCPAndDaemon(t *testing.T) {
+	req, check := require.New(t), assert.New(t)
+	st := testutil.NewTestStore(t)
+	cfg := &config.Config{
+		Server:       config.ServerConfig{APIKey: "fixture-owner"},
+		Auth:         config.AuthConfig{MemberSourceWrites: true},
+		InboxArchive: config.InboxArchiveConfig{RemoteEnabled: true},
+	}
+	names := []string{"first", "second"}
+	var messageIDs []int64
+	provider := &exactArchiveProvider{inbox: make(map[string]bool)}
+	for _, name := range names {
+		email := name + "@example.test"
+		source, err := st.GetOrCreateSource("gmail", email)
+		req.NoError(err)
+		user, err := st.RecordUserLogin(t.Context(), store.UserLogin{Issuer: "https://idp.example.test", Subject: name, Email: email, Role: "member"})
+		req.NoError(err)
+		req.NoError(st.SetUserSources(t.Context(), user.ID, []int64{source.ID}))
+		cfg.Auth.APIKeys = append(cfg.Auth.APIKeys, config.APIKeyConfig{Name: name, Key: "fixture-" + name, Role: "member", User: email})
+		thread, err := st.EnsureConversation(source.ID, name, "Synthetic inbox")
+		req.NoError(err)
+		id, err := st.UpsertMessage(&store.Message{SourceID: source.ID, ConversationID: thread, SourceMessageID: name, MessageType: "email"})
+		req.NoError(err)
+		inbox, err := st.EnsureLabel(source.ID, "INBOX", "INBOX", "system")
+		req.NoError(err)
+		req.NoError(st.AddMessageLabels(id, []int64{inbox}))
+		provider.inbox[name] = true
+		messageIDs = append(messageIDs, id)
+	}
+	daemon := api.NewServerWithOptions(api.ServerOptions{
+		Config: cfg, Store: st, UserStore: st, Engine: query.NewEngine(st.DB(), st.IsPostgreSQL()),
+		OperationGate: api.NewSerialOperationGate(), InboxArchive: exactArchiveRunner{st, provider}, Logger: slog.New(slog.DiscardHandler),
+	})
+	t.Cleanup(func() { req.NoError(daemon.Shutdown(context.Background())) })
+	client, err := daemonclient.New(daemonclient.Config{URL: "http://msgvault.internal", APIKey: cfg.Server.APIKey, AllowInsecure: true, HTTPClient: &http.Client{Transport: principalAPIRoundTripper{daemon.Router()}}})
+	req.NoError(err)
+	t.Cleanup(func() { check.NoError(client.Close()) })
+	opts := ServeOptions{Engine: daemonclient.NewEngineAdapter(client), MemberSourceWrites: true, AllowMailboxWrites: true, InboxArchiver: exactArchiveBridge{client}}
+	read, closeRead := NewHTTPHandler(opts, HTTPOptions{})
+	write, closeWrite := NewHTTPHandler(opts, HTTPOptions{AllowWrites: true})
+	req.NoError(daemon.InstallMCPHandlers(read, write, func() { closeRead(); closeWrite() }))
+
+	for i, name := range names {
+		response, status := rawAuthorizedCallAt(t, daemon.Router(), "/mcp/writes", "Bearer fixture-"+name, "tools/call", map[string]any{
+			"name": ToolArchiveFromInbox, "arguments": map[string]any{"message_ids": []int64{messageIDs[i]}, "confirm": true},
+		})
+		req.Equal(http.StatusOK, status)
+		req.Empty(response.Error)
+		isError, message := toolResultText(t, response.Result)
+		req.False(isError, message)
+		check.False(provider.inbox[name])
+		check.Empty(exactArchiveLabels(t, st, messageIDs[i]))
+		if i == 0 {
+			check.True(provider.inbox[names[1]])
+			check.Equal([]string{"INBOX"}, exactArchiveLabels(t, st, messageIDs[1]))
+		}
+	}
+	check.Equal([][]string{{"first"}, {"second"}}, provider.calls)
 }
 
 func exactArchiveLabels(t *testing.T, st *store.Store, id int64) []string {

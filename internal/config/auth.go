@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"go.kenn.io/msgvault/internal/authz"
@@ -146,7 +147,11 @@ func (c *Config) applyAuthEnvOverrides(lookupEnv func(string) string) error {
 		c.InboxArchive.RemoteEnabled = !strings.EqualFold(value, "false") && value != "0"
 	}
 	if value := strings.TrimSpace(lookupEnv("MSGVAULT_AUTH_MEMBER_SOURCE_WRITES")); value != "" {
-		c.Auth.MemberSourceWrites = !strings.EqualFold(value, "false") && value != "0"
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return errors.New("MSGVAULT_AUTH_MEMBER_SOURCE_WRITES must be true or false")
+		}
+		c.Auth.MemberSourceWrites = enabled
 	}
 	return nil
 }

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/authz"
 	"go.kenn.io/msgvault/internal/config"
 	"go.kenn.io/msgvault/internal/deletion"
 	"go.kenn.io/msgvault/internal/query"
@@ -61,6 +63,11 @@ func newMemberWriteUsers(t *testing.T) memberWriteUsers {
 	})
 	require.NoError(err)
 	require.NoError(users.SetUserSources(t.Context(), alice.ID, []int64{own.ID}))
+	bob, err := users.RecordUserLogin(t.Context(), store.UserLogin{
+		Issuer: "https://idp.example", Subject: "bob", Email: other.Identifier, DisplayName: "Bob", Role: "member",
+	})
+	require.NoError(err)
+	require.NoError(users.SetUserSources(t.Context(), bob.ID, []int64{other.ID}))
 	return memberWriteUsers{users: users, own: own, other: other}
 }
 
@@ -73,6 +80,7 @@ func memberWriteConfig(enabled bool) *config.Config {
 			APIKeys: []config.APIKeyConfig{
 				{Name: "assistant", Key: "assistant-secret-value", Role: "member", User: "alice@example.com"},
 				{Name: "reader", Key: "reader-secret-value", Role: "viewer", User: "alice@example.com"},
+				{Name: "bob-assistant", Key: "bob-fixture-key", Role: "member", User: "bob@example.com"},
 			},
 		},
 	}
@@ -154,6 +162,53 @@ func TestMemberSourceWritesStageOnlyOwnSources(t *testing.T) {
 	assert.Equal(http.StatusCreated, stage("admin-secret-value", `{"message_ids":[22]}`), "administrators keep every source")
 	require.Len(st.saved, 3)
 	assert.Equal(u.other.ID, st.saved[2].Source.ID)
+}
+
+func TestMemberSessionAndBoundAssistantStageTheSameSources(t *testing.T) {
+	users := newMemberWriteUsers(t)
+	for _, tc := range []struct {
+		name, assistant, body string
+		source                *store.Source
+		want                  string
+	}{
+		{"alice", "assistant-secret-value", `{"message_ids":[11,22]}`, users.own, "gm-own"},
+		{"bob", "bob-fixture-key", `{"message_ids":[11,22]}`, users.other, "gm-other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, check := require.New(t), assert.New(t)
+			st := &memberWriteStore{}
+			srv := users.deletionServer(t, true, st)
+			id, session, err := srv.sessions.create(authz.Principal{
+				Kind: authz.PrincipalUser, Name: tc.name, Email: tc.source.Identifier, Role: authz.RoleMember,
+				IdentityIssuer: "https://idp.example", IdentitySubject: tc.name,
+			})
+			req.NoError(err)
+			human := make(http.Header)
+			human.Set("Cookie", sessionCookieName+"="+id)
+			human.Set("Origin", "http://example.com")
+			human.Set(csrfHeaderName, session.CSRFToken)
+			for _, headers := range []http.Header{human, withKey(tc.assistant)} {
+				rec := performSessionRequest(t, srv, http.MethodPost, "/api/v1/deletions", []byte(tc.body), headers, false)
+				req.Equal(http.StatusCreated, rec.Code, rec.Body.String())
+			}
+			req.Len(st.saved, 2)
+			for _, staged := range st.saved {
+				req.NotNil(staged.Source)
+				check.Equal(tc.source.ID, staged.Source.ID)
+				check.Equal([]string{tc.want}, staged.GmailIDs)
+			}
+			user, err := users.users.GetUserByEmail(t.Context(), tc.source.Identifier)
+			req.NoError(err)
+			revoked := performSessionRequest(t, srv, http.MethodPut, "/api/v1/users/"+strconv.FormatInt(user.ID, 10)+"/sources",
+				[]byte(`{"source_ids":[]}`), withKey("admin-secret-value"), false)
+			req.Equal(http.StatusOK, revoked.Code, revoked.Body.String())
+			for _, headers := range []http.Header{human, withKey(tc.assistant)} {
+				rec := performSessionRequest(t, srv, http.MethodPost, "/api/v1/deletions", []byte(tc.body), headers, false)
+				check.NotEqual(http.StatusCreated, rec.Code)
+			}
+			check.Len(st.saved, 2)
+		})
+	}
 }
 
 func TestMemberSourceWritesConfineClientBuiltManifests(t *testing.T) {
@@ -316,6 +371,9 @@ func TestMemberSourceWritesConfineInboxArchive(t *testing.T) {
 		assert.Equal(http.StatusNotFound, execute(t, srv, "assistant-secret-value", token),
 			"a member cannot spend a token minted for another user's source")
 		assert.Empty(runner.calls)
+		require.Equal(http.StatusOK, execute(t, srv, "bob-fixture-key", token))
+		require.Len(runner.calls, 1)
+		assert.Equal(u.other.ID, runner.calls[0].SourceID)
 	})
 
 	t.Run("viewer", func(t *testing.T) {

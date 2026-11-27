@@ -27,10 +27,15 @@ import (
 // the given Authorization header and returns the decoded response.
 func rawAuthorizedCall(t *testing.T, handler http.Handler, authorization, method string, params map[string]any) (rawRPCResponse, int) {
 	t.Helper()
+	return rawAuthorizedCallAt(t, handler, "/mcp", authorization, method, params)
+}
+
+func rawAuthorizedCallAt(t *testing.T, handler http.Handler, path string, authorization, method string, params map[string]any) (rawRPCResponse, int) {
+	t.Helper()
 	params["_meta"] = modernRequestMeta()
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Mcp-Protocol-Version", modernProtocolVersion)

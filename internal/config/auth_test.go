@@ -295,4 +295,8 @@ func TestMemberSourceWritesEnvOverride(t *testing.T) {
 	cfg, err = loadAuthConfig(t, "[auth]\nmember_source_writes = true\n")
 	require.NoError(err)
 	assert.False(cfg.Auth.MemberSourceWrites, "the environment replaces the file's value")
+
+	t.Setenv("MSGVAULT_AUTH_MEMBER_SOURCE_WRITES", "invalid")
+	_, err = loadAuthConfig(t, "[auth]\nmember_source_writes = false\n")
+	require.ErrorContains(err, "MSGVAULT_AUTH_MEMBER_SOURCE_WRITES")
 }
