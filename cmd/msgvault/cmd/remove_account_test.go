@@ -950,11 +950,12 @@ func TestRemoveNonMatrixAccountDoesNotWaitForMatrixLifecycleLock(t *testing.T) {
 			return errors.New("unrelated account removal waited for Matrix lifecycle lock")
 		}
 	})
+	var removeErr error
 	if removeDone != nil {
 		// Join before TempDir cleanup even when the lock assertion fails.
-		assert.NoError(t, <-removeDone)
+		removeErr = <-removeDone
 	}
-	require.NoError(lockErr)
+	require.NoError(errors.Join(lockErr, removeErr))
 }
 
 func TestRemoveAccountCmd_LiveSQLWhileRemovalPausedAfterCascade(t *testing.T) {
